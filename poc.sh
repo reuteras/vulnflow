@@ -185,6 +185,35 @@ opencve_pin_celery() {
   log "OpenCVE: pinned $OPENCVE_CELERY_PINS in the scheduler image (opencve/opencve#810)"
 }
 
+# Upstream defaults that are the same in every OpenCVE install. Values in docker/.env win
+# over airflow.cfg (AIRFLOW__SECTION__KEY). Safe on an existing install: the only Fernet-
+# encrypted data are the two Airflow connections, which install.sh init-docker-stack
+# deletes and recreates on every run, and a new webserver key only ends UI sessions.
+OPENCVE_DEFAULT_FERNET="ywvTuNQw6bW-UlEyS0ykTqiz9on1cyMlHT7e1Ddo060="
+opencve_harden_airflow() { # docker/.env
+  local denv="$1" v
+  v="$(sed -n "s/^AIRFLOW__CORE__FERNET_KEY=//p" "$denv" | tr -d "'\"")"
+  if [[ -z "$v" || "$v" == "$OPENCVE_DEFAULT_FERNET" ]]; then
+    # Fernet key: 32 random bytes, url-safe base64
+    set_kv "$denv" AIRFLOW__CORE__FERNET_KEY "$(openssl rand -base64 32 | tr '+/' '-_')"
+    log "OpenCVE: random Airflow Fernet key"
+  fi
+  if ! grep -qE '^AIRFLOW__WEBSERVER__SECRET_KEY=.+' "$denv"; then
+    set_kv "$denv" AIRFLOW__WEBSERVER__SECRET_KEY "$(openssl rand -hex 32)"
+    log "OpenCVE: random Airflow webserver secret_key (airflow.cfg ships a fixed one)"
+  fi
+  # Upstream publishes nginx (80) and the Airflow UI (8080) on all interfaces. The values
+  # only feed compose's "${PORT}:80" (and a log line in install.sh), so an IP prefix works.
+  local k
+  for k in OPENCVE_PORT AIRFLOW_WEBSERVER_PORT; do
+    v="$(sed -n "s/^$k=//p" "$denv")"
+    if [[ -n "$v" && "$v" != *:* ]]; then
+      set_kv "$denv" "$k" "127.0.0.1:$v"
+      log "OpenCVE: $k bound to 127.0.0.1:$v"
+    fi
+  done
+}
+
 cmd_opencve_prepare() {
   load_env
   mkdir -p "$UP"
@@ -216,6 +245,7 @@ cmd_opencve_prepare() {
     set_kv "$denv" _AIRFLOW_WWW_USER_PASSWORD "$(openssl rand -hex 16)"
     log "OpenCVE: random Airflow UI password (in $denv)"
   fi
+  opencve_harden_airflow "$denv"
   chmod 600 "$denv" "$wenv"
   cat <<EOF
 

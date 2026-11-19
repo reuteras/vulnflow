@@ -92,6 +92,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   (`opencve_pin_celery` in `poc.sh`; Celery 5.7 breaks Airflow 2.10.4, opencve/opencve#810).
   It restores the file before each checkout and skips itself once upstream's
   `requirements.txt` pins celery. Remove it when an `OPENCVE_REF` with the fix is adopted.
+- `opencve-prepare` also replaces upstream's shared Airflow Fernet key and webserver
+  `secret_key` and binds OpenCVE's ports to 127.0.0.1 (`opencve_harden_airflow`). All of it
+  is safe on an existing install; when bumping `OPENCVE_REF`, check the default Fernet key
+  and the `ports:` lines in upstream's `docker/conf/.env.example` and `docker-compose.yaml`.
 - Every bootstrap (`dt-bootstrap`, `dd-bootstrap`, `opencve-bootstrap`) is idempotent and
   only replaces a key/token when the one in `.env` no longer works.
 - Secrets never go on a command line: values go to `.env` through
