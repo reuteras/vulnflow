@@ -38,7 +38,8 @@ log = logging.getLogger(__name__)
 
 DT_DEFAULT_ADMIN = ("admin", "admin")
 DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO", "VIEW_VULNERABILITY")
-FORM = {"Content-Type": "application/x-www-form-urlencoded"}
+# DT's login/forceChangePassword are @Produces(TEXT_PLAIN): Accept: application/json -> 406
+FORM = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
 
 class BootstrapError(RuntimeError):

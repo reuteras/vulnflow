@@ -447,6 +447,13 @@ class FakeDT:
 
         if path == "api/version":
             return ok({"version": "5.2.1"})
+        if path in ("api/v1/user/login", "api/v1/user/forceChangePassword"):
+            # JAX-RS @Produces(TEXT_PLAIN): an Accept that excludes text/plain gets 406
+            accept = headers.get("Accept", "*/*")
+            if not any(
+                a.strip().split(";")[0] in ("text/plain", "text/*", "*/*") for a in accept.split(",")
+            ):
+                return Response(406, b"", {})
         if path == "api/v1/user/login":
             f = self.form(body)
             if f["password"] != self.password:
