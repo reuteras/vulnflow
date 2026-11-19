@@ -88,6 +88,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   last step is an interactive `createsuperuser`; it re-implements upstream's
   `verify-container-versions`. When bumping `OPENCVE_REF`, diff the `start)` case in
   upstream `docker/install.sh` and mirror any new steps.
+- `opencve-prepare` patches upstream's `scheduler/Dockerfile` to pin `celery`/`kombu`
+  (`opencve_pin_celery` in `poc.sh`; Celery 5.7 breaks Airflow 2.10.4, opencve/opencve#810).
+  It restores the file before each checkout and skips itself once upstream's
+  `requirements.txt` pins celery. Remove it when an `OPENCVE_REF` with the fix is adopted.
 - Every bootstrap (`dt-bootstrap`, `dd-bootstrap`, `opencve-bootstrap`) is idempotent and
   only replaces a key/token when the one in `.env` no longer works.
 - Secrets never go on a command line: values go to `.env` through
