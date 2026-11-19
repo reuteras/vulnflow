@@ -93,9 +93,11 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   It restores the file before each checkout and skips itself once upstream's
   `requirements.txt` pins celery. Remove it when an `OPENCVE_REF` with the fix is adopted.
 - `opencve-prepare` also replaces upstream's shared Airflow Fernet key and webserver
-  `secret_key` and binds OpenCVE's ports to 127.0.0.1 (`opencve_harden_airflow`). All of it
-  is safe on an existing install; when bumping `OPENCVE_REF`, check the default Fernet key
-  and the `ports:` lines in upstream's `docker/conf/.env.example` and `docker-compose.yaml`.
+  `secret_key` and binds OpenCVE's ports to 127.0.0.1 (`opencve_harden_airflow`). A key
+  change on an existing install needs `opencve_reset_airflow_connections` (SQL delete of the
+  two Airflow connections before `init-docker-stack`): `airflow connections delete` can't
+  decrypt them. When bumping `OPENCVE_REF`, check the default Fernet key, the `ports:` lines,
+  the connection names in `set-airflow-connections`, and that nothing else is encrypted.
 - Every bootstrap (`dt-bootstrap`, `dd-bootstrap`, `opencve-bootstrap`) is idempotent and
   only replaces a key/token when the one in `.env` no longer works.
 - Secrets never go on a command line: values go to `.env` through
