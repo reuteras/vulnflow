@@ -434,6 +434,14 @@ class FakeDT:
         self.teams: dict[str, dict] = {}
         self.keys: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
+        # DT 5.2.2 stores the factory default on startup; None = nothing stored (404)
+        self.osv: dict | None = {
+            "enabled": False,
+            "aliasSyncEnabled": False,
+            "incrementalMirroringEnabled": True,
+            "dataUrl": "https://storage.googleapis.com/osv-vulnerabilities",
+            "ecosystems": ["Go", "Maven", "npm", "NuGet", "PyPI"],
+        }
 
     def form(self, body):
         return {k: v[0] for k, v in self.parse_qs(body.decode()).items()}
@@ -490,6 +498,15 @@ class FakeDT:
             key = f"odt_{len(self.keys):08d}_secret"
             self.keys[key] = name
             return ok({"key": key, "publicId": key[4:12]}, 201)
+        if path == "api/v2/extension-points/vuln-data-source/extensions/osv/config":
+            if method == "GET":
+                return ok({"config": self.osv}) if self.osv is not None else Response(404, b"", {})
+            if method == "PUT":
+                cfg = json.loads(body)["config"]
+                if cfg == self.osv:
+                    return Response(304, b"", {})
+                self.osv = cfg
+                return Response(204, b"", {})
         return Response(404, b"", {})
 
 
@@ -501,12 +518,45 @@ def test_dt_bootstrap_fresh_install_then_idempotent():
     assert r1.changed_admin_password and r1.created_team and r1.api_key.startswith("odt_")
     assert dt.password == TEST_PW
     assert {p["name"] for p in dt.teams["vulnflow"]["permissions"]} == set(DT_TEAM_PERMISSIONS)
+    assert r1.osv.startswith("updated")
+    assert dt.osv is not None and dt.osv["enabled"] is True
+    assert dt.osv["ecosystems"] == ["Go", "Maven", "npm", "NuGet", "PyPI", "Debian"]
+    assert dt.osv["dataUrl"] == "https://storage.googleapis.com/osv-vulnerabilities"
 
     r2 = bootstrap_dtrack(
         "http://dt:8180", admin_password=TEST_PW, existing_key=r1.api_key, transport=dt
     )
     assert not (r2.changed_admin_password or r2.created_team) and r2.api_key == ""
     assert len(dt.keys) == 1  # no new key minted when the old one still works
+    assert r2.osv == "unchanged"
+    assert ("PUT", "api/v2/extension-points/vuln-data-source/extensions/osv/config") not in (
+        dt.calls[dt.calls.index(("GET", "api/version"), 1) :]
+    )
+
+
+def test_dt_enable_osv_keeps_operator_choices_and_never_raises():
+    from vulnflow.bootstrap import dt_enable_osv
+    from vulnflow.net import Http
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    http = Http("http://dt", headers={"Authorization": "Bearer jwt-token"}, transport=dt)
+    dt.osv = {"enabled": True, "ecosystems": ["Debian", "Alpine"], "dataUrl": "https://mirror/osv"}
+    assert dt_enable_osv(http, ["Debian", "PyPI"]).startswith("updated")
+    assert dt.osv == {
+        "enabled": True,
+        "ecosystems": ["Debian", "Alpine", "PyPI"],  # added, nothing removed
+        "dataUrl": "https://mirror/osv",  # operator's mirror kept
+    }
+    assert dt_enable_osv(http, []) == "skipped"
+    dt.osv = None  # nothing stored yet: start from DT's defaults
+    assert dt_enable_osv(http, ["Debian"]).startswith("updated")
+    assert dt.osv is not None and dt.osv["ecosystems"][-1] == "Debian"
+
+    def broken(method, url, headers, body, timeout):
+        return Response(403, b"forbidden", {})
+
+    denied = Http("http://dt", transport=broken, retries=0)
+    assert dt_enable_osv(denied, ["Debian"]).startswith("failed: GET OSV config HTTP 403")
 
 
 def test_dt_bootstrap_replaces_dead_key_and_reports_wrong_password():
