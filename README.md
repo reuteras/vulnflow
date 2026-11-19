@@ -39,6 +39,17 @@ prints the three logins (passwords are in `.env`). The first run takes about an 
 OpenCVE's image build and CVE import. Every step is idempotent, so if something fails, fix
 it and run `./poc.sh setup` again; it picks up where it stopped.
 
+Stopping and starting later (data is kept in Docker volumes):
+
+```bash
+./poc.sh down    # stop all stacks
+./poc.sh up      # start them again, e.g. after a reboot; no rebuild, no bootstrap
+./poc.sh status  # containers and health endpoints
+```
+
+`up` uses the images and configuration from the last `setup`; after changing versions
+(`DD_REF`, `OPENCVE_REF`, image tags) run `./poc.sh setup` instead.
+
 The individual steps, if you want to run or rerun one:
 
 ```bash
