@@ -69,6 +69,48 @@ cmd_init() {
   log ".env ready (mode 600)"
 }
 
+# GNU stat (Linux) vs BSD stat (macOS)
+if stat -c %u / >/dev/null 2>&1; then
+  file_uid() { stat -c %u "$1"; }
+  file_mode() { stat -c %a "$1"; }
+  fs_type() { stat -f -c %T "$1"; }
+else
+  file_uid() { stat -f %u "$1"; }
+  file_mode() { stat -f %Lp "$1"; }
+  fs_type() { mount | awk -v m="$(df "$1" | awk 'NR==2 {print $NF}')" \
+    '$3 == m {gsub(/[(,]/, "", $4); print $4}'; }
+fi
+
+# A checkout on a VM shared folder (virtiofs/9p/vboxsf/NFS) can map ownership and modes in
+# ways that break the stacks: git refuses foreign-owned clones, chmod 600 may not stick, and
+# containers bind-mount config files from upstream/ (OpenCVE's web .env, airflow.cfg).
+check_filesystem() {
+  local fs probe mode uid
+  fs="$(fs_type "$ROOT" 2>/dev/null || true)"
+  uid="$(file_uid "$ROOT")"
+  probe="$(mktemp "$ROOT/.vulnflow-fscheck.XXXXXX")" || die "cannot create files in $ROOT"
+  chmod 600 "$probe" 2>/dev/null || true
+  mode="$(file_mode "$probe")"
+  rm -f "$probe"
+  local shared=0
+  case "$fs" in
+    virtiofs | v9fs | 9p | fuse* | vboxsf | nfs* | smb* | cifs | prl_fs) shared=1 ;;
+  esac
+  [[ "$uid" == "$(id -u)" ]] || shared=1
+  if [[ "$mode" != "600" ]]; then
+    warn "chmod 600 doesn't stick on $ROOT (filesystem: ${fs:-?}, got mode $mode):"
+    warn "  .env and OpenCVE's config files would be readable by others. Use a local disk."
+  fi
+  if ((shared)); then
+    warn "$ROOT looks like a shared/mounted folder (filesystem: ${fs:-?}, owner uid $uid," \
+      "you are $(id -u)). git is handled, but containers bind-mount files from upstream/;"
+    warn "  if a container can't read them (permission denied in its logs), run from a clone" \
+      "on the VM's local disk instead."
+  else
+    echo "  filesystem ${fs:-?}: local, owned by you"
+  fi
+}
+
 port_free() { ! (ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null) | awk '{print $4}' | grep -qE "[:.]$1\$"; }
 
 cmd_check() {
@@ -81,6 +123,7 @@ cmd_check() {
     || die "python3 >= 3.11 needed on the host (vulnflow uses tomllib)"
   log "docker: $(docker --version)"
   log "compose: $(docker compose version --short)"
+  check_filesystem
   load_env
   local p
   for p in 80 8080 "${DT_API_PORT:-8180}" "${DT_UI_PORT:-8181}" "${DD_PORT:-8280}" 8443 \
@@ -94,14 +137,17 @@ cmd_check() {
 
 clone_or_update() { # url dir ref
   local url="$1" dir="$2" ref="${3:-}"
+  # safe.directory for just these calls: on a shared/mounted folder the clone can be owned
+  # by another uid, and git refuses it ("dubious ownership"). No global git config change.
+  local g=(git -c "safe.directory=$dir" -C "$dir")
   if [[ ! -d "$dir/.git" ]]; then
     git clone --quiet "$url" "$dir"
   fi
   if [[ -n "$ref" ]]; then
-    git -C "$dir" fetch --quiet --tags origin
-    git -C "$dir" checkout --quiet "$ref"
+    "${g[@]}" fetch --quiet --tags origin
+    "${g[@]}" checkout --quiet "$ref"
   fi
-  log "$(basename "$dir") at $(git -C "$dir" describe --tags --always 2>/dev/null)"
+  log "$(basename "$dir") at $("${g[@]}" describe --tags --always 2>/dev/null)"
 }
 
 # Set KEY=value in a dotenv-style file (replace or append). Values must be sed-safe
