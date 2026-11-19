@@ -87,8 +87,7 @@ def load_inventory(path: str | Path) -> Inventory:
             products={v: sorted(set(ps)) for v, ps in (oc.get("products") or {}).items()},
         )
     pr = data.get("priority") or {}
-    rules = PriorityRules(**{k: v for k, v in pr.items()
-                             if k in PriorityRules.__dataclass_fields__})
+    rules = PriorityRules(**{k: v for k, v in pr.items() if k in PriorityRules.__dataclass_fields__})
     if not teams:
         raise SystemExit(f"No [teams.*] defined in {path}")
     return Inventory(teams=teams, rules=rules)

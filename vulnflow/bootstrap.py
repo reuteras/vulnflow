@@ -1,6 +1,6 @@
 """First-run automation for the upstream tools (no clicking through UIs).
 
-Dependency-Track (verified against the v1 API of DT 5.2.1, which v5 still uses for
+Dependency-Track (verified against the v1 API of DT 5.x (5.2.1 docs, main source), which v5 uses for
 login and access management):
   POST /api/v1/user/forceChangePassword   form: username,password,newPassword,confirmPassword
   POST /api/v1/user/login                 form: username,password -> JWT (text/plain)
@@ -9,6 +9,16 @@ login and access management):
   POST /api/v1/permission/{perm}/team/{uuid}  -> 200, or 304 if already granted
   PUT  /api/v1/team/{uuid}/key            -> 201 {"key": "odt_...", ...}  (plaintext only now)
   GET  /api/v1/team/self                  with X-Api-Key -> the key's team
+
+DefectDojo (checked against 3.5.201): the initializer creates the admin with DD_ADMIN_PASSWORD
+(passed in by stacks/defectdojo/override.yml) and
+  POST /api/v2/api-token-auth/   {"username","password"} -> {"token": ...}
+returns that user's (stable) API v2 token. It is enabled by default
+(DD_API_TOKEN_AUTH_ENDPOINT_ENABLED).
+
+OpenCVE (checked against v3.1.0): organizations and org tokens have no API, so
+stacks/opencve/bootstrap_org.py runs inside the webserver container via manage.py shell.
+Projects, subscriptions and webhook notifications then go through API v2.
 """
 
 from __future__ import annotations
@@ -27,8 +37,7 @@ from .net import Http, Transport
 log = logging.getLogger(__name__)
 
 DT_DEFAULT_ADMIN = ("admin", "admin")
-DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO",
-                       "VIEW_VULNERABILITY")
+DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO", "VIEW_VULNERABILITY")
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 
 
@@ -38,7 +47,7 @@ class BootstrapError(RuntimeError):
 
 @dataclass
 class DTBootstrapResult:
-    api_key: str            # "" when the existing key was kept
+    api_key: str  # "" when the existing key was kept
     team_uuid: str
     created_team: bool
     changed_admin_password: bool
@@ -67,8 +76,9 @@ def _form(**fields: str) -> bytes:
 
 def _dt_login(http: Http, user: str, password: str) -> tuple[str | None, str]:
     """Return (token, failure_cause)."""
-    r = http.post("api/v1/user/login", body=_form(username=user, password=password),
-                  headers=FORM, expect_ok=False)
+    r = http.post(
+        "api/v1/user/login", body=_form(username=user, password=password), headers=FORM, expect_ok=False
+    )
     text = r.body.decode("utf-8", "replace").strip()
     return (text, "") if r.ok and text else (None, text or f"HTTP {r.status}")
 
@@ -76,14 +86,24 @@ def _dt_login(http: Http, user: str, password: str) -> tuple[str | None, str]:
 def dt_key_works(base_url: str, api_key: str, transport: Transport | None = None) -> bool:
     if not api_key:
         return False
-    http = Http(base_url, headers={"X-Api-Key": api_key, "Accept": "application/json"},
-                transport=transport, retries=0)
+    http = Http(
+        base_url,
+        headers={"X-Api-Key": api_key, "Accept": "application/json"},
+        transport=transport,
+        retries=0,
+    )
     return http.get("api/v1/team/self", expect_ok=False).ok
 
 
-def bootstrap_dtrack(base_url: str, *, admin_password: str, team_name: str = "vulnflow",
-                     existing_key: str = "", transport: Transport | None = None,
-                     wait_timeout: float = 600.0) -> DTBootstrapResult:
+def bootstrap_dtrack(
+    base_url: str,
+    *,
+    admin_password: str,
+    team_name: str = "vulnflow",
+    existing_key: str = "",
+    transport: Transport | None = None,
+    wait_timeout: float = 600.0,
+) -> DTBootstrapResult:
     """Idempotently get Dependency-Track to: admin password set, team with the vulnflow
     permissions, and a working API key for it."""
     if not admin_password:
@@ -96,22 +116,33 @@ def bootstrap_dtrack(base_url: str, *, admin_password: str, team_name: str = "vu
     token, cause = _dt_login(anon, user, admin_password)
     if token is None:
         # Fresh install: admin/admin with FORCE_PASSWORD_CHANGE. Swap to ours.
-        r = anon.post("api/v1/user/forceChangePassword",
-                      body=_form(username=user, password=default_pw,
-                                 newPassword=admin_password, confirmPassword=admin_password),
-                      headers=FORM, expect_ok=False)
+        r = anon.post(
+            "api/v1/user/forceChangePassword",
+            body=_form(
+                username=user,
+                password=default_pw,
+                newPassword=admin_password,
+                confirmPassword=admin_password,
+            ),
+            headers=FORM,
+            expect_ok=False,
+        )
         if not r.ok:
             raise BootstrapError(
                 f"cannot log in as {user} (login: {cause}; forced change: HTTP {r.status} "
                 f"{r.body[:200].decode('utf-8', 'replace')}). If you changed the admin "
-                f"password in the UI, put it in .env as DT_ADMIN_PASSWORD.")
+                f"password in the UI, put it in .env as DT_ADMIN_PASSWORD."
+            )
         changed = True
         token, cause = _dt_login(anon, user, admin_password)
         if token is None:
             raise BootstrapError(f"login failed after password change: {cause}")
 
-    http = Http(base_url, headers={"Authorization": f"Bearer {token}",
-                                   "Accept": "application/json"}, transport=transport)
+    http = Http(
+        base_url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        transport=transport,
+    )
 
     team = _find_team(http, team_name)
     created = team is None
@@ -147,6 +178,60 @@ def _find_team(http: Http, name: str) -> dict[str, Any] | None:
         if len(items) < 100:
             return None
         page += 1
+
+
+def dd_key_works(base_url: str, api_key: str, transport: Transport | None = None) -> bool:
+    if not api_key:
+        return False
+    http = Http(
+        f"{base_url.rstrip('/')}/api/v2",
+        headers={"Authorization": f"Token {api_key}", "Accept": "application/json"},
+        transport=transport,
+        retries=0,
+    )
+    return http.get("product_types/?limit=1", expect_ok=False).ok
+
+
+def bootstrap_defectdojo(
+    base_url: str,
+    *,
+    admin_user: str,
+    admin_password: str,
+    existing_key: str = "",
+    transport: Transport | None = None,
+    wait_timeout: float = 900.0,
+    interval: float = 10.0,
+) -> str:
+    """Return a working API v2 key ("" if existing_key already works).
+
+    Retries the token call until wait_timeout: the web UI answers well before the
+    initializer has created the admin user."""
+    http = Http(
+        f"{base_url.rstrip('/')}/api/v2", headers={"Accept": "application/json"}, transport=transport
+    )
+    wait_for(http, f"{base_url.rstrip('/')}/login", wait_timeout, interval)
+    if dd_key_works(base_url, existing_key, transport):
+        return ""
+    deadline = time.monotonic() + wait_timeout
+    while True:
+        r = http.post(
+            "api-token-auth/",
+            expect_ok=False,
+            json_body={"username": admin_user, "password": admin_password},
+        )
+        token = (r.json() or {}).get("token", "") if r.ok else ""
+        if token:
+            if not dd_key_works(base_url, token, transport):
+                raise BootstrapError("DefectDojo token did not validate")
+            return str(token)
+        if time.monotonic() >= deadline:
+            raise BootstrapError(
+                f"DefectDojo token auth for {admin_user!r} failed (HTTP {r.status}: "
+                f"{r.body[:200].decode('utf-8', 'replace')}). If the admin was created "
+                f"before DD_ADMIN_PASSWORD was set, put the real password in .env."
+            )
+        log.info("DefectDojo admin not ready yet (HTTP %s), retrying", r.status)
+        time.sleep(interval)
 
 
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")

@@ -3,11 +3,12 @@
 #   - ports moved to 8180 (API) / 8181 (UI) so they don't clash with OpenCVE's Airflow (8080)
 #   - credentials taken from ../../.env instead of hard-coded
 #   - everything bound to 127.0.0.1 (put a TLS reverse proxy in front for team access)
+#   - image tags written out (no ${VAR} defaults) so Dependabot can update them
 name: vulnflow-dtrack
 
 services:
   apiserver:
-    image: ghcr.io/dependencytrack/apiserver:${DT_VERSION:-5.2.1}
+    image: ghcr.io/dependencytrack/apiserver:5.2.2
     depends_on:
       postgres:
         condition: service_healthy
@@ -26,7 +27,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/dependencytrack/frontend:${DT_VERSION:-5.2.1}
+    image: ghcr.io/dependencytrack/frontend:5.2.2
     environment:
       # Browser-facing URL of the API server (the browser calls it directly)
       API_BASE_URL: "${DT_PUBLIC_API_URL:-http://localhost:8180}"

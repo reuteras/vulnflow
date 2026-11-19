@@ -26,9 +26,15 @@ class Report:
             print(f"  ERROR {line}")
 
 
-def sync_inventory(inv: Inventory, *, opencve: OpenCVE | None, dtrack: DependencyTrack | None,
-                   dojo: DefectDojo | None, create_projects: bool = False,
-                   dry_run: bool = False) -> Report:
+def sync_inventory(
+    inv: Inventory,
+    *,
+    opencve: OpenCVE | None,
+    dtrack: DependencyTrack | None,
+    dojo: DefectDojo | None,
+    create_projects: bool = False,
+    dry_run: bool = False,
+) -> Report:
     rep = Report()
     for team in inv.teams.values():
         n_products = sum(len(v) for v in team.products.values())
@@ -42,28 +48,35 @@ def sync_inventory(inv: Inventory, *, opencve: OpenCVE | None, dtrack: Dependenc
                     else:
                         rep.warnings.append(
                             f"OpenCVE: project '{team.opencve_project}' missing - create it in "
-                            f"the UI (or rerun with --create-projects)")
+                            f"the UI (or rerun with --create-projects)"
+                        )
                         continue
                 if dry_run:
-                    rep.done.append(f"[dry-run] OpenCVE '{team.opencve_project}': would set "
-                                    f"{len(team.vendors)} vendors, {n_products} products")
+                    rep.done.append(
+                        f"[dry-run] OpenCVE '{team.opencve_project}': would set "
+                        f"{len(team.vendors)} vendors, {n_products} products"
+                    )
                 else:
                     opencve.put_subscriptions(team.opencve_project, team.vendors, team.products)
-                    rep.done.append(f"OpenCVE '{team.opencve_project}': "
-                                    f"{len(team.vendors)} vendors, {n_products} products")
+                    rep.done.append(
+                        f"OpenCVE '{team.opencve_project}': "
+                        f"{len(team.vendors)} vendors, {n_products} products"
+                    )
             except Exception as e:
                 rep.errors.append(f"OpenCVE '{team.opencve_project}': {e}")
         # ---- DefectDojo: one product type per team
         if dojo:
             try:
                 if dry_run:
-                    rep.done.append(f"[dry-run] DefectDojo: would ensure product type "
-                                    f"'{team.defectdojo_product_type}'")
+                    rep.done.append(
+                        f"[dry-run] DefectDojo: would ensure product type "
+                        f"'{team.defectdojo_product_type}'"
+                    )
                 else:
-                    pt = dojo.ensure_product_type(team.defectdojo_product_type,
-                                                  team.display_name)
-                    rep.done.append(f"DefectDojo product type "
-                                    f"'{team.defectdojo_product_type}' (id {pt})")
+                    pt = dojo.ensure_product_type(team.defectdojo_product_type, team.display_name)
+                    rep.done.append(
+                        f"DefectDojo product type '{team.defectdojo_product_type}' (id {pt})"
+                    )
             except Exception as e:
                 rep.errors.append(f"DefectDojo '{team.defectdojo_product_type}': {e}")
         # ---- Dependency-Track: report coverage per team tag
@@ -71,18 +84,24 @@ def sync_inventory(inv: Inventory, *, opencve: OpenCVE | None, dtrack: Dependenc
             try:
                 projs = dtrack.projects_by_tag(team.dtrack_tag)
                 if projs:
-                    rep.done.append(f"Dependency-Track tag '{team.dtrack_tag}': "
-                                    f"{len(projs)} project(s)")
+                    rep.done.append(f"Dependency-Track tag '{team.dtrack_tag}': {len(projs)} project(s)")
                 else:
-                    rep.warnings.append(f"Dependency-Track: no projects tagged "
-                                        f"'{team.dtrack_tag}' yet - upload an SBOM")
+                    rep.warnings.append(
+                        f"Dependency-Track: no projects tagged '{team.dtrack_tag}' yet - upload an SBOM"
+                    )
             except Exception as e:
                 rep.errors.append(f"Dependency-Track tag '{team.dtrack_tag}': {e}")
     return rep
 
 
-def dt_to_dojo(inv: Inventory, dtrack: DependencyTrack, dojo: DefectDojo, *,
-               engagement: str = "Dependency-Track", dry_run: bool = False) -> Report:
+def dt_to_dojo(
+    inv: Inventory,
+    dtrack: DependencyTrack,
+    dojo: DefectDojo,
+    *,
+    engagement: str = "Dependency-Track",
+    dry_run: bool = False,
+) -> Report:
     """Copy findings per DT project into DefectDojo, routed to the owning team's product type.
 
     Re-import with close_old_findings means a component fixed in DT gets its finding
@@ -106,11 +125,15 @@ def dt_to_dojo(inv: Inventory, dtrack: DependencyTrack, dojo: DefectDojo, *,
             try:
                 fpf = dtrack.export_fpf(p.uuid)
                 res = dojo.reimport(
-                    scan_type=DefectDojo.FPF_SCAN_TYPE, report=fpf,
+                    scan_type=DefectDojo.FPF_SCAN_TYPE,
+                    report=fpf,
                     filename=f"{p.name}-{p.version or 'na'}.fpf.json",
-                    product_name=p.name, product_type=team.defectdojo_product_type,
-                    engagement=engagement, tags=[team.dtrack_tag, "source-dtrack"],
-                    test_title=f"Dependency-Track {p.version}".strip())
+                    product_name=p.name,
+                    product_type=team.defectdojo_product_type,
+                    engagement=engagement,
+                    tags=[team.dtrack_tag, "source-dtrack"],
+                    test_title=f"Dependency-Track {p.version}".strip(),
+                )
                 stats = res.get("statistics", {}).get("after", {}).get("total", {})
                 rep.done.append(f"{label} (active findings: {stats.get('active', '?')})")
             except Exception as e:

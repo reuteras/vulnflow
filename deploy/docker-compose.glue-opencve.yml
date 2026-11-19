@@ -1,0 +1,19 @@
+# Overlay for docker-compose.glue.yml, added by poc.sh when OpenCVE's network exists.
+# OpenCVE (upstream install.sh, compose project "opencve") posts webhooks to
+# http://vulnflow-receiver:${VULNFLOW_PORT}/opencve on its own network; its SSRF guard
+# only allows that because poc.sh opencve-bootstrap allowlists the network's subnet.
+services:
+  receiver:
+    networks:
+      default: {}
+      opencve:
+        aliases: [vulnflow-receiver]
+    environment:
+      # API calls (triage write-back) go straight to OpenCVE's Django container;
+      # OPENCVE_URL stays the browser-facing URL used in chat links.
+      OPENCVE_API_URL: "http://webserver:8000"
+
+networks:
+  opencve:
+    name: opencve_default
+    external: true

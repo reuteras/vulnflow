@@ -1,0 +1,10 @@
+# Overlay for upstream DefectDojo's docker-compose.yml (poc.sh dojo-up passes both).
+# Upstream's compose does not pass DD_ADMIN_PASSWORD to the initializer, so it would
+# generate a random one and only print it to the log. DD_SECRET_KEY,
+# DD_CREDENTIAL_AES_256_KEY, DJANGO_VERSION and NGINX_VERSION are read by upstream's
+# compose from the environment (poc.sh exports them from .env), replacing its
+# hard-coded keys and ":latest" images.
+services:
+  initializer:
+    environment:
+      DD_ADMIN_PASSWORD: "${DD_ADMIN_PASSWORD:?set DD_ADMIN_PASSWORD in .env (./poc.sh init)}"
