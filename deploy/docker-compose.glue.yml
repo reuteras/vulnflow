@@ -27,18 +27,15 @@ services:
     command: ["serve", "--host", "0.0.0.0"]
     ports:
       - "127.0.0.1:${VULNFLOW_PORT:-8380}:${VULNFLOW_PORT:-8380}"
-    healthcheck:
-      test: ["CMD", "python", "-c",
-             "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('VULNFLOW_PORT','8380')+'/healthz')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # healthcheck: GET /healthz, defined in deploy/Dockerfile
 
   dt2dojo:
     <<: *common
     network_mode: host
     # every 30 minutes; DT re-analyses continuously, Dojo re-import is idempotent
     command: ["dt2dojo", "--loop", "1800"]
+    healthcheck:
+      disable: true  # no HTTP server; the image's /healthz check doesn't apply
 
 volumes:
   vulnflow-data: {}

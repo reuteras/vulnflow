@@ -1,0 +1,3 @@
+[codespell]
+# CNA = CVE Numbering Authority
+ignore-words-list = cna

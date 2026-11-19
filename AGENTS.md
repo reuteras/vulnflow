@@ -45,6 +45,12 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
 - `VALIDATE_SHELL_SHFMT: false` (as in the owner's other repos) and there is no
   `.editorconfig`: adding one would make editorconfig-checker enforce indent multiples on
   the hand-aligned continuation lines.
+- `VALIDATE_PRE_COMMIT: false`: the hooks run locally, and inside super-linter
+  markdownlint-cli's npm-from-git install fails (EALLOWGIT).
+- super-linter also runs dotenv-linter (keys in `.env.example` sorted within each
+  blank-line-separated section), codespell (`.codespellrc` whitelists `cna`), and
+  Checkov/Trivy on `deploy/Dockerfile` (needs a `HEALTHCHECK`; `dt2dojo` disables it in
+  compose).
 - `ruff==` in `pyproject.toml` `[dependency-groups] dev` and the ruff-pre-commit `rev` must
   be the same version; bump them together.
 - Secret scanning: tests generate dummy credentials at runtime (`secrets.token_hex`)
