@@ -164,10 +164,35 @@ set_kv() { # file key value
 opencve_args() { if [[ -n "${OPENCVE_REF:-}" ]]; then echo "-r $OPENCVE_REF"; fi; }
 opencve_compose() { (cd "$UP/opencve/docker" && docker compose "$@"); }
 
+# OpenCVE v3.1.0 pins apache-airflow-providers-celery but not celery, so a fresh build gets
+# celery 5.7.0 (2026-11-05), which removed celery.backends.database.retry; the Airflow worker
+# and scheduler then crash on import (opencve/opencve#810). Pin the versions from Airflow
+# 2.10.4's constraints, as upstream PR #817 does. The scheduler image takes requirements.txt
+# from a git clone made during the build, so patch the local Dockerfile's pip install line.
+# Skipped once upstream's requirements.txt pins celery itself.
+OPENCVE_CELERY_PINS="celery==5.4.0 kombu==5.4.2"
+opencve_pin_celery() {
+  local df="$UP/opencve/scheduler/Dockerfile" req="$UP/opencve/scheduler/requirements.txt"
+  if grep -qiE '^celery==' "$req"; then
+    log "OpenCVE: upstream pins celery; no build patch needed (drop opencve_pin_celery)"
+    return
+  fi
+  grep -qF "/requirements.txt $OPENCVE_CELERY_PINS" "$df" && return
+  grep -q 'pip install --no-cache-dir -r /requirements.txt$' "$df" \
+    || die "OpenCVE scheduler/Dockerfile changed; update opencve_pin_celery in poc.sh"
+  sed -i.bak "s#pip install --no-cache-dir -r /requirements.txt\$#& $OPENCVE_CELERY_PINS#" "$df"
+  rm -f "$df.bak"
+  log "OpenCVE: pinned $OPENCVE_CELERY_PINS in the scheduler image (opencve/opencve#810)"
+}
+
 cmd_opencve_prepare() {
   load_env
   mkdir -p "$UP"
+  # Undo our build patch first so a ref change doesn't trip over a modified file
+  [[ -d "$UP/opencve/.git" ]] \
+    && git -c "safe.directory=$UP/opencve" -C "$UP/opencve" checkout --quiet -- scheduler/Dockerfile
   clone_or_update https://github.com/opencve/opencve.git "$UP/opencve" "${OPENCVE_REF:-}"
+  opencve_pin_celery
   # shellcheck disable=SC2046
   (cd "$UP/opencve/docker" && ./install.sh $(opencve_args) prepare)
 
