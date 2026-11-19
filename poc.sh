@@ -18,8 +18,9 @@
 #   dd-bootstrap      only the DefectDojo bootstrap step (rerunnable)
 #   glue-up           build + start vulnflow receiver and dt2dojo loop
 #   all               dtrack-up, dojo-up, glue-up (no OpenCVE; use setup for everything)
+#   up                start everything again after down or a reboot (no rebuild/bootstrap)
+#   down              stop everything; volumes (data) are kept
 #   status            show containers and health endpoints
-#   down              stop DT, DefectDojo and glue (OpenCVE: use its install.sh)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -430,10 +431,35 @@ cmd_status() {
 
 cmd_down() {
   load_env
+  # Glue first: the receiver is attached to OpenCVE's network, which can't be removed
+  # while a container still uses it.
   glue_compose down || true
+  if [[ -f "$UP/opencve/docker/.env" ]]; then opencve_compose down || true; fi
   docker compose --env-file .env -f stacks/dependency-track/docker-compose.yml down || true
   if [[ -d "$UP/defectdojo" ]]; then dojo_compose down || true; fi
-  log "Stopped (volumes kept). OpenCVE: cd upstream/opencve/docker && docker compose down"
+  log "Stopped (volumes kept; ./poc.sh up starts everything again)"
+}
+
+# Start an installed stack again (after down or a reboot): existing images, volumes and
+# .env, no clone/build/bootstrap. Use setup for a first install or after changing versions.
+cmd_up() {
+  load_env
+  [[ -d "$UP/defectdojo" && -f "$UP/opencve/docker/.env" && -n "${DT_API_KEY:-}" ]] \
+    || die "not installed yet - run ./poc.sh setup"
+  log "Dependency-Track"
+  docker compose --env-file .env -f stacks/dependency-track/docker-compose.yml up -d
+  log "DefectDojo"
+  dojo_compose up -d
+  log "OpenCVE"
+  opencve_compose up -d
+  log "vulnflow glue"
+  cmd_glue_up
+  log "Waiting for the services to answer"
+  wait_http "http://localhost:${DT_API_PORT:-8180}/health" 600
+  wait_http "http://localhost:${DD_PORT:-8280}/login" 600
+  wait_http "${OPENCVE_URL:-http://localhost}/" 300
+  wait_http "http://localhost:${VULNFLOW_PORT:-8380}/healthz" 120
+  cmd_status
 }
 
 cmd_setup() {
@@ -478,9 +504,10 @@ case "${1:-}" in
     cmd_glue_up
     ;;
   status) cmd_status ;;
+  up) cmd_up ;;
   down) cmd_down ;;
   *)
-    sed -n '2,22p' "$0"
+    sed -n '2,23p' "$0"
     exit 1
     ;;
 esac
