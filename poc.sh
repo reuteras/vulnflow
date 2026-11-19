@@ -20,6 +20,7 @@
 #   all               dtrack-up, dojo-up, glue-up (no OpenCVE; use setup for everything)
 #   up                start everything again after down or a reboot (no rebuild/bootstrap)
 #   down              stop everything; volumes (data) are kept
+#   destroy [--yes]   delete all containers, data volumes, upstream/ and .env (asks first)
 #   status            show containers and health endpoints
 set -euo pipefail
 
@@ -462,6 +463,47 @@ cmd_up() {
   cmd_status
 }
 
+# Compose projects of the four stacks (DefectDojo's compose has no name:, so it's the
+# directory name of the clone). Glue first: it is attached to OpenCVE's network.
+COMPOSE_PROJECTS=(vulnflow-glue opencve vulnflow-dtrack defectdojo)
+
+# Remove everything setup created, for a clean reinstall. Works from Docker labels, so it
+# also cleans up when .env or the clones are already gone. Keeps the Docker images.
+cmd_destroy() {
+  cat <<EOF
+This permanently deletes:
+  - all containers, networks and Docker volumes (= all data: findings, CVE database,
+    projects, users) of compose projects: ${COMPOSE_PROJECTS[*]}
+  - $UP (OpenCVE and DefectDojo clones, including their generated config/secrets)
+  - $ROOT/data
+  - $ROOT/.env (all passwords and API keys)
+Kept: Docker images (so the next setup is faster) and this repository.
+EOF
+  if [[ "${1:-}" != "--yes" ]]; then
+    [[ -t 0 ]] || die "no terminal to confirm on; run ./poc.sh destroy --yes"
+    local answer
+    read -r -p "Type 'destroy' to continue: " answer || answer=""
+    [[ "$answer" == "destroy" ]] || die "aborted, nothing deleted"
+  fi
+  local p ids
+  for p in "${COMPOSE_PROJECTS[@]}"; do
+    ids="$(docker ps -aq --filter "label=com.docker.compose.project=$p")"
+    # shellcheck disable=SC2086
+    [[ -z "$ids" ]] || docker rm -f $ids >/dev/null
+  done
+  for p in "${COMPOSE_PROJECTS[@]}"; do
+    ids="$(docker network ls -q --filter "label=com.docker.compose.project=$p")"
+    # shellcheck disable=SC2086
+    [[ -z "$ids" ]] || docker network rm $ids >/dev/null
+    ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$p")"
+    # shellcheck disable=SC2086
+    [[ -z "$ids" ]] || docker volume rm $ids >/dev/null
+    log "removed compose project $p"
+  done
+  rm -rf -- "$UP" "$ROOT/data" "$ROOT/.env"
+  log "Done. ./poc.sh setup installs from scratch."
+}
+
 cmd_setup() {
   local t0=$SECONDS
   cmd_init
@@ -506,8 +548,9 @@ case "${1:-}" in
   status) cmd_status ;;
   up) cmd_up ;;
   down) cmd_down ;;
+  destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,23p' "$0"
+    sed -n '2,24p' "$0"
     exit 1
     ;;
 esac
