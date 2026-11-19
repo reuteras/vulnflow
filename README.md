@@ -156,15 +156,17 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
   file download), FIRST (EPSS) and CIRCL (sightings). You can turn each one off with
   `VULNFLOW_ENRICH_*=0`. For an isolated network, mirror the KEV and EPSS files internally and
   run your own Vulnerability-Lookup instance (`CIRCL_URL`).
-- Compose files bind to `127.0.0.1`, **except DefectDojo's upstream compose, which publishes
-  8280/8443 on all interfaces**. Firewall those ports.
+- Compose files bind to `127.0.0.1` (for OpenCVE, `opencve-prepare` rewrites upstream's
+  all-interfaces ports 80/8080 to `127.0.0.1:`), **except DefectDojo's upstream compose,
+  which publishes 8280/8443 on all interfaces**. Firewall those ports.
 - Webhook auth is a shared-secret header compared in constant time. The token must be ≥ 16
   chars, the body ≤ 5 MB, and processing runs on a bounded queue.
 - The glue containers run read-only, with no capabilities, `no-new-privileges`, and a non-root
   UID.
 - `./poc.sh init` generates every secret in `.env`; the bootstraps replace the DT
   `admin/admin` password, DefectDojo's hard-coded `DD_SECRET_KEY`/`DD_CREDENTIAL_AES_256_KEY`
-  and OpenCVE's postgres/Airflow passwords. Bootstrap inputs and outputs travel via stdin and
+  and OpenCVE's postgres/Airflow passwords plus Airflow's shared Fernet key and webserver
+  `secret_key`. Bootstrap inputs and outputs travel via stdin and
   `.env` (mode 600), never on a command line.
 - The receiver is published on `127.0.0.1` only; OpenCVE reaches it over OpenCVE's own
   docker network, and only that subnet is allowlisted in OpenCVE's SSRF guard.
