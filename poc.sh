@@ -186,9 +186,10 @@ opencve_pin_celery() {
 }
 
 # Upstream defaults that are the same in every OpenCVE install. Values in docker/.env win
-# over airflow.cfg (AIRFLOW__SECTION__KEY). Safe on an existing install: the only Fernet-
-# encrypted data are the two Airflow connections, which install.sh init-docker-stack
-# deletes and recreates on every run, and a new webserver key only ends UI sessions.
+# over airflow.cfg (AIRFLOW__SECTION__KEY). On an existing install a new Fernet key makes
+# the stored Airflow connections undecryptable; opencve_reset_airflow_connections (run by
+# opencve-start) deletes them so install.sh recreates them. A new webserver key only ends
+# UI sessions.
 OPENCVE_DEFAULT_FERNET="ywvTuNQw6bW-UlEyS0ykTqiz9on1cyMlHT7e1Ddo060="
 opencve_harden_airflow() { # docker/.env
   local denv="$1" v
@@ -255,12 +256,29 @@ Next:
 EOF
 }
 
+# install.sh init-docker-stack recreates the Airflow connections opencve_postgres and
+# opencve_redis on every run, but deletes them with "airflow connections delete", which
+# has to decrypt them first and fails (silently) after a Fernet key change; the following
+# "connections add" then crashes with InvalidToken. Delete the rows in SQL instead, which
+# needs no key. OpenCVE v3.1.0 stores nothing else Fernet-encrypted (no Airflow Variables).
+opencve_reset_airflow_connections() {
+  [[ -n "$(opencve_compose ps -q --status running postgres 2>/dev/null)" ]] || return 0
+  local user
+  user="$(sed -n 's/^POSTGRES_USER=//p' "$UP/opencve/docker/.env")"
+  opencve_compose exec -T postgres psql -q -U "${user:-opencve}" -d opencve -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN IF to_regclass('public.connection') IS NOT NULL THEN
+          DELETE FROM connection WHERE conn_id IN ('opencve_postgres', 'opencve_redis');
+        END IF; END \$\$;" >/dev/null \
+    || die "could not reset OpenCVE's Airflow connections"
+}
+
 cmd_opencve_start() {
   load_env
   [[ -d "$UP/opencve/docker" ]] || die "run ./poc.sh opencve-prepare first"
   # Upstream's "install.sh start" is these steps followed by an interactive
   # create-superuser prompt. Run the steps (each is an install.sh subcommand) and let
   # opencve-bootstrap create the admin from .env instead, so nothing waits for a human.
+  opencve_reset_airflow_connections
   local step
   for step in init-docker-stack clone-repositories import-opencve-kb start-opencve-dag; do
     # shellcheck disable=SC2046
