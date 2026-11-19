@@ -11,17 +11,16 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 from urllib.parse import quote
 
 from .net import Http, Transport
 
 log = logging.getLogger(__name__)
 
-KEV_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
-           "known_exploited_vulnerabilities.json")
+KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EPSS_URL = "https://api.first.org/data/v1/epss"
 SIGHTING_TYPES = ("exploited", "published-proof-of-concept", "seen")
 
@@ -45,8 +44,13 @@ class Signals:
 class KevCache:
     """Downloads the CISA KEV JSON and caches it on disk (default TTL 6 h)."""
 
-    def __init__(self, cache_dir: Path, transport: Transport | None = None,
-                 ttl_seconds: int = 6 * 3600, url: str = KEV_URL):
+    def __init__(
+        self,
+        cache_dir: Path,
+        transport: Transport | None = None,
+        ttl_seconds: int = 6 * 3600,
+        url: str = KEV_URL,
+    ):
         self.path = cache_dir / "kev.json"
         self.ttl = ttl_seconds
         self.http = Http(url, transport=transport, timeout=60)
@@ -71,14 +75,22 @@ class KevCache:
 
 
 class Enricher:
-    def __init__(self, *, cache_dir: Path, use_kev: bool = True, use_epss: bool = True,
-                 use_circl: bool = True, circl_url: str = "https://vulnerability.circl.lu",
-                 transport: Transport | None = None):
+    def __init__(
+        self,
+        *,
+        cache_dir: Path,
+        use_kev: bool = True,
+        use_epss: bool = True,
+        use_circl: bool = True,
+        circl_url: str = "https://vulnerability.circl.lu",
+        transport: Transport | None = None,
+    ):
         self.use_kev, self.use_epss, self.use_circl = use_kev, use_epss, use_circl
         self.kev = KevCache(cache_dir, transport=transport)
         self.epss_http = Http(EPSS_URL, transport=transport, timeout=30)
-        self.circl_http = Http(circl_url, headers={"Accept": "application/json"},
-                               transport=transport, timeout=30)
+        self.circl_http = Http(
+            circl_url, headers={"Accept": "application/json"}, transport=transport, timeout=30
+        )
 
     def enrich(self, cves: Iterable[str]) -> dict[str, Signals]:
         ids = sorted({c.strip().upper() for c in cves if c and c.strip()})
@@ -93,7 +105,8 @@ class Enricher:
                         out[c].kev = True
                         out[c].kev_date_added = idx[c].get("dateAdded", "")
                         out[c].kev_ransomware = (
-                            str(idx[c].get("knownRansomwareCampaignUse", "")).lower() == "known")
+                            str(idx[c].get("knownRansomwareCampaignUse", "")).lower() == "known"
+                        )
             except Exception as e:  # keep going with the other sources
                 log.warning("KEV lookup failed: %s", e)
                 for s in out.values():
@@ -103,10 +116,10 @@ class Enricher:
                 try:
                     r = self.epss_http.get(f"?cve={','.join(chunk)}")
                     for row in (r.json() or {}).get("data", []):
-                        s = out.get(row.get("cve", "").upper())
-                        if s:
-                            s.epss = float(row["epss"])
-                            s.epss_percentile = float(row.get("percentile", 0) or 0)
+                        sig = out.get(row.get("cve", "").upper())
+                        if sig:
+                            sig.epss = float(row["epss"])
+                            sig.epss_percentile = float(row.get("percentile", 0) or 0)
                 except Exception as e:
                     log.warning("EPSS lookup failed: %s", e)
                     for c in chunk:
@@ -119,7 +132,8 @@ class Enricher:
                     counts: dict[str, int] = {}
                     for stype in SIGHTING_TYPES:
                         r = self.circl_http.get(
-                            f"api/sighting/?vuln_id={quote(c)}&type={stype}&per_page=1")
+                            f"api/sighting/?vuln_id={quote(c)}&type={stype}&per_page=1"
+                        )
                         n = int(((r.json() or {}).get("metadata") or {}).get("count") or 0)
                         if n:
                             counts[stype] = n
@@ -132,4 +146,4 @@ class Enricher:
 
 def _chunks(seq: list[str], n: int) -> Iterable[list[str]]:
     for i in range(0, len(seq), n):
-        yield seq[i:i + n]
+        yield seq[i : i + n]

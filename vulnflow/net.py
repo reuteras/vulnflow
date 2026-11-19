@@ -8,8 +8,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +32,15 @@ class Response:
 Transport = Callable[[str, str, Mapping[str, str], bytes | None, float], Response]
 
 
-def urllib_transport(method: str, url: str, headers: Mapping[str, str],
-                     body: bytes | None, timeout: float) -> Response:
-    req = urllib.request.Request(url, data=body, method=method, headers=dict(headers))
+def urllib_transport(
+    method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float
+) -> Response:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-HTTP URL {url!r}")
+    # S310: scheme checked above; URLs come from .env / inventory, not from requests
+    req = urllib.request.Request(url, data=body, method=method, headers=dict(headers))  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (URLs come from config)
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
             return Response(r.status, r.read(), dict(r.headers))
     except urllib.error.HTTPError as e:
         return Response(e.code, e.read(), dict(e.headers or {}))
@@ -49,9 +54,14 @@ class HttpError(RuntimeError):
 
 
 class Http:
-    def __init__(self, base_url: str, headers: Mapping[str, str] | None = None,
-                 transport: Transport | None = None, timeout: float = 30.0,
-                 retries: int = 2):
+    def __init__(
+        self,
+        base_url: str,
+        headers: Mapping[str, str] | None = None,
+        transport: Transport | None = None,
+        timeout: float = 30.0,
+        retries: int = 2,
+    ):
         self.base_url = base_url.rstrip("/")
         self.headers = {"User-Agent": "vulnflow/0.1", **(headers or {})}
         self.transport = transport or urllib_transport
@@ -67,9 +77,16 @@ class Http:
             return f"{self.base_url}{path}"
         return f"{self.base_url}/{path.lstrip('/')}"
 
-    def request(self, method: str, path: str, *, json_body: Any = None,
-                body: bytes | None = None, headers: Mapping[str, str] | None = None,
-                expect_ok: bool = True) -> Response:
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any = None,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        expect_ok: bool = True,
+    ) -> Response:
         hdrs = {**self.headers, **(headers or {})}
         if json_body is not None:
             body = json.dumps(json_body).encode()
@@ -84,11 +101,11 @@ class Http:
                     raise
                 attempt += 1
                 log.warning("network error on %s %s (%s), retry %d", method, url, e, attempt)
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             if resp.status in (429, 502, 503, 504) and attempt < self.retries:
                 attempt += 1
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             if expect_ok and not resp.ok:
                 raise HttpError(method, url, resp)
@@ -104,8 +121,9 @@ class Http:
         return self.request("POST", path, **kw)
 
 
-def multipart(fields: Mapping[str, str | list[str]],
-              files: Mapping[str, tuple[str, bytes, str]]) -> tuple[bytes, str]:
+def multipart(
+    fields: Mapping[str, str | list[str]], files: Mapping[str, tuple[str, bytes, str]]
+) -> tuple[bytes, str]:
     """Build a multipart/form-data body.
 
     fields: name -> value, or name -> list of values (sent as repeated fields).
@@ -114,14 +132,13 @@ def multipart(fields: Mapping[str, str | list[str]],
     boundary = f"----vulnflow{uuid.uuid4().hex}"
     out = bytearray()
     for name, value in fields.items():
-        for v in (value if isinstance(value, list) else [value]):
+        for v in value if isinstance(value, list) else [value]:
             out += f"--{boundary}\r\n".encode()
             out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
             out += str(v).encode() + b"\r\n"
     for name, (filename, content, ctype) in files.items():
         out += f"--{boundary}\r\n".encode()
-        out += (f'Content-Disposition: form-data; name="{name}"; '
-                f'filename="{filename}"\r\n').encode()
+        out += (f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n').encode()
         out += f"Content-Type: {ctype}\r\n\r\n".encode()
         out += content + b"\r\n"
     out += f"--{boundary}--\r\n".encode()

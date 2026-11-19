@@ -1,0 +1,40 @@
+---
+# Fast, local-only hygiene checks. Everything heavier (super-linter, mypy, pytest,
+# OSV-Scanner) runs in CI - see AGENTS.md.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: check-ast
+      - id: fix-byte-order-marker
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: 3.11.1
+    hooks:
+      - id: editorconfig-checker
+        alias: ec
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: v1.10.1
+    hooks:
+      - id: betterleaks
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.50.0
+    hooks:
+      - id: markdownlint

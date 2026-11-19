@@ -32,8 +32,12 @@ def assess(cvss: float | None, sig: Signals, rules: PriorityRules) -> Verdict:
     epss = sig.epss
     if epss is not None and epss >= rules.epss_attend:
         return Verdict(2, [f"EPSS {epss:.3f} >= {rules.epss_attend}"])
-    if (cvss is not None and cvss >= rules.cvss_critical
-            and epss is not None and epss >= rules.epss_floor):
+    if (
+        cvss is not None
+        and cvss >= rules.cvss_critical
+        and epss is not None
+        and epss >= rules.epss_floor
+    ):
         return Verdict(2, [f"CVSS {cvss} critical and EPSS {epss:.3f} >= {rules.epss_floor}"])
     if cvss is not None and cvss >= rules.cvss_high:
         why = [f"CVSS {cvss} >= {rules.cvss_high}"]

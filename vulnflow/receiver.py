@@ -16,11 +16,12 @@ import json
 import logging
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .clients import OpenCVE
 from .config import Inventory
@@ -75,20 +76,33 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
             wanted.append((cve, relevant or types))
 
     signals = enricher.enrich(c["cve_id"] for c, _ in wanted)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     alerts: list[Alert] = []
     for cve, types in wanted:
         cid = cve["cve_id"].upper()
         sig = signals[cid]
         cvss = _cvss(cve.get("cvss31"))
         v = assess(cvss, sig, inv.rules)
-        alerts.append(Alert(
-            received_at=now, organization=str(payload.get("organization", "")),
-            project=project, team=team.key if team else "unrouted", cve=cid, cvss31=cvss,
-            event_types=types, tier=v.tier, tier_name=v.name, reasons=v.reasons,
-            kev=sig.kev, epss=sig.epss, epss_percentile=sig.epss_percentile,
-            sightings=sig.sightings, description=(cve.get("description") or "")[:400],
-            enrichment_errors=sig.errors))
+        alerts.append(
+            Alert(
+                received_at=now,
+                organization=str(payload.get("organization", "")),
+                project=project,
+                team=team.key if team else "unrouted",
+                cve=cid,
+                cvss31=cvss,
+                event_types=types,
+                tier=v.tier,
+                tier_name=v.name,
+                reasons=v.reasons,
+                kev=sig.kev,
+                epss=sig.epss,
+                epss_percentile=sig.epss_percentile,
+                sightings=sig.sightings,
+                description=(cve.get("description") or "")[:400],
+                enrichment_errors=sig.errors,
+            )
+        )
     alerts.sort(key=lambda a: (a.tier, -(a.epss or 0), -(a.cvss31 or 0)))
     return alerts
 
@@ -98,15 +112,19 @@ def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> s
     if not hot:
         return None
     team = inv.teams.get(hot[0].team)
-    head = f"{team.chat_mention + ' ' if team and team.chat_mention else ''}" \
-           f"{len(hot)} prioritised CVE change(s) for project '{hot[0].project}'"
+    head = (
+        f"{team.chat_mention + ' ' if team and team.chat_mention else ''}"
+        f"{len(hot)} prioritised CVE change(s) for project '{hot[0].project}'"
+    )
     lines = [head]
     for a in hot:
         epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
         link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
-        lines.append(f"- [{a.tier_name}] {a.cve} CVSS {a.cvss31 if a.cvss31 is not None else 'n/a'}"
-                     f" EPSS {epss} ({', '.join(a.event_types) or 'change'}): "
-                     f"{'; '.join(a.reasons)}{link}")
+        lines.append(
+            f"- [{a.tier_name}] {a.cve} CVSS {a.cvss31 if a.cvss31 is not None else 'n/a'}"
+            f" EPSS {epss} ({', '.join(a.event_types) or 'change'}): "
+            f"{'; '.join(a.reasons)}{link}"
+        )
     rest = len(alerts) - len(hot)
     if rest:
         lines.append(f"(+{rest} lower-tier change(s) in the log)")
@@ -116,10 +134,17 @@ def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> s
 class Pipeline:
     """Background worker so the webhook returns 200 immediately."""
 
-    def __init__(self, inv: Inventory, enricher: Enricher, log_path: Path,
-                 chat_webhook: str = "", opencve_url: str = "",
-                 chat_sender: Callable[[str], None] | None = None,
-                 opencve: OpenCVE | None = None, triage_max_tier: int = 0):
+    def __init__(
+        self,
+        inv: Inventory,
+        enricher: Enricher,
+        log_path: Path,
+        chat_webhook: str = "",
+        opencve_url: str = "",
+        chat_sender: Callable[[str], None] | None = None,
+        opencve: OpenCVE | None = None,
+        triage_max_tier: int = 0,
+    ):
         self.inv, self.enricher, self.log_path = inv, enricher, log_path
         self.opencve_url = opencve_url
         # Write-back: mark P1..P(triage_max_tier) CVEs "to_evaluate" in OpenCVE so they
@@ -133,7 +158,11 @@ class Pipeline:
     @staticmethod
     def _make_sender(url: str) -> Callable[[str], None]:
         http = Http(url, timeout=15)
-        return lambda text: http.post("", json_body={"text": text})
+
+        def send(text: str) -> None:
+            http.post("", json_body={"text": text})
+
+        return send
 
     def handle(self, payload: dict) -> list[Alert]:
         alerts = process_payload(payload, self.inv, self.enricher)
@@ -148,12 +177,17 @@ class Pipeline:
                 self._send(msg)
             except Exception as e:
                 log.error("chat delivery failed: %s", e)
-        log.info("project=%s changes=%d top=%s", payload.get("project"), len(alerts),
-                 alerts[0].tier_name if alerts else "-")
+        log.info(
+            "project=%s changes=%d top=%s",
+            payload.get("project"),
+            len(alerts),
+            alerts[0].tier_name if alerts else "-",
+        )
         return alerts
 
     def _triage(self, alerts: list[Alert]) -> None:
-        assert self.opencve
+        if self.opencve is None:
+            return
         for a in alerts:
             if a.tier > self.triage_max_tier or a.team == "unrouted":
                 continue
@@ -192,13 +226,13 @@ def make_handler(pipeline: Pipeline, token: str) -> type[BaseHTTPRequestHandler]
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path == "/healthz":
                 self._reply(200, {"status": "ok", "queued": pipeline.q.qsize()})
             else:
                 self._reply(404, {"error": "not found"})
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path != "/opencve":
                 return self._reply(404, {"error": "not found"})
             given = self.headers.get("X-Vulnflow-Token", "")

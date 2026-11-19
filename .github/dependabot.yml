@@ -1,0 +1,63 @@
+---
+version: 2
+updates:
+  # Python dev tools (uv.lock); the runtime is stdlib only
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      package-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions-deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit-deps:
+        patterns:
+          - "*"
+
+  # deploy/Dockerfile base image (python:*-slim)
+  - package-ecosystem: "docker"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      docker-deps:
+        patterns:
+          - "*"
+
+  # Dependency-Track + postgres images in stacks/dependency-track/docker-compose.yml.
+  # DefectDojo and OpenCVE versions are git refs in .env (DD_REF, OPENCVE_REF), which
+  # Dependabot can't see; bump those by hand after reading the release notes.
+  - package-ecosystem: "docker-compose"
+    directories:
+      - "/stacks/dependency-track"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      compose-deps:
+        patterns:
+          - "*"

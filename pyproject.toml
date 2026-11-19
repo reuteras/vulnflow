@@ -1,0 +1,50 @@
+[project]
+name = "vulnflow"
+version = "0.1.0"
+description = "Glue between OpenCVE, Dependency-Track and DefectDojo: routing, enrichment, prioritisation"
+readme = "README.md"
+requires-python = ">=3.11"
+# Runtime is stdlib only (urllib, tomllib, http.server). Keep it that way.
+dependencies = []
+
+[dependency-groups]
+# Exact pins; uv.lock is the source of truth and Dependabot (7-day cooldown) bumps them.
+dev = [
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "ruff==0.17.4",
+]
+
+[tool.uv]
+# Application, not a library: nothing to build or install.
+package = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 105
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # bugbear
+    "UP",      # pyupgrade
+    "S",       # bandit
+    "RUF",     # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# asserts, dummy secrets and urlopen() against the local test server
+"tests/**" = ["S101", "S105", "S106", "S107", "S310"]
+
+[tool.mypy]
+files = ["vulnflow", "tests"]
+python_version = "3.11"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
