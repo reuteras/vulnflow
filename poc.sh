@@ -295,20 +295,9 @@ cmd_opencve_bootstrap() {
   [[ -n "$(opencve_compose ps -q webserver 2>/dev/null)" ]] \
     || die "OpenCVE webserver not running - ./poc.sh opencve-start"
 
-  # 1. Let OpenCVE's SSRF guard accept webhooks to its own docker network, where the
-  #    receiver is attached as "vulnflow-receiver".
-  local subnet wenv="$UP/opencve/web/opencve/conf/.env"
-  subnet="$(docker network inspect "$OPENCVE_NET" \
-    -f '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' | grep -m1 -v ':')" \
-    || die "cannot read the subnet of docker network $OPENCVE_NET"
-  if ! grep -qx "OPENCVE_NOTIFICATION_ALLOWED_INTERNAL_NETWORKS=$subnet" "$wenv"; then
-    set_kv "$wenv" OPENCVE_NOTIFICATION_ALLOWED_INTERNAL_NETWORKS "$subnet"
-    log "OpenCVE: webhooks allowed to $subnet; restarting webserver"
-    opencve_compose restart webserver >/dev/null
-  fi
   wait_http "${OPENCVE_URL:-http://localhost}/" 300
 
-  # 2. Admin, org, service user, read-write org token (no API for these: Django shell).
+  # 1. Admin, org, service user, read-write org token (no API for these: Django shell).
   #    Inputs go in on stdin as a JSON header, never on a command line.
   [[ -n "${OPENCVE_ADMIN_PASSWORD:-}" ]] || die "OPENCVE_ADMIN_PASSWORD empty - run ./poc.sh init"
   local out tok
@@ -337,10 +326,23 @@ print("VF = " + json.dumps({
     die "unexpected output from OpenCVE bootstrap: $out"
   fi
 
-  # 3. Receiver on OpenCVE's network (the webhook URL must resolve when it is saved)
+  # 2. Receiver, attached to OpenCVE's network as "vulnflow-receiver" so Airflow can reach it
   cmd_glue_up
-  # 4. Projects + subscriptions from inventory.toml, webhook notifications
-  vulnflow opencve-bootstrap
+  # 3. Projects + subscriptions from inventory.toml (API)
+  vulnflow opencve-bootstrap || die "OpenCVE project sync failed"
+  # 4. Per project a webhook notification + an alert automation that sends it. Django
+  #    shell, not the API: v3.1.0's API refuses every private webhook URL (no allow-list).
+  #    The input line carries the webhook token, so it only goes through the pipe.
+  out="$({
+    vulnflow opencve-webhook-input
+    cat "$ROOT/stacks/opencve/bootstrap_webhooks.py"
+  } | opencve_compose exec -T webserver python manage.py shell)" \
+    || die "OpenCVE webhook bootstrap failed"
+  grep -q '^WEBHOOK ' <<<"$out" || die "unexpected output from OpenCVE webhook bootstrap: $out"
+  sed -n 's/^WEBHOOK \(.*\)/  ok    OpenCVE webhook + automation: \1/p' <<<"$out"
+  if grep -q '^MISSING ' <<<"$out"; then
+    die "OpenCVE projects missing: $(sed -n 's/^MISSING //p' <<<"$out" | tr '\n' ' ')"
+  fi
 }
 
 cmd_dtrack_up() {

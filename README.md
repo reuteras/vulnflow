@@ -67,8 +67,6 @@ replaced when the one in `.env` no longer works. What they do:
    hard-coded defaults, and images match `DD_REF` instead of `:latest`. Then writes the
    admin's API v2 key to `DD_API_KEY`.
 3. **OpenCVE** (`opencve-bootstrap`):
-   - allowlists OpenCVE's docker network in `OPENCVE_NOTIFICATION_ALLOWED_INTERNAL_NETWORKS`
-     (OpenCVE's SSRF guard rejects private webhook targets otherwise);
    - creates the admin `OPENCVE_ADMIN_USER` (superuser, email pre-verified, org owner) if
      that username doesn't exist yet. `opencve-start` runs upstream's `install.sh` steps one
      by one instead of `start`, which would stop at an interactive `createsuperuser` prompt;
@@ -78,8 +76,12 @@ replaced when the one in `.env` no longer works. What they do:
      API for these) and writes it to `OPENCVE_TOKEN`;
    - runs `glue-up`, which attaches the receiver to OpenCVE's network as
      `vulnflow-receiver`;
-   - creates the projects and subscriptions from `inventory.toml` and a `vulnflow` webhook
-     notification per project (`VULNFLOW_WEBHOOK_URL`, header `X-Vulnflow-Token`).
+   - creates the projects and subscriptions from `inventory.toml` (API);
+   - per project, creates a `vulnflow` webhook notification (`VULNFLOW_WEBHOOK_URL`, header
+     `X-Vulnflow-Token`) and a `vulnflow` alert automation that sends it on every change
+     ([`stacks/opencve/bootstrap_webhooks.py`](stacks/opencve/bootstrap_webhooks.py), via
+     `manage.py shell`). In v3.1.0 a notification only fires through an automation, and the
+     API refuses private webhook URLs, with no allow-list until after v3.1.0.
 
 ```bash
 python3 -m vulnflow sync --dry-run              # what would change
@@ -169,7 +171,10 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
   `secret_key`. Bootstrap inputs and outputs travel via stdin and
   `.env` (mode 600), never on a command line.
 - The receiver is published on `127.0.0.1` only; OpenCVE reaches it over OpenCVE's own
-  docker network, and only that subnet is allowlisted in OpenCVE's SSRF guard.
+  docker network. OpenCVE v3.1.0's SSRF guard (API/UI only) rejects that private URL, so the
+  webhook is written with the Django ORM; only this fixed, operator-set URL bypasses it.
+  Editing that notification in the OpenCVE UI will fail validation; rerun
+  `opencve-bootstrap` instead.
 - The OpenCVE service user `vulnflow` has no usable password (API token only). Re-running
   `opencve-bootstrap` after losing `OPENCVE_TOKEN` revokes the old `vulnflow` token.
 
@@ -177,13 +182,14 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 
 | Item | Status |
 | --- | --- |
-| OpenCVE API paths (subscriptions, project create, CVE tracker GET/PATCH, status enum) | Checked against the OpenCVE Cloud OpenAPI schema (Nov 2026). Self-hosted releases may lag, so compare with `<opencve>/api/v2/docs/` |
-| OpenCVE webhook payload (`organization`, `project`, `changes[].cve.cve_id/cvss31`, `events[].type`) | From OpenCVE docs |
+| OpenCVE API paths (subscriptions, project create, CVE tracker GET/PATCH, status enum) | Checked against the OpenCVE v3.1.0 tag's source; project create + subscriptions also run live |
+| OpenCVE webhook payload (`organization`, `project`, `changes[].cve.cve_id/cvss31/description`, `events`) | Checked against v3.1.0 `WebhookNotifier.prepare_payload` |
 | Dependency-Track `PUT /api/v1/bom` (JSON + `projectTags`), `/project/tag/{tag}`, FPF export | From DT docs. Paging header handling covers both v4 and v5 |
 | DefectDojo `reimport-scan` with FPF scan type + `auto_create_context` | From DefectDojo docs |
 | DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source |
 | DD bootstrap (`DD_ADMIN_PASSWORD` in `complete_initialization`, `api-token-auth`) | Checked against DefectDojo 3.5.201 source and compose file |
-| OpenCVE org/token models, notifications API, SSRF allowlist setting | Checked against OpenCVE v3.1.0 source |
+| OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
+| OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 

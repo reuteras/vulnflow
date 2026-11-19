@@ -2,8 +2,7 @@
 
 Endpoints used, and how sure we are of them:
 
-OpenCVE  (checked against the OpenAPI schema at app.opencve.io/api/v2/schema/, Nov 2026;
-          self-hosted Community releases may lag - compare with <your-opencve>/api/v2/docs/)
+OpenCVE  (checked against the v3.1.0 tag's source: web/opencve/api/v2/)
   PUT   /api/v2/organizations/{org}/projects/{project}/subscriptions
   GET   /api/v2/organizations/{org}/projects/{name}
   POST  /api/v2/organizations/{org}/projects             {"name","description","active"}
@@ -11,9 +10,8 @@ OpenCVE  (checked against the OpenAPI schema at app.opencve.io/api/v2/schema/, N
   PATCH /api/v2/organizations/{org}/projects/{project}/cves/{cve_id}   {"status", "assignee"}
         status enum: to_evaluate, pending_review, analysis_in_progress,
         remediation_in_progress, evaluated, resolved, not_applicable, risk_accepted
-  GET/PATCH /api/v2/organizations/{org}/projects/{project}/notifications/{name}
-  POST  /api/v2/organizations/{org}/projects/{project}/notifications
-        {"name","type":"webhook","configuration":{"url","headers"}}  (v3.1.0 source)
+  Webhook notifications are NOT created through the API: v3.1.0 rejects every private URL
+  there. See stacks/opencve/bootstrap_webhooks.py (Django shell, run by poc.sh).
 Dependency-Track
   PUT  /api/v1/bom  (JSON, base64 BOM, projectTags)                    documented
   GET  /api/v1/project/tag/{tag}                                        documented
@@ -95,24 +93,6 @@ class OpenCVE:
         self.http.put(
             f"{self._proj(project)}/subscriptions", json_body={"vendors": vendors, "products": products}
         )
-
-    def ensure_webhook(self, project: str, name: str, url: str, headers: dict[str, str]) -> bool:
-        """Create or update a webhook notification. Returns True if it was created.
-
-        PATCH on an existing one keeps url/headers (e.g. a rotated token) in sync;
-        the API masks headers on read, so we can't diff and just always write."""
-        config = {"url": url, "headers": headers}
-        base = f"{self._proj(project)}/notifications"
-        r = self.http.get(f"{base}/{quote(name)}", expect_ok=False)
-        if r.status == 404:
-            self.http.post(base, json_body={"name": name, "type": "webhook", "configuration": config})
-            return True
-        if not r.ok:
-            self.http.get(f"{base}/{quote(name)}")  # raise with details
-        self.http.request(
-            "PATCH", f"{base}/{quote(name)}", json_body={"is_enabled": True, "configuration": config}
-        )
-        return False
 
 
 # --------------------------------------------------------------------- Dependency-Track

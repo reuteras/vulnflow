@@ -1,5 +1,5 @@
 """CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,
-dt-bootstrap,dd-bootstrap,opencve-bootstrap,env-set}"""
+dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
 
@@ -107,22 +107,30 @@ def _dd_bootstrap(env_file: str, wait: float) -> int:
     return 0
 
 
-def _opencve_bootstrap(inv: Inventory, webhook_url: str) -> int:
+def _opencve_bootstrap(inv: Inventory) -> int:
     oc = _opencve()
     if oc is None:
         print("  error OPENCVE_TOKEN missing; run ./poc.sh opencve-bootstrap", file=sys.stderr)
         return 1
     rep = sync_inventory(inv, opencve=oc, dtrack=None, dojo=None, create_projects=True)
     rep.print()
-    if rep.errors:
-        return 1
-    token = env("VULNFLOW_WEBHOOK_TOKEN", required=True)
-    for team in inv.teams.values():
-        created = oc.ensure_webhook(
-            team.opencve_project, "vulnflow", webhook_url, {"X-Vulnflow-Token": token}
-        )
-        print(f"  {'new ' if created else 'ok  '}  webhook {team.opencve_project} -> {webhook_url}")
-    return 0
+    return 1 if rep.errors else 0
+
+
+def opencve_webhook_input(inv: Inventory, webhook_url: str, token: str, org: str) -> str:
+    """First line for stacks/opencve/bootstrap_webhooks.py (a Python assignment, VF = {...}).
+
+    The webhook is created through Django because OpenCVE v3.1.0's API rejects every
+    private URL (see that script). json.dumps output is a valid Python literal here: only
+    strings, a list and dicts, no true/false/null."""
+    spec = {
+        "org": org,
+        "projects": sorted({t.opencve_project for t in inv.teams.values()}),
+        "name": "vulnflow",
+        "url": webhook_url,
+        "headers": {"X-Vulnflow-Token": token},
+    }
+    return "VF = " + json.dumps(spec)
 
 
 def _env_set(env_file: str) -> int:
@@ -198,12 +206,17 @@ def main(argv: list[str] | None = None) -> int:
     ddb = sub.add_parser("dd-bootstrap", help="first-run DefectDojo setup: API key for admin")
     ddb.add_argument("--wait", type=float, default=900, metavar="SECONDS")
 
-    ob = sub.add_parser(
+    sub.add_parser(
         "opencve-bootstrap",
-        help="create OpenCVE projects/subscriptions + webhook notifications "
+        help="create OpenCVE projects/subscriptions from the inventory "
         "(org + token come from poc.sh opencve-bootstrap)",
     )
-    ob.add_argument("--webhook-url", default=None, help="default: $VULNFLOW_WEBHOOK_URL")
+    owi = sub.add_parser(
+        "opencve-webhook-input",
+        help="print the input line for stacks/opencve/bootstrap_webhooks.py (contains the "
+        "webhook token: pipe it, don't log it)",
+    )
+    owi.add_argument("--webhook-url", default=None, help="default: $VULNFLOW_WEBHOOK_URL")
 
     sub.add_parser("env-set", help="read KEY=VALUE lines from stdin into the .env file")
 
@@ -286,9 +299,18 @@ def main(argv: list[str] | None = None) -> int:
         return _dt_bootstrap(a.env_file, a.team_name, a.wait)
 
     if a.cmd == "opencve-bootstrap":
-        return _opencve_bootstrap(
-            inv, a.webhook_url or env("VULNFLOW_WEBHOOK_URL", "http://vulnflow-receiver:8380/opencve")
+        return _opencve_bootstrap(inv)
+
+    if a.cmd == "opencve-webhook-input":
+        print(
+            opencve_webhook_input(
+                inv,
+                a.webhook_url or env("VULNFLOW_WEBHOOK_URL", "http://vulnflow-receiver:8380/opencve"),
+                env("VULNFLOW_WEBHOOK_TOKEN", required=True),
+                env("OPENCVE_ORG", required=True),
+            )
         )
+        return 0
 
     if a.cmd == "upload-sbom":
         team = inv.teams.get(a.team)

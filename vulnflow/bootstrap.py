@@ -16,9 +16,11 @@ DefectDojo (checked against 3.5.201): the initializer creates the admin with DD_
 returns that user's (stable) API v2 token. It is enabled by default
 (DD_API_TOKEN_AUTH_ENDPOINT_ENABLED).
 
-OpenCVE (checked against v3.1.0): organizations and org tokens have no API, so
+OpenCVE (checked against the v3.1.0 tag): organizations and org tokens have no API, so
 stacks/opencve/bootstrap_org.py runs inside the webserver container via manage.py shell.
-Projects, subscriptions and webhook notifications then go through API v2.
+Projects and subscriptions then go through API v2. Webhooks go through manage.py shell too
+(stacks/opencve/bootstrap_webhooks.py): v3.1.0's API rejects every private webhook URL, and
+a notification is only sent by an Automation with a send_notification action.
 """
 
 from __future__ import annotations
