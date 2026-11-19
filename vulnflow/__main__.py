@@ -67,6 +67,9 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
             admin_password=admin_pw,
             team_name=team_name,
             existing_key=env("DT_API_KEY"),
+            osv_ecosystems=tuple(
+                e.strip() for e in env("DT_OSV_ECOSYSTEMS", "Debian,PyPI").split(",") if e.strip()
+            ),
             wait_timeout=wait,
         )
     except BootstrapError as e:
@@ -82,6 +85,14 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
         print(f"  new   API key written to {env_file} as DT_API_KEY")
     else:
         print("  ok    existing DT_API_KEY still valid")
+    if res.osv.startswith("failed"):
+        print(
+            f"  warn  OSV source not configured ({res.osv}); enable it in the DT UI "
+            "(see README 'After setup')",
+            file=sys.stderr,
+        )
+    else:
+        print(f"  {'set ' if res.osv.startswith('updated') else 'ok  '}  OSV source: {res.osv}")
     return 0
 
 

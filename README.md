@@ -70,8 +70,9 @@ replaced when the one in `.env` no longer works. What they do:
 
 1. **Dependency-Track** (`dtrack-up`): changes the forced `admin/admin` password to
    `DT_ADMIN_PASSWORD`, creates team `vulnflow` with `BOM_UPLOAD`,
-   `PROJECT_CREATION_UPLOAD`, `VIEW_PORTFOLIO`, `VIEW_VULNERABILITY`, and writes its API
-   key to `DT_API_KEY`.
+   `PROJECT_CREATION_UPLOAD`, `VIEW_PORTFOLIO`, `VIEW_VULNERABILITY`, writes its API
+   key to `DT_API_KEY`, and enables the OSV vulnerability source for `DT_OSV_ECOSYSTEMS`
+   (default `Debian,PyPI`; OSV is off by default in DT 5.2.2).
 2. **DefectDojo** (`dojo-up`): starts upstream's compose plus
    [`stacks/defectdojo/override.yml`](stacks/defectdojo/override.yml), so the admin gets
    `DD_ADMIN_PASSWORD`, the Django/AES keys come from `.env` instead of upstream's
@@ -144,15 +145,17 @@ Then open OpenCVE on <http://localhost:8000>, Dependency-Track on <http://localh
 and DefectDojo on <http://localhost:8280>. Users and passwords are printed at the end of
 `setup` (passwords are in `.env`).
 
-### 2. Turn on OSV in Dependency-Track (needed for Debian and PyPI)
+### 2. OSV in Dependency-Track (done by setup; needed for Debian and PyPI)
 
 Dependency-Track 5.2.2 ships with only the NVD source enabled. NVD matches by CPE, which
 fits Debian packages and Python libraries poorly. The OSV source matches by package URL and
 covers Debian security advisories and PyPI, but it is **off by default**, and Debian is not
 in its default ecosystem list (`Go, Maven, npm, NuGet, PyPI`).
 
-In the DT UI, under Administration, open the vulnerability data sources, enable **OSV**,
-and set its ecosystems to at least `Debian` and `PyPI`. The first OSV mirror takes a
+`dtrack-up`/`dt-bootstrap` therefore enables OSV and adds the ecosystems in
+`DT_OSV_ECOSYSTEMS` (default `Debian,PyPI`; ecosystems already set are kept, and an empty
+value leaves OSV alone). Its output shows `OSV source: ...`; if it prints a warning
+instead, enable OSV by hand in the DT UI under Administration. The first OSV mirror takes a
 while; findings show up after it finishes. Optional: an NVD API key (faster NVD mirroring)
 and the GitHub Advisories source (needs a GitHub token).
 
@@ -368,7 +371,8 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE webhook payload (`organization`, `project`, `changes[].cve.cve_id/cvss31/description`, `events`) | Checked against v3.1.0 `WebhookNotifier.prepare_payload` |
 | Dependency-Track `PUT /api/v1/bom` (JSON + `projectTags`), `/project/tag/{tag}`, FPF export | From DT docs. Paging header handling covers both v4 and v5 |
 | DefectDojo `reimport-scan` with FPF scan type + `auto_create_context` | From DefectDojo docs |
-| DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source |
+| DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source; run live against 5.2.2 |
+| DT OSV config (`/api/v2/extension-points/vuln-data-source/extensions/osv/config`, defaults) | Checked against the DT 5.2.2 tag's source; not yet run live |
 | DD bootstrap (`DD_ADMIN_PASSWORD` in `complete_initialization`, `api-token-auth`) | Checked against DefectDojo 3.5.201 source and compose file |
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |

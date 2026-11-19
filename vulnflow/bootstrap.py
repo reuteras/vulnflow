@@ -9,6 +9,11 @@ login and access management):
   POST /api/v1/permission/{perm}/team/{uuid}  -> 200, or 304 if already granted
   PUT  /api/v1/team/{uuid}/key            -> 201 {"key": "odt_...", ...}  (plaintext only now)
   GET  /api/v1/team/self                  with X-Api-Key -> the key's team
+DT 5.2.2 source (ExtensionsResource, OsvVulnDataSourceFactory), admin JWT (needs
+SYSTEM_CONFIGURATION):
+  GET  /api/v2/extension-points/vuln-data-source/extensions/osv/config  -> {"config": {...}}
+  PUT  same path  {"config": {...}}  -> 204, or 304 if unchanged
+  OSV ships disabled, ecosystems Go/Maven/npm/NuGet/PyPI (no Debian); only NVD is on.
 
 DefectDojo (checked against 3.5.201): the initializer creates the admin with DD_ADMIN_PASSWORD
 (passed in by stacks/defectdojo/override.yml) and
@@ -54,6 +59,48 @@ class DTBootstrapResult:
     team_uuid: str
     created_team: bool
     changed_admin_password: bool
+    osv: str = "skipped"  # "updated: ...", "unchanged", "skipped", or "failed: ..."
+
+
+DT_OSV_PATH = "api/v2/extension-points/vuln-data-source/extensions/osv/config"
+# OsvVulnDataSourceFactory defaults in DT 5.2.2, used if no config is stored yet
+DT_OSV_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "aliasSyncEnabled": False,
+    "incrementalMirroringEnabled": True,
+    "dataUrl": "https://storage.googleapis.com/osv-vulnerabilities",
+    "ecosystems": ["Go", "Maven", "npm", "NuGet", "PyPI"],
+}
+
+
+def dt_enable_osv(http: Http, ecosystems: list[str]) -> str:
+    """Enable DT's OSV source with at least these ecosystems. Keeps everything else as it
+    is (ecosystems are only added, never removed). Never raises: DT works without OSV, so
+    the caller reports a failure instead of aborting the bootstrap."""
+    if not ecosystems:
+        return "skipped"
+    try:
+        r = http.get(DT_OSV_PATH, expect_ok=False)
+        if r.status == 404:
+            current = dict(DT_OSV_DEFAULTS)
+        elif r.ok:
+            current = dict((r.json() or {}).get("config") or DT_OSV_DEFAULTS)
+        else:
+            return f"failed: GET OSV config HTTP {r.status}"
+        have = list(current.get("ecosystems") or [])
+        added = [e for e in ecosystems if e not in have]
+        wanted = {**current, "enabled": True, "ecosystems": have + added}
+        if wanted == current:
+            return "unchanged"
+        r = http.put(DT_OSV_PATH, json_body={"config": wanted}, expect_ok=False)
+        if r.status == 304:
+            return "unchanged"
+        if not r.ok:
+            body = r.body[:200].decode("utf-8", "replace")
+            return f"failed: PUT OSV config HTTP {r.status} {body}"
+        return "updated: enabled, ecosystems " + ", ".join(wanted["ecosystems"])
+    except OSError as e:
+        return f"failed: {e}"
 
 
 def new_secret(nbytes: int = 24) -> str:
@@ -104,11 +151,13 @@ def bootstrap_dtrack(
     admin_password: str,
     team_name: str = "vulnflow",
     existing_key: str = "",
+    osv_ecosystems: tuple[str, ...] = ("Debian", "PyPI"),
     transport: Transport | None = None,
     wait_timeout: float = 600.0,
 ) -> DTBootstrapResult:
     """Idempotently get Dependency-Track to: admin password set, team with the vulnflow
-    permissions, and a working API key for it."""
+    permissions, a working API key for it, and the OSV source enabled for osv_ecosystems
+    (empty = leave OSV alone)."""
     if not admin_password:
         raise BootstrapError("admin password must not be empty")
     anon = Http(base_url, headers={"Accept": "application/json"}, transport=transport)
@@ -161,13 +210,15 @@ def bootstrap_dtrack(
         if not (r.ok or r.status == 304):
             raise BootstrapError(f"granting {perm} to team {team_name}: HTTP {r.status}")
 
+    osv = dt_enable_osv(http, list(osv_ecosystems))
+
     if dt_key_works(base_url, existing_key, transport):
-        return DTBootstrapResult("", uuid, created, changed)
+        return DTBootstrapResult("", uuid, created, changed, osv)
 
     key = (http.put(f"api/v1/team/{uuid}/key").json() or {}).get("key", "")
     if not key or not dt_key_works(base_url, key, transport):
         raise BootstrapError("generated API key did not validate against /api/v1/team/self")
-    return DTBootstrapResult(key, uuid, created, changed)
+    return DTBootstrapResult(key, uuid, created, changed, osv)
 
 
 def _find_team(http: Http, name: str) -> dict[str, Any] | None:
