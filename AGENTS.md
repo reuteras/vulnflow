@@ -106,11 +106,15 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   were checked against, in the docstrings of `vulnflow/bootstrap.py` and
   `vulnflow/clients.py` and in README "Verified vs assumed". When bumping DT, `DD_REF` or
   `OPENCVE_REF`, re-check those against the new upstream source and update the docstrings.
+  Check against a clone of the **exact tag** (`git clone --depth 1 -b <tag>`), never `master`:
+  OpenCVE's master differs from v3.1.0 in exactly the parts we use (SSRF allow-list,
+  automations).
 - Networking: `dt2dojo` uses the host network; the receiver is on a bridge network,
   published on 127.0.0.1, and attached to `opencve_default` as `vulnflow-receiver` by
-  `deploy/docker-compose.glue-opencve.yml`. OpenCVE's SSRF guard only accepts it because
-  `opencve-bootstrap` writes that network's subnet to
-  `OPENCVE_NOTIFICATION_ALLOWED_INTERNAL_NETWORKS`.
+  `deploy/docker-compose.glue-opencve.yml`. OpenCVE v3.1.0's API rejects private webhook
+  URLs (no allow-list; that arrives after v3.1.0), so `stacks/opencve/bootstrap_webhooks.py`
+  writes the notification and its alert automation with the ORM. In v3.1.0 notifications
+  only fire through an automation's `send_notification` action.
 
 ## Tests
 

@@ -591,35 +591,130 @@ def test_dd_bootstrap_gives_up_with_hint():
         )
 
 
-def test_opencve_ensure_webhook_creates_then_patches():
-    state: dict[str, object] = {}
+def test_opencve_webhook_input_is_a_python_assignment(inv):
+    from vulnflow.__main__ import opencve_webhook_input
 
-    def get_route(m, url, h, b):
-        return Response(200, b"{}", {}) if state else Response(404, b"", {})
+    token = secrets.token_hex(16)
+    line = opencve_webhook_input(inv, "http://vulnflow-receiver:8380/opencve", token, "org")
+    assert line.startswith("VF = ") and "\n" not in line
+    ns: dict[str, Any] = {}
+    exec(line, ns)  # noqa: S102 - our own line, run as manage.py shell would
+    vf = ns["VF"]
+    assert vf["org"] == "org" and vf["name"] == "vulnflow"
+    assert vf["projects"] == sorted({t.opencve_project for t in inv.teams.values()})
+    assert vf["url"] == "http://vulnflow-receiver:8380/opencve"
+    assert vf["headers"] == {"X-Vulnflow-Token": token}
 
-    def post_route(m, url, h, b):
-        state.update(json.loads(b))
-        return Response(201, b"{}", {})
 
-    t = FakeTransport(
-        {
-            "GET /notifications/vulnflow": get_route,
-            "POST /notifications": post_route,
-            "PATCH /notifications/vulnflow": {},
-        }
-    )
-    oc = OpenCVE("http://oc", "org", "t", transport=t)
-    hdrs = {"X-Vulnflow-Token": "s"}
-    assert oc.ensure_webhook("dev", "vulnflow", "http://r:8380/opencve", hdrs) is True
-    assert state == {
-        "name": "vulnflow",
-        "type": "webhook",
-        "configuration": {"url": "http://r:8380/opencve", "headers": hdrs},
+def _run_bootstrap_webhooks(monkeypatch, vf, store):
+    """Execute stacks/opencve/bootstrap_webhooks.py against minimal fake Django models."""
+    import contextlib
+    import sys
+    import types
+    import uuid
+
+    class Obj:
+        def __init__(self, **kw):
+            self.id = uuid.uuid4()
+            self.__dict__.update(kw)
+
+        def save(self):
+            store["saved"].append(self)
+
+    class Manager:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def _match(self, kw):
+            return [o for o in store[self.kind] if all(getattr(o, k) == v for k, v in kw.items())]
+
+        def get(self, **kw):
+            (o,) = self._match(kw)
+            return o
+
+        def filter(self, **kw):
+            found = self._match(kw)
+            return types.SimpleNamespace(first=lambda: found[0] if found else None)
+
+        def get_or_create(self, defaults=None, **kw):
+            found = self._match(kw)
+            if found:
+                return found[0], False
+            o = Obj(**kw, **(defaults or {}))
+            store[self.kind].append(o)
+            return o, True
+
+    def model(kind, **attrs):
+        return type(kind, (), {"objects": Manager(kind), **attrs})
+
+    db = types.ModuleType("django.db")
+    db.transaction = types.SimpleNamespace(atomic=contextlib.nullcontext)  # type: ignore[attr-defined]
+    orgs = types.ModuleType("organizations.models")
+    orgs.Organization = model("org")  # type: ignore[attr-defined]
+    projects = types.ModuleType("projects.models")
+    projects.Project = model("project")  # type: ignore[attr-defined]
+    projects.Notification = model("notification")  # type: ignore[attr-defined]
+    projects.Automation = model("automation", TRIGGER_ALERT="alert")  # type: ignore[attr-defined]
+    for name, mod in {
+        "django": types.ModuleType("django"),
+        "django.db": db,
+        "organizations": types.ModuleType("organizations"),
+        "organizations.models": orgs,
+        "projects": types.ModuleType("projects"),
+        "projects.models": projects,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    import io
+    from contextlib import redirect_stdout
+
+    script = (ROOT / "stacks" / "opencve" / "bootstrap_webhooks.py").read_text()
+    out = io.StringIO()
+    with redirect_stdout(out):
+        exec(compile(script, "bootstrap_webhooks.py", "exec"), {"VF": vf})  # noqa: S102 - our own script
+    return out.getvalue().split()
+
+
+def test_opencve_bootstrap_webhooks_script_creates_then_updates(monkeypatch):
+    import types
+
+    org = types.SimpleNamespace(name="org")
+    dev = types.SimpleNamespace(organization=org, name="dev")
+    store: dict[str, list] = {
+        "org": [org],
+        "project": [dev],
+        "notification": [],
+        "automation": [],
+        "saved": [],
     }
-    assert t.calls[-1][1].endswith("/api/v2/organizations/org/projects/dev/notifications")
-    assert oc.ensure_webhook("dev", "vulnflow", "http://r:8380/opencve", hdrs) is False
-    m, _, _, body = t.calls[-1]
-    assert m == "PATCH" and json.loads(body)["configuration"]["headers"] == hdrs
+    vf = {
+        "org": "org",
+        "projects": ["dev", "gone"],
+        "name": "vulnflow",
+        "url": "http://r:8380/opencve",
+        "headers": {"X-Vulnflow-Token": "a"},
+    }
+
+    out = _run_bootstrap_webhooks(monkeypatch, vf, store)
+    assert out == ["WEBHOOK", "dev", "created", "MISSING", "gone"]
+    (n,), (a,) = store["notification"], store["automation"]
+    assert (n.project, n.name, n.type, n.is_enabled) == (dev, "vulnflow", "webhook", True)
+    assert n.configuration == {
+        "extras": {"url": "http://r:8380/opencve", "headers": {"X-Vulnflow-Token": "a"}}
+    }
+    assert (a.project, a.name, a.trigger_type, a.is_enabled) == (dev, "vulnflow", "alert", True)
+    assert a.configuration["conditions"] == {"operator": "AND", "children": []}
+    assert a.configuration["actions"] == [{"type": "send_notification", "value": str(n.id)}]
+    assert "cve_enters_project" in a.configuration["triggers"]
+    assert len(a.configuration["triggers"]) == 12
+
+    # Rerun with a rotated token: same objects, updated in place
+    vf["headers"] = {"X-Vulnflow-Token": "b"}
+    out = _run_bootstrap_webhooks(monkeypatch, vf, store)
+    assert out == ["WEBHOOK", "dev", "updated", "MISSING", "gone"]
+    assert len(store["notification"]) == 1 and len(store["automation"]) == 1
+    assert store["notification"][0].configuration["extras"]["headers"] == {"X-Vulnflow-Token": "b"}
+    assert store["automation"][0].configuration["actions"][0]["value"] == str(n.id)
 
 
 def test_env_set_cli_reads_stdin(tmp_path, monkeypatch):
