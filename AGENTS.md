@@ -71,6 +71,9 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   Dependency-Track images (tags are written out in
   `stacks/dependency-track/docker-compose.yml` on purpose; `${VAR}` tags are invisible to
   Dependabot). `DD_REF` and `OPENCVE_REF` in `.env.example` are bumped by hand.
+- Container images use exact tags, never floating ones: `deploy/Dockerfile` is
+  `python:X.Y.Z-slim-<debian>` (not `X.Y-slim`), so builds are reproducible and every
+  bump arrives as a reviewable Dependabot PR.
 - Actions are pinned by commit SHA with a `# vX.Y.Z` comment. For annotated tags, resolve
   the tag object to its commit (`gh api repos/<o>/<r>/git/tags/<sha>`).
 

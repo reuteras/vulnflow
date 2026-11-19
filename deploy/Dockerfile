@@ -1,4 +1,4 @@
-FROM python:3.15-slim
+FROM python:3.15.2-slim-trixie
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY vulnflow/ /app/vulnflow/
