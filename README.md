@@ -50,6 +50,11 @@ Stopping and starting later (data is kept in Docker volumes):
 `up` uses the images and configuration from the last `setup`; after changing versions
 (`DD_REF`, `OPENCVE_REF`, image tags) run `./poc.sh setup` instead.
 
+To start over from scratch, `./poc.sh destroy` deletes all containers, data volumes,
+`upstream/`, `data/` and `.env` (it lists what it will delete and asks you to type
+`destroy`; `--yes` skips that). Docker images are kept, so the next `./poc.sh setup` is
+faster.
+
 The individual steps, if you want to run or rerun one:
 
 ```bash
