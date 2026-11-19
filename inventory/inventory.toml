@@ -1,0 +1,52 @@
+# Single source of truth for "what we run and who owns it".
+# `python -m vulnflow sync` pushes this to OpenCVE (subscriptions per project),
+# Dependency-Track (project tags) and DefectDojo (product types).
+# In production, generate this file from the CMDB instead of editing by hand.
+
+[priority]
+# Tiers used by the webhook receiver (simple SSVC-inspired rules, tune to taste)
+# P1 Act:     in KEV (CISA or other configured KEV) OR an 'exploited' sighting
+# P2 Attend:  EPSS >= epss_attend  OR (CVSS >= cvss_critical AND EPSS >= epss_floor)
+# P3 Track:   CVSS >= cvss_high
+# P4 Watch:   everything else
+epss_attend   = 0.10
+epss_floor    = 0.01
+cvss_critical = 9.0
+cvss_high     = 7.0
+# Only push P1..P(n) to chat; everything still goes to the JSONL log
+chat_min_tier = 2
+# OpenCVE event types to ignore entirely (e.g. pure reference churn)
+ignore_event_types = ["references"]
+
+# ---------------------------------------------------------------------------
+[teams.sysadm]
+display_name   = "Drift / sysadmin"
+opencve_project = "sysadm"
+defectdojo_product_type = "Sysadmin"
+dtrack_tag     = "team-sysadm"
+chat_mention   = "@drift-oncall"
+
+[teams.sysadm.opencve]
+vendors  = ["fortinet", "citrix", "vmware", "openssh"]
+[teams.sysadm.opencve.products]
+microsoft = ["windows_server_2022", "windows_server_2025", "exchange_server"]
+apache    = ["http_server", "tomcat"]
+redhat    = ["enterprise_linux"]
+linux     = ["linux_kernel"]
+
+# ---------------------------------------------------------------------------
+[teams.dev]
+display_name   = "Utveckling"
+opencve_project = "dev"
+defectdojo_product_type = "Development"
+dtrack_tag     = "team-dev"
+chat_mention   = "@dev-security"
+
+[teams.dev.opencve]
+vendors  = ["python", "nodejs"]
+[teams.dev.opencve.products]
+postgresql = ["postgresql"]
+gitlab     = ["gitlab"]
+jenkins    = ["jenkins"]
+# Libraries are better tracked by SBOM in Dependency-Track (purl/OSV/GHSA matching)
+# than by CPE subscriptions here, because NVD no longer adds CPEs to most CVEs.

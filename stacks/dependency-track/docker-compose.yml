@@ -1,0 +1,54 @@
+# OWASP Dependency-Track 5.x — based on the upstream quickstart compose
+# (https://dependencytrack.github.io/docs/next/tutorials/quickstart/), with:
+#   - ports moved to 8180 (API) / 8181 (UI) so they don't clash with OpenCVE's Airflow (8080)
+#   - credentials taken from ../../.env instead of hard-coded
+#   - everything bound to 127.0.0.1 (put a TLS reverse proxy in front for team access)
+name: vulnflow-dtrack
+
+services:
+  apiserver:
+    image: ghcr.io/dependencytrack/apiserver:${DT_VERSION:-5.2.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    environment:
+      DT_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/dtrack"
+      DT_DATASOURCE_USERNAME: "dtrack"
+      DT_DATASOURCE_PASSWORD: "${DT_DB_PASSWORD:?set DT_DB_PASSWORD in .env}"
+    ports:
+      - "127.0.0.1:${DT_API_PORT:-8180}:8080"
+    volumes:
+      - "apiserver-data:/data"
+    restart: unless-stopped
+
+  frontend:
+    image: ghcr.io/dependencytrack/frontend:${DT_VERSION:-5.2.1}
+    environment:
+      # Browser-facing URL of the API server (the browser calls it directly)
+      API_BASE_URL: "${DT_PUBLIC_API_URL:-http://localhost:8180}"
+    ports:
+      - "127.0.0.1:${DT_UI_PORT:-8181}:8080"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: "dtrack"
+      POSTGRES_USER: "dtrack"
+      POSTGRES_PASSWORD: "${DT_DB_PASSWORD:?set DT_DB_PASSWORD in .env}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - "postgres-data:/var/lib/postgresql"
+    restart: unless-stopped
+
+volumes:
+  apiserver-data: {}
+  postgres-data: {}

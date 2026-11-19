@@ -1,0 +1,175 @@
+"""First-run automation for the upstream tools (no clicking through UIs).
+
+Dependency-Track (verified against the v1 API of DT 5.2.1, which v5 still uses for
+login and access management):
+  POST /api/v1/user/forceChangePassword   form: username,password,newPassword,confirmPassword
+  POST /api/v1/user/login                 form: username,password -> JWT (text/plain)
+  GET  /api/v1/team                       list teams
+  PUT  /api/v1/team                       {"name": ...} -> 201 team (409 if it exists)
+  POST /api/v1/permission/{perm}/team/{uuid}  -> 200, or 304 if already granted
+  PUT  /api/v1/team/{uuid}/key            -> 201 {"key": "odt_...", ...}  (plaintext only now)
+  GET  /api/v1/team/self                  with X-Api-Key -> the key's team
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import secrets
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+from .net import Http, Transport
+
+log = logging.getLogger(__name__)
+
+DT_DEFAULT_ADMIN = ("admin", "admin")
+DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO",
+                       "VIEW_VULNERABILITY")
+FORM = {"Content-Type": "application/x-www-form-urlencoded"}
+
+
+class BootstrapError(RuntimeError):
+    pass
+
+
+@dataclass
+class DTBootstrapResult:
+    api_key: str            # "" when the existing key was kept
+    team_uuid: str
+    created_team: bool
+    changed_admin_password: bool
+
+
+def new_secret(nbytes: int = 24) -> str:
+    return secrets.token_urlsafe(nbytes)
+
+
+def wait_for(http: Http, path: str, timeout: float, interval: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if http.get(path, expect_ok=False).ok:
+                return
+        except OSError as e:
+            log.debug("waiting for %s: %s", http.url(path), e)
+        if time.monotonic() >= deadline:
+            raise BootstrapError(f"{http.url(path)} not ready after {timeout:.0f}s")
+        time.sleep(interval)
+
+
+def _form(**fields: str) -> bytes:
+    return urlencode(fields).encode()
+
+
+def _dt_login(http: Http, user: str, password: str) -> tuple[str | None, str]:
+    """Return (token, failure_cause)."""
+    r = http.post("api/v1/user/login", body=_form(username=user, password=password),
+                  headers=FORM, expect_ok=False)
+    text = r.body.decode("utf-8", "replace").strip()
+    return (text, "") if r.ok and text else (None, text or f"HTTP {r.status}")
+
+
+def dt_key_works(base_url: str, api_key: str, transport: Transport | None = None) -> bool:
+    if not api_key:
+        return False
+    http = Http(base_url, headers={"X-Api-Key": api_key, "Accept": "application/json"},
+                transport=transport, retries=0)
+    return http.get("api/v1/team/self", expect_ok=False).ok
+
+
+def bootstrap_dtrack(base_url: str, *, admin_password: str, team_name: str = "vulnflow",
+                     existing_key: str = "", transport: Transport | None = None,
+                     wait_timeout: float = 600.0) -> DTBootstrapResult:
+    """Idempotently get Dependency-Track to: admin password set, team with the vulnflow
+    permissions, and a working API key for it."""
+    if not admin_password:
+        raise BootstrapError("admin password must not be empty")
+    anon = Http(base_url, headers={"Accept": "application/json"}, transport=transport)
+    wait_for(anon, "api/version", wait_timeout)
+
+    user, default_pw = DT_DEFAULT_ADMIN
+    changed = False
+    token, cause = _dt_login(anon, user, admin_password)
+    if token is None:
+        # Fresh install: admin/admin with FORCE_PASSWORD_CHANGE. Swap to ours.
+        r = anon.post("api/v1/user/forceChangePassword",
+                      body=_form(username=user, password=default_pw,
+                                 newPassword=admin_password, confirmPassword=admin_password),
+                      headers=FORM, expect_ok=False)
+        if not r.ok:
+            raise BootstrapError(
+                f"cannot log in as {user} (login: {cause}; forced change: HTTP {r.status} "
+                f"{r.body[:200].decode('utf-8', 'replace')}). If you changed the admin "
+                f"password in the UI, put it in .env as DT_ADMIN_PASSWORD.")
+        changed = True
+        token, cause = _dt_login(anon, user, admin_password)
+        if token is None:
+            raise BootstrapError(f"login failed after password change: {cause}")
+
+    http = Http(base_url, headers={"Authorization": f"Bearer {token}",
+                                   "Accept": "application/json"}, transport=transport)
+
+    team = _find_team(http, team_name)
+    created = team is None
+    if team is None:
+        team = http.put("api/v1/team", json_body={"name": team_name}).json()
+    uuid = team["uuid"]
+
+    have = {p.get("name") for p in team.get("permissions") or []}
+    for perm in DT_TEAM_PERMISSIONS:
+        if perm in have:
+            continue
+        r = http.post(f"api/v1/permission/{perm}/team/{uuid}", expect_ok=False)
+        if not (r.ok or r.status == 304):
+            raise BootstrapError(f"granting {perm} to team {team_name}: HTTP {r.status}")
+
+    if dt_key_works(base_url, existing_key, transport):
+        return DTBootstrapResult("", uuid, created, changed)
+
+    key = (http.put(f"api/v1/team/{uuid}/key").json() or {}).get("key", "")
+    if not key or not dt_key_works(base_url, key, transport):
+        raise BootstrapError("generated API key did not validate against /api/v1/team/self")
+    return DTBootstrapResult(key, uuid, created, changed)
+
+
+def _find_team(http: Http, name: str) -> dict[str, Any] | None:
+    page = 1
+    while True:
+        r = http.get(f"api/v1/team?pageSize=100&pageNumber={page}")
+        items: list[dict[str, Any]] = r.json() or []
+        for t in items:
+            if t.get("name") == name:
+                return t
+        if len(items) < 100:
+            return None
+        page += 1
+
+
+_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def set_env_values(path: str | Path, values: dict[str, str]) -> None:
+    """Replace KEY=... lines in a .env file (appending missing keys), keeping
+    comments and order. The file is (re)written with mode 600."""
+    p = Path(path)
+    for key, val in values.items():
+        if not _KEY_RE.match(key) or "\n" in val:
+            raise ValueError(f"refusing to write {key!r} to {p}")
+    lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+    todo = dict(values)
+    out: list[str] = []
+    for line in lines:
+        key = line.partition("=")[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and key in todo:
+            out.append(f"{key}={todo.pop(key)}")
+        else:
+            out.append(line)
+    for key, val in todo.items():
+        out.append(f"{key}={val}")
+    p.touch(mode=0o600, exist_ok=True)
+    p.chmod(0o600)
+    p.write_text("\n".join(out) + "\n", encoding="utf-8")

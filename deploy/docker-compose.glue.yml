@@ -1,0 +1,40 @@
+# vulnflow glue: OpenCVE webhook receiver + periodic Dependency-Track -> DefectDojo sync.
+# Uses the host network so "localhost:8180/8280" in .env reach DT and DefectDojo
+# exactly as they do from the shell. For production, put everything on one
+# docker network and use service names instead.
+name: vulnflow-glue
+
+x-common: &common
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  image: vulnflow:local
+  network_mode: host
+  env_file: ../.env
+  volumes:
+    - ../inventory:/app/inventory:ro
+    - vulnflow-data:/app/data
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  receiver:
+    <<: *common
+    command: ["serve", "--host", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('VULNFLOW_PORT','8380')+'/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dt2dojo:
+    <<: *common
+    # every 30 minutes; DT re-analyses continuously, Dojo re-import is idempotent
+    command: ["dt2dojo", "--loop", "1800"]
+
+volumes:
+  vulnflow-data: {}
