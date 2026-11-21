@@ -17,6 +17,7 @@
 #   dojo-up           clone + start DefectDojo and bootstrap it (admin pw, API key)
 #   dd-bootstrap      only the DefectDojo bootstrap step (rerunnable)
 #   glue-up           build + start vulnflow receiver and dt2dojo loop
+#   tailscale         apply VULNFLOW_TS_HOST: tailnet URLs in .env + tailscale serve (or undo)
 #   all               dtrack-up, dojo-up, glue-up (no OpenCVE; use setup for everything)
 #   up                start everything again after down or a reboot (no rebuild/bootstrap)
 #   down              stop everything; volumes (data) are kept
@@ -115,6 +116,29 @@ check_filesystem() {
 
 port_free() { ! (ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null) | awk '{print $4}' | grep -qE "[:.]$1\$"; }
 
+# Listening TCP sockets that are reachable from outside loopback and the tailnet
+# (Tailscale: 100.64.0.0/10 and fd7a:115c:a1e0::/48). Docker-published ports bypass an
+# input-chain firewall such as ufw, so a stack that starts publishing on 0.0.0.0 would be
+# public even with a "deny incoming" policy. Linux only (ss).
+check_exposure() {
+  if ! command -v ss >/dev/null; then
+    echo "  exposure check skipped (no ss; Linux only)"
+    return 0
+  fi
+  local open
+  open="$(ss -ltnH | awk '{a = $4; gsub(/%[^]:]+/, "", a); print a}' | grep -vE \
+    '^(127\.[0-9.]+|\[::1\]|\[::ffff:127\.[0-9.]+\]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9.]+|\[fd7a:115c:a1e0:[0-9a-f:]*\]):[0-9]+$' \
+    | sort -u || true)"
+  if [[ -z "$open" ]]; then
+    echo "  exposure: only loopback and tailnet listeners"
+    return 0
+  fi
+  warn "listening beyond loopback/tailnet (the host firewall must block these;"
+  warn "  Docker-published ports bypass ufw):"
+  local a
+  while read -r a; do warn "    $a"; done <<<"$open"
+}
+
 cmd_check() {
   command -v docker >/dev/null || die "docker not found"
   docker compose version >/dev/null 2>&1 || die "docker compose v2 plugin not found"
@@ -132,6 +156,12 @@ cmd_check() {
     "${VULNFLOW_PORT:-8380}"; do
     if port_free "$p"; then echo "  port $p free"; else warn "port $p already in use"; fi
   done
+  check_exposure
+  if [[ -n "${VULNFLOW_TS_HOST:-}" ]]; then
+    command -v tailscale >/dev/null || die "VULNFLOW_TS_HOST is set but tailscale is not installed"
+    ts_resolve || die "VULNFLOW_TS_HOST=${VULNFLOW_TS_HOST}: cannot resolve the tailnet name"
+    echo "  tailnet name $TS_HOST"
+  fi
   local mem
   mem="$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)"
   ((mem >= 12)) || warn "~${mem} GB RAM; all three stacks together want ~12 GB+"
@@ -250,6 +280,10 @@ cmd_opencve_prepare() {
   fi
   opencve_harden_airflow "$denv"
   chmod 600 "$denv" "$wenv"
+  if [[ -n "${VULNFLOW_TS_HOST:-}" ]]; then
+    ts_resolve || die "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST (is tailscale up?)"
+  fi
+  opencve_set_origins "$TS_HOST"
   cat <<EOF
 
 Next:
@@ -315,7 +349,7 @@ cmd_opencve_bootstrap() {
   [[ -n "$(opencve_compose ps -q webserver 2>/dev/null)" ]] \
     || die "OpenCVE webserver not running - ./poc.sh opencve-start"
 
-  wait_http "${OPENCVE_URL:-http://localhost}/" 300
+  wait_http "$(opencve_local_url)/" 300
 
   # 1. Admin, org, service user, read-write org token (no API for these: Django shell).
   #    Inputs go in on stdin as a JSON header, never on a command line.
@@ -395,8 +429,6 @@ cmd_dojo_up() {
   vulnflow dd-bootstrap || die "bootstrap failed; rerun ./poc.sh dd-bootstrap"
   log "DefectDojo: http://localhost:${DD_PORT:-8280}  user ${DD_ADMIN_USER:-admin}, password"
   log "  DD_ADMIN_PASSWORD in .env; API key in .env as DD_API_KEY"
-  warn "DefectDojo's compose publishes on all interfaces (mode: host). Firewall it or put"
-  warn "it behind your reverse proxy."
 }
 
 glue_compose() {
@@ -417,6 +449,142 @@ cmd_glue_up() {
   fi
 }
 
+# ---- Tailscale -------------------------------------------------------------------
+# With VULNFLOW_TS_HOST set, every service stays bound to 127.0.0.1 and `tailscale serve`
+# proxies the browser-facing ones on the tailnet only, over HTTPS (MagicDNS certificate):
+#   https://<host>             OpenCVE           -> 127.0.0.1:80
+#   https://<host>:DT_UI_PORT  Dependency-Track  -> 127.0.0.1:DT_UI_PORT
+#   https://<host>:DT_API_PORT DT API (the DT UI calls it from the browser; also SBOM uploads)
+#   https://<host>:DD_PORT     DefectDojo        -> 127.0.0.1:DD_PORT
+# Not served: Airflow (8080) and the webhook receiver (OpenCVE reaches it on its docker
+# network). tailscale serve listens on the Tailscale addresses only and keeps its config
+# across reboots. Needs root or `tailscale set --operator=<user>`, and HTTPS certificates
+# enabled for the tailnet.
+TS_HOST=""            # resolved tailnet name, set by ts_resolve
+OPENCVE_LOCAL_PORT=80 # opencve_harden_airflow binds OpenCVE's nginx to 127.0.0.1:80
+
+# VULNFLOW_TS_HOST: a name ("vulnflow.tail1234.ts.net"), or "auto" for this node's MagicDNS name
+ts_resolve() {
+  local h="${VULNFLOW_TS_HOST:-}"
+  [[ -n "$h" ]] || return 1
+  if [[ "$h" == auto ]]; then
+    command -v tailscale >/dev/null || return 1
+    h="$(tailscale status --json 2>/dev/null | python3 -I -c \
+      'import json, sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)" \
+      || return 1
+  fi
+  [[ "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+  TS_HOST="$h"
+}
+
+ts_ports() { # tailnet-port:local-port
+  printf '%s\n' "443:$OPENCVE_LOCAL_PORT" "${DT_UI_PORT:-8181}:${DT_UI_PORT:-8181}" \
+    "${DT_API_PORT:-8180}:${DT_API_PORT:-8180}" "${DD_PORT:-8280}:${DD_PORT:-8280}"
+}
+
+ts_serve() { # on|off
+  local pub loc
+  while IFS=: read -r pub loc; do
+    if [[ "$1" == on ]]; then
+      tailscale serve --bg --https="$pub" "http://127.0.0.1:$loc" >/dev/null \
+        || die "tailscale serve failed: run as root or 'sudo tailscale set --operator=$USER'," \
+          "and enable HTTPS certificates for the tailnet (admin console, DNS)"
+    else
+      tailscale serve --https="$pub" off >/dev/null 2>&1 || true
+    fi
+  done < <(ts_ports)
+}
+
+# Browser-facing URLs in .env: for the tailnet name in $1, or back to localhost when empty.
+# DT_PUBLIC_API_URL is baked into the DT frontend container; DD_SITE_URL and
+# DD_CSRF_TRUSTED_ORIGINS go to DefectDojo's uwsgi (stacks/defectdojo/override.yml);
+# OPENCVE_URL is used in chat links, so commands on this host use OPENCVE_API_URL.
+ts_env_values() {
+  local dd="http://localhost:${DD_PORT:-8280}"
+  if [[ -n "$1" ]]; then
+    printf '%s\n' "DT_PUBLIC_API_URL=https://$1:${DT_API_PORT:-8180}" \
+      "DD_SITE_URL=https://$1:${DD_PORT:-8280}" \
+      "DD_CSRF_TRUSTED_ORIGINS=https://$1:${DD_PORT:-8280},$dd" \
+      "OPENCVE_URL=https://$1" "OPENCVE_API_URL=${OPENCVE_API_URL:-http://localhost}"
+  else
+    printf '%s\n' "DT_PUBLIC_API_URL=http://localhost:${DT_API_PORT:-8180}" "DD_SITE_URL=$dd" \
+      "DD_CSRF_TRUSTED_ORIGINS=$dd" "OPENCVE_URL=http://localhost"
+  fi
+}
+
+# OpenCVE's Django compares the browser's Origin (https://<host>) with the plain-HTTP
+# request nginx forwards, so the tailnet origin must be trusted. Its local settings.py
+# (from install.sh prepare, bind-mounted into the webserver) gets a marked block. Written
+# in place, not with sed -i: a file bind mount keeps pointing at the old inode.
+OPENCVE_SETTINGS_CHANGED=0
+opencve_set_origins() { # tailnet name, or empty to remove the block
+  local f="$UP/opencve/web/opencve/conf/settings.py" before new
+  [[ -f "$f" ]] || return 0
+  before="$(cat "$f")"
+  new="$(sed '/^# BEGIN vulnflow/,/^# END vulnflow/d' "$f")"
+  if [[ -n "$1" ]]; then
+    new+=$'\n'"# BEGIN vulnflow (poc.sh): trust the tailscale serve HTTPS origin"
+    new+=$'\n'"CSRF_TRUSTED_ORIGINS = [\"https://$1\"]"
+    new+=$'\n'"# END vulnflow"
+  fi
+  [[ "$new" == "$before" ]] && return 0
+  printf '%s\n' "$new" >"$f"
+  OPENCVE_SETTINGS_CHANGED=1
+  if [[ -n "$1" ]]; then
+    log "OpenCVE: settings.py trusts origin https://$1"
+  else
+    log "OpenCVE: tailnet origin removed from settings.py"
+  fi
+}
+
+# Resolve the tailnet name and write the URLs that depend on it (no-op when unset).
+# Returns 1 when VULNFLOW_TS_HOST is set but can't be resolved.
+ts_prepare() {
+  [[ -n "${VULNFLOW_TS_HOST:-}" ]] || return 0
+  ts_resolve || return 1
+  ts_env_values "$TS_HOST" | vulnflow env-set
+  load_env
+  opencve_set_origins "$TS_HOST"
+}
+
+installed() { [[ -d "$UP/defectdojo" && -f "$UP/opencve/docker/.env" && -n "${DT_API_KEY:-}" ]]; }
+
+opencve_local_url() { echo "${OPENCVE_API_URL:-${OPENCVE_URL:-http://localhost}}"; }
+
+print_logins() {
+  local dt="http://localhost:${DT_UI_PORT:-8181}" dd="http://localhost:${DD_PORT:-8280}"
+  local oc="http://localhost"
+  if [[ -n "$TS_HOST" ]]; then
+    dt="https://$TS_HOST:${DT_UI_PORT:-8181}" dd="https://$TS_HOST:${DD_PORT:-8280}"
+    oc="https://$TS_HOST"
+  fi
+  log "Logins (passwords in .env):"
+  log "  Dependency-Track $dt  admin / DT_ADMIN_PASSWORD"
+  log "  DefectDojo       $dd  ${DD_ADMIN_USER:-admin} / DD_ADMIN_PASSWORD"
+  log "  OpenCVE          $oc  ${OPENCVE_ADMIN_USER:-admin} / OPENCVE_ADMIN_PASSWORD"
+}
+
+cmd_tailscale() {
+  load_env
+  if [[ -n "${VULNFLOW_TS_HOST:-}" ]]; then
+    command -v tailscale >/dev/null || die "tailscale not installed"
+    ts_prepare || die "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST" \
+      "(is tailscale up, with MagicDNS on?)"
+    log "Tailnet name $TS_HOST; URLs in .env updated"
+  else
+    log "VULNFLOW_TS_HOST empty: removing tailscale serve entries, URLs back to localhost"
+    if command -v tailscale >/dev/null; then ts_serve off; fi
+    ts_env_values "" | vulnflow env-set
+    load_env
+    opencve_set_origins ""
+  fi
+  if installed; then
+    cmd_up # recreates the containers whose settings changed, then serves when enabled
+  else
+    log "Stacks not installed yet; ./poc.sh setup uses these URLs"
+  fi
+}
+
 cmd_status() {
   load_env
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
@@ -425,9 +593,14 @@ cmd_status() {
   for u in "http://localhost:${DT_API_PORT:-8180}/health" \
     "http://localhost:${DD_PORT:-8280}/login" \
     "http://localhost:${VULNFLOW_PORT:-8380}/healthz" \
-    "http://localhost/"; do
+    "$(opencve_local_url)/"; do
     printf '  %-45s %s\n' "$u" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u" || echo down)"
   done
+  check_exposure
+  if [[ -n "${VULNFLOW_TS_HOST:-}" ]] && command -v tailscale >/dev/null; then
+    log "tailscale serve:"
+    tailscale serve status || true
+  fi
 }
 
 cmd_down() {
@@ -445,22 +618,32 @@ cmd_down() {
 # .env, no clone/build/bootstrap. Use setup for a first install or after changing versions.
 cmd_up() {
   load_env
-  [[ -d "$UP/defectdojo" && -f "$UP/opencve/docker/.env" && -n "${DT_API_KEY:-}" ]] \
-    || die "not installed yet - run ./poc.sh setup"
+  installed || die "not installed yet - run ./poc.sh setup"
+  if ! ts_prepare; then
+    warn "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST (is tailscale up?);"
+    warn "  starting with the URLs already in .env and without tailscale serve"
+  fi
   log "Dependency-Track"
   docker compose --env-file .env -f stacks/dependency-track/docker-compose.yml up -d
   log "DefectDojo"
   dojo_compose up -d
   log "OpenCVE"
   opencve_compose up -d
+  # settings.py is a bind mount: a running webserver only sees a change after a restart
+  if ((OPENCVE_SETTINGS_CHANGED)); then opencve_compose restart webserver; fi
   log "vulnflow glue"
   cmd_glue_up
   log "Waiting for the services to answer"
   wait_http "http://localhost:${DT_API_PORT:-8180}/health" 600
   wait_http "http://localhost:${DD_PORT:-8280}/login" 600
-  wait_http "${OPENCVE_URL:-http://localhost}/" 300
+  wait_http "$(opencve_local_url)/" 300
   wait_http "http://localhost:${VULNFLOW_PORT:-8380}/healthz" 120
+  if [[ -n "$TS_HOST" ]]; then
+    log "tailscale serve on $TS_HOST"
+    ts_serve on
+  fi
   cmd_status
+  print_logins
 }
 
 # Compose projects of the four stacks (DefectDojo's compose has no name:, so it's the
@@ -508,6 +691,8 @@ cmd_setup() {
   local t0=$SECONDS
   cmd_init
   cmd_check
+  # Before any container starts: DT's frontend and DefectDojo's uwsgi read the URLs at creation
+  ts_prepare || die "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST (is tailscale up?)"
   log "[1/4] Dependency-Track"
   cmd_dtrack_up
   log "[2/4] DefectDojo"
@@ -519,13 +704,17 @@ cmd_setup() {
   log "[4/4] Inventory sync (DefectDojo product types, DT coverage report)"
   load_env
   vulnflow sync --create-projects || die "inventory sync failed; rerun ./poc.sh setup"
+  if [[ -n "$TS_HOST" ]]; then
+    log "tailscale serve on $TS_HOST"
+    ts_serve on
+  fi
   cmd_status
-  log "Setup done in $(((SECONDS - t0) / 60)) min. Logins (passwords in .env):"
-  log "  Dependency-Track http://localhost:${DT_UI_PORT:-8181}  admin / DT_ADMIN_PASSWORD"
-  log "  DefectDojo       http://localhost:${DD_PORT:-8280}  ${DD_ADMIN_USER:-admin} / DD_ADMIN_PASSWORD"
-  log "  OpenCVE          ${OPENCVE_URL:-http://localhost}  ${OPENCVE_ADMIN_USER:-admin} / OPENCVE_ADMIN_PASSWORD"
-  log "Still yours: feed SBOMs (README 'Feed SBOMs'), optional VULNFLOW_CHAT_WEBHOOK,"
-  log "and a TLS/reverse proxy (all ports are bound to 127.0.0.1)."
+  log "Setup done in $(((SECONDS - t0) / 60)) min."
+  print_logins
+  log "Still yours: feed SBOMs (README 'Feed SBOMs') and optional VULNFLOW_CHAT_WEBHOOK."
+  if [[ -z "$TS_HOST" ]]; then
+    log "All ports are bound to 127.0.0.1: reach them over ssh -L or set VULNFLOW_TS_HOST."
+  fi
 }
 
 case "${1:-}" in
@@ -540,6 +729,7 @@ case "${1:-}" in
   dojo-up) cmd_dojo_up ;;
   dd-bootstrap) load_env && vulnflow dd-bootstrap ;;
   glue-up) cmd_glue_up ;;
+  tailscale) cmd_tailscale ;;
   all)
     cmd_dtrack_up
     cmd_dojo_up
@@ -550,7 +740,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,24p' "$0"
+    sed -n '2,25p' "$0"
     exit 1
     ;;
 esac
