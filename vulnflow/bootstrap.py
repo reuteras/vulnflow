@@ -8,7 +8,13 @@ login and access management):
   PUT  /api/v1/team                       {"name": ...} -> 201 team (409 if it exists)
   POST /api/v1/permission/{perm}/team/{uuid}  -> 200, or 304 if already granted
   PUT  /api/v1/team/{uuid}/key            -> 201 {"key": "odt_...", ...}  (plaintext only now)
-  GET  /api/v1/team/self                  with X-Api-Key -> the key's team
+  GET  /api/v1/team/self                  with X-Api-Key -> the key's team {"uuid","name",...}
+  DELETE /api/v1/team                     {"uuid": ...} -> 204 (its API keys go with it)
+Per-host agent teams (agent_key/revoke_agent) use the same calls, checked against the DT
+5.2.2 tag (TeamResource, DeleteTeamRequest). PUT /api/v1/bom with autoCreate needs
+BOM_UPLOAD plus PROJECT_CREATION_UPLOAD and applies projectTags to the project it creates;
+changing tags later needs PORTFOLIO_MANAGEMENT(_UPDATE), else DT only logs a warning
+(BomResource.maybeBindTags).
 DT 5.2.2 source (ExtensionsResource, OsvVulnDataSourceFactory), admin JWT (needs
 SYSTEM_CONFIGURATION):
   GET  /api/v2/extension-points/vuln-data-source/extensions/osv/config  -> {"config": {...}}
@@ -45,6 +51,9 @@ log = logging.getLogger(__name__)
 
 DT_DEFAULT_ADMIN = ("admin", "admin")
 DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO", "VIEW_VULNERABILITY")
+# A machine's agent can create projects and upload SBOMs, and read nothing back.
+DT_AGENT_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD")
+DT_AGENT_TEAM_PREFIX = "agent-"
 # DT's login/forceChangePassword are @Produces(TEXT_PLAIN): Accept: application/json -> 406
 FORM = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
@@ -219,6 +228,95 @@ def bootstrap_dtrack(
     if not key or not dt_key_works(base_url, key, transport):
         raise BootstrapError("generated API key did not validate against /api/v1/team/self")
     return DTBootstrapResult(key, uuid, created, changed, osv)
+
+
+def dt_admin_http(base_url: str, admin_password: str, transport: Transport | None = None) -> Http:
+    """Http with an admin JWT (access management needs a user, not the vulnflow team key)."""
+    anon = Http(base_url, headers={"Accept": "application/json"}, transport=transport)
+    token, cause = _dt_login(anon, DT_DEFAULT_ADMIN[0], admin_password)
+    if token is None:
+        raise BootstrapError(f"cannot log in to Dependency-Track as admin: {cause}")
+    return Http(
+        base_url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        transport=transport,
+    )
+
+
+def _grant(http: Http, team: dict[str, Any], perms: tuple[str, ...]) -> None:
+    have = {p.get("name") for p in team.get("permissions") or []}
+    for perm in perms:
+        if perm in have:
+            continue
+        r = http.post(f"api/v1/permission/{perm}/team/{team['uuid']}", expect_ok=False)
+        if not (r.ok or r.status == 304):
+            raise BootstrapError(f"granting {perm} to team {team.get('name')}: HTTP {r.status}")
+
+
+def agent_key_team(base_url: str, api_key: str, transport: Transport | None = None) -> str:
+    """Name of the team an API key belongs to ("" if the key doesn't work)."""
+    if not api_key:
+        return ""
+    http = Http(
+        base_url,
+        headers={"X-Api-Key": api_key, "Accept": "application/json"},
+        transport=transport,
+        retries=0,
+    )
+    r = http.get("api/v1/team/self", expect_ok=False)
+    return str((r.json() or {}).get("name", "")) if r.ok else ""
+
+
+def agent_key(
+    admin: Http, host: str, existing_key: str = "", *, rotate: bool = False
+) -> tuple[str, bool]:
+    """(API key, new?) for host's agent: its own team agent-<host> with only
+    DT_AGENT_PERMISSIONS. A working key of that team is kept unless rotate; otherwise the
+    team is deleted (taking every old key with it) and created again with one new key."""
+    name = DT_AGENT_TEAM_PREFIX + host
+    team = _find_team(admin, name)
+    if (
+        team is not None
+        and not rotate
+        and agent_key_team(admin.base_url, existing_key, admin.transport) == name
+    ):
+        _grant(admin, team, DT_AGENT_PERMISSIONS)
+        return existing_key, False
+    if team is not None:
+        admin.request("DELETE", "api/v1/team", json_body={"uuid": team["uuid"]})
+    team = admin.put("api/v1/team", json_body={"name": name}).json()
+    _grant(admin, team, DT_AGENT_PERMISSIONS)
+    key = str((admin.put(f"api/v1/team/{team['uuid']}/key").json() or {}).get("key", ""))
+    if agent_key_team(admin.base_url, key, admin.transport) != name:
+        raise BootstrapError(f"the new key for {name} did not validate against /api/v1/team/self")
+    return key, True
+
+
+def revoke_agent(admin: Http, host: str) -> bool:
+    """Delete team agent-<host> and with it every API key of that host. False if absent."""
+    team = _find_team(admin, DT_AGENT_TEAM_PREFIX + host)
+    if team is None:
+        return False
+    admin.request("DELETE", "api/v1/team", json_body={"uuid": team["uuid"]})
+    return True
+
+
+def agent_teams(admin: Http) -> list[str]:
+    """Host names that have an agent team in Dependency-Track."""
+    out: list[str] = []
+    page = 1
+    while True:
+        items: list[dict[str, Any]] = (
+            admin.get(f"api/v1/team?pageSize=100&pageNumber={page}").json() or []
+        )
+        out += [
+            str(t["name"])[len(DT_AGENT_TEAM_PREFIX) :]
+            for t in items
+            if str(t.get("name", "")).startswith(DT_AGENT_TEAM_PREFIX)
+        ]
+        if len(items) < 100:
+            return sorted(out)
+        page += 1
 
 
 def _find_team(http: Http, name: str) -> dict[str, Any] | None:

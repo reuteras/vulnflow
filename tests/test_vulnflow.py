@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from vulnflow.clients import DefectDojo, DependencyTrack, OpenCVE
-from vulnflow.config import PriorityRules, load_inventory
+from vulnflow.config import PriorityRules, load_inventory, load_machines
 from vulnflow.intel import Enricher, Signals
 from vulnflow.jobs import dt_to_dojo, sync_inventory
 from vulnflow.net import Response
@@ -89,13 +89,11 @@ def make_enricher(tmp_path, **kw) -> tuple[Enricher, FakeTransport]:
 
 # ----------------------------------------------------------------------- inventory
 def test_inventory_loads_teams_and_rules(inv):
-    assert set(inv.teams) == {"sysadm", "dev"}
+    assert set(inv.teams) == {"sysadm", "users", "dev"}
     s = inv.teams["sysadm"]
     assert s.opencve_project == "sysadm" and s.dtrack_tag == "team-sysadm"
-    assert "fortinet" in s.vendors
-    assert s.products["microsoft"] == sorted(
-        ["windows_server_2022", "windows_server_2025", "exchange_server"]
-    )
+    assert s.products["debian"] == ["debian_linux"] and s.products["linux"] == ["linux_kernel"]
+    assert inv.teams["users"].products["apple"] == ["macos"]
     assert inv.rules.chat_min_tier == 2 and inv.rules.ignore_event_types == ["references"]
     assert inv.team_for_opencve_project("dev").key == "dev"
 
@@ -214,7 +212,7 @@ def test_unknown_project_is_unrouted(inv, tmp_path):
 def test_format_chat_only_hot_tiers(inv, tmp_path):
     e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
     msg = format_chat(process_payload(PAYLOAD, inv, e), inv, "http://opencve.local")
-    assert msg is not None and msg.startswith("@drift-oncall")
+    assert msg is not None and msg.startswith("@sysadm")
     assert "CVE-2024-3400" in msg and "http://opencve.local/cve/CVE-2024-3400" in msg
     assert "CVE-2026-0001" not in msg and "lower-tier" in msg
 
@@ -369,7 +367,7 @@ def test_dt_to_dojo_routes_by_tag(inv):
     rep = dt_to_dojo(
         inv, DependencyTrack("http://dt", "k", transport=t), DefectDojo("http://dd", "k", transport=t)
     )
-    assert not rep.errors and len(rep.done) == 2
+    assert not rep.errors and len(rep.done) == 3
     posts = [c for c in t.calls if c[0] == "POST"]
     sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
     assert b"Sysadmin" in sysadm[3]
@@ -433,6 +431,7 @@ class FakeDT:
         self.password, self.force = password, force_change
         self.teams: dict[str, dict] = {}
         self.keys: dict[str, str] = {}
+        self.issued = 0  # key counter (keys of deleted teams must not come back)
         self.calls: list[tuple[str, str]] = []
         # DT 5.2.2 stores the factory default on startup; None = nothing stored (404)
         self.osv: dict | None = {
@@ -481,6 +480,14 @@ class FakeDT:
         assert headers.get("Authorization") == "Bearer jwt-token", path
         if path == "api/v1/team" and method == "GET":
             return ok(list(self.teams.values()))
+        if path == "api/v1/team" and method == "DELETE":
+            uuid = json.loads(body)["uuid"]
+            name = next((n for n, t in self.teams.items() if t["uuid"] == uuid), None)
+            if name is None:
+                return Response(404, b"", {})
+            del self.teams[name]
+            self.keys = {k: v for k, v in self.keys.items() if v != name}
+            return Response(204, b"", {})
         if path == "api/v1/team" and method == "PUT":
             name = json.loads(body)["name"]
             self.teams[name] = {"uuid": f"uuid-{name}", "name": name, "permissions": []}
@@ -495,7 +502,8 @@ class FakeDT:
         if path.endswith("/key") and method == "PUT":
             uuid = path.split("/")[3]
             name = next(n for n, t in self.teams.items() if t["uuid"] == uuid)
-            key = f"odt_{len(self.keys):08d}_secret"
+            self.issued += 1
+            key = f"odt_{self.issued:08d}_secret"
             self.keys[key] = name
             return ok({"key": key, "publicId": key[4:12]}, 201)
         if path == "api/v2/extension-points/vuln-data-source/extensions/osv/config":
@@ -777,3 +785,421 @@ def test_env_set_cli_reads_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("OPENCVE_TOKEN=opc_org.a.b=c\n"))
     assert main(["--env-file", str(env_file), "env-set"]) == 0
     assert env_file.read_text() == "A=1\nOPENCVE_TOKEN=opc_org.a.b=c\n"
+
+
+# ------------------------------------------------------- own machines (push agents)
+TEAMS_TOML = """
+[teams.sysadm]
+dtrack_tag = "team-sysadm"
+[teams.users]
+dtrack_tag = "team-users"
+[teams.dev]
+dtrack_tag = "team-dev"
+"""
+
+MACHINES_TOML = """
+[groups.servers]
+team = "sysadm"
+scans = ["system", "containers"]
+hosts = ["web1", "db1"]
+
+[groups.laptops]
+team = "users"
+kind = "macos"
+hosts = ["mbp"]
+
+[hosts.db1]
+scans = ["system"]
+version = "pinned-1"
+
+[hosts.lone]
+team = "dev"
+kind = "linux"
+
+[code.myapp]
+host = "web1"
+path = "/srv/myapp"
+
+[cpe_map]
+ripgrep = "burntsushi:ripgrep"
+"""
+
+
+def load_estate(tmp_path, text: str = MACHINES_TOML):
+    inv_file = tmp_path / "inv.toml"
+    inv_file.write_text(TEAMS_TOML, encoding="utf-8")
+    inv = load_inventory(inv_file)
+    f = tmp_path / "machines.toml"
+    f.write_text(text, encoding="utf-8")
+    return inv, load_machines(f, inv.teams)
+
+
+def load_agent():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "vulnflow_agent", ROOT / "scripts" / "vulnflow-agent.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def syft_doc(*pkgs: tuple[str, str], spec: str = "1.6") -> str:
+    comps = [
+        {
+            "type": "library",
+            "bom-ref": f"r-{n}",
+            "name": n,
+            "version": v,
+            "purl": f"pkg:deb/debian/{n}@{v}",
+        }
+        for n, v in pkgs
+    ]
+    return json.dumps({"bomFormat": "CycloneDX", "specVersion": spec, "components": comps})
+
+
+def test_machines_groups_overrides_and_defaults(tmp_path):
+    _, m = load_estate(tmp_path)
+    assert m.groups == {"servers": ["web1", "db1"], "laptops": ["mbp"]}
+    web1, db1, mbp, lone = (m.hosts[h] for h in ("web1", "db1", "mbp", "lone"))
+    assert (web1.group, web1.team, web1.kind, web1.scans) == (
+        "servers",
+        "sysadm",
+        "linux",
+        ["system", "containers"],
+    )
+    assert (db1.scans, db1.version, db1.group) == (["system"], "pinned-1", "servers")
+    assert (mbp.kind, mbp.scans) == ("macos", ["brew", "languages", "apps"])
+    assert (lone.group, lone.scans) == ("", ["system"])
+    assert m.code["myapp"].host == "web1" and m.cpe_map == {"ripgrep": "burntsushi:ripgrep"}
+    assert load_machines(tmp_path / "absent.toml", {}).hosts == {}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        MACHINES_TOML.replace('hosts = ["mbp"]', 'hosts = ["mbp", "web1"]'),  # in two groups
+        MACHINES_TOML.replace('team = "users"', 'team = "nope"'),
+        MACHINES_TOML.replace('scans = ["system"]', 'scans = ["rm"]'),
+        MACHINES_TOML.replace('version = "pinned-1"', 'ssh = "db1"'),  # pull-mode key is gone
+        MACHINES_TOML.replace('host = "web1"', 'host = "ghost"'),
+        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "srv/../x"'),
+        MACHINES_TOML.replace("burntsushi:ripgrep", "no-colon"),
+        MACHINES_TOML + '[hosts.x]\nteam = "dev"\nlanguage_paths = ["/etc"]\n',
+        MACHINES_TOML + '[hosts.y]\ngroup = "nogroup"\nteam = "dev"\n',
+        MACHINES_TOML + "[machines.old]\n",
+    ],
+)
+def test_machines_validation(tmp_path, bad):
+    with pytest.raises(SystemExit):
+        load_estate(tmp_path, bad)
+
+
+def test_agent_config_projects_and_tags(tmp_path):
+    from vulnflow.machines import agent_config
+
+    inv, m = load_estate(tmp_path)
+    url = "https://vf.tail1.ts.net:8180"
+    web1 = agent_config(m.hosts["web1"], m, inv, url)
+    assert web1["vulnflow_agent_config"] == load_agent().CONFIG_FORMAT
+    assert web1["host_project"] == {
+        "name": "host:web1",
+        "version": "",
+        "tags": ["team-sysadm", "kind-host", "group-servers"],
+        "scans": ["system"],
+    }
+    assert web1["containers"] == {"tags": ["team-dev", "kind-container", "host-web1"]}
+    assert web1["code"] == [
+        {
+            "name": "code:myapp",
+            "path": "/srv/myapp",
+            "version": "",
+            "tags": ["team-dev", "kind-app", "host-web1"],
+        }
+    ]
+    assert web1["dt_url"] == url and web1["cpe_map"] == {"ripgrep": "burntsushi:ripgrep"}
+    mbp = agent_config(m.hosts["mbp"], m, inv, url)
+    assert mbp["host_project"]["tags"] == ["team-users", "kind-laptop", "group-laptops"]
+    assert mbp["containers"] is None and mbp["code"] == []
+    assert agent_config(m.hosts["lone"], m, inv, url)["host_project"]["tags"] == [
+        "team-dev",
+        "kind-host",
+    ]
+
+
+def test_agent_keys_per_host_team_keep_rotate_revoke():
+    from vulnflow.bootstrap import DT_AGENT_PERMISSIONS, agent_key, dt_admin_http, revoke_agent
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    admin = dt_admin_http("http://dt:8180", TEST_PW, transport=dt)
+    k1, new1 = agent_key(admin, "web1")
+    assert new1 and dt.keys[k1] == "agent-web1"
+    assert {p["name"] for p in dt.teams["agent-web1"]["permissions"]} == set(DT_AGENT_PERMISSIONS)
+    assert agent_key(admin, "web1", k1) == (k1, False)  # a working key is kept
+    k2, new2 = agent_key(admin, "web1", k1, rotate=True)
+    assert new2 and k2 != k1 and k1 not in dt.keys  # the old team and its keys are gone
+    assert ("DELETE", "api/v1/team") in dt.calls
+    k3, _ = agent_key(admin, "db1", k2)  # another host's key is not reused
+    assert k3 != k2 and dt.keys[k3] == "agent-db1"
+    assert revoke_agent(admin, "web1") and "agent-web1" not in dt.teams and k2 not in dt.keys
+    assert not revoke_agent(admin, "web1")
+    with pytest.raises(Exception, match="log in"):
+        dt_admin_http("http://dt:8180", "wrong", transport=dt)
+
+
+def test_write_bundle_is_private(tmp_path):
+    from vulnflow.machines import read_bundle_key, write_bundle
+
+    d = write_bundle(tmp_path / "agents", "web1", {"host": "web1"}, "odt_k")
+    assert json.loads((d / "config.json").read_text()) == {"host": "web1"}
+    assert read_bundle_key(tmp_path / "agents", "web1") == "odt_k"
+    assert read_bundle_key(tmp_path / "agents", "other") == ""
+    assert (d.stat().st_mode & 0o777, (d / "key").stat().st_mode & 0o777) == (0o700, 0o600)
+    assert (d / "config.json").stat().st_mode & 0o077 == 0
+
+
+def test_last_pushes_and_stale_report(tmp_path, capsys):
+    from vulnflow.machines import last_pushes, report
+
+    _, m = load_estate(tmp_path)
+    now = 1_800_000_000.0
+    hosts = [
+        {
+            "uuid": "1",
+            "name": "host:web1",
+            "version": "debian-12",
+            "lastBomImport": (now - 9 * 86400) * 1000,
+        },
+        {"uuid": "2", "name": "host:web1", "version": "debian-13", "lastBomImport": (now - 3600) * 1000},
+        {
+            "uuid": "3",
+            "name": "host:db1",
+            "version": "pinned-1",
+            "lastBomImport": "2020-01-01T00:00:00Z",
+        },
+    ]
+    t = FakeTransport(
+        {"GET /api/v1/project/tag/kind-host": hosts, "GET /api/v1/project/tag/kind-laptop": []}
+    )
+    pushes = last_pushes(DependencyTrack("http://dt:8180", "odt_key", transport=t))
+    assert pushes["host:web1"] == pytest.approx(now - 3600)  # newest version wins
+    assert report(m, pushes, stale_days=2, now=now) == 3  # db1 old, mbp and lone never
+    out = capsys.readouterr().out
+    assert "[servers]" in out and "[no group]" in out
+    assert "web1" in out and "ok last push 0.0 days ago" in out
+    assert "STALE never pushed" in out
+    assert report(m, None, stale_days=2) == 0  # DT not asked: list only
+
+
+def test_agent_merge_brew_apps_and_images():
+    a = load_agent()
+    raw = (
+        syft_doc(("curl", "8"), ("bash", "5")) + "\n" + syft_doc(("curl", "8"), ("git", "2"), spec="1.5")
+    )
+    docs = a.parse_docs(raw)
+    merged = a.merge_boms(docs)
+    assert merged["specVersion"] == "1.6"
+    assert [c["name"] for c in merged["components"]] == ["curl", "bash", "git"]
+    assert len({c["bom-ref"] for c in merged["components"]}) == 3
+    with pytest.raises(a.ScanError):
+        a.parse_docs("{} not json")
+
+    info = {
+        "formulae": [
+            {"name": "python@3.12", "installed": [{"version": "3.12.7_1"}]},
+            {"name": "ripgrep", "installed": [{"version": "14.1.1"}]},
+            {"name": "curl", "installed": [{"version": "8.10.1"}]},
+            {"name": "orphan", "installed": []},
+        ],
+        "casks": [{"token": "firefox", "installed": "131.0", "version": "132.0"}, {"token": "nover"}],
+    }
+    by = {
+        (c["name"], c["version"]): c
+        for c in a.brew_bom(info, {"ripgrep": "burntsushi:ripgrep"})["components"]
+    }
+    assert set(by) == {
+        ("python@3.12", "3.12.7"),
+        ("ripgrep", "14.1.1"),
+        ("curl", "8.10.1"),
+        ("firefox", "131.0"),
+    }
+    assert by[("python@3.12", "3.12.7")]["cpe"] == "cpe:2.3:a:python:python:3.12.7:*:*:*:*:*:*:*"
+    assert by[("python@3.12", "3.12.7")]["purl"] == "pkg:generic/python%403.12@3.12.7"
+    assert by[("ripgrep", "14.1.1")]["cpe"].startswith("cpe:2.3:a:burntsushi:ripgrep:14.1.1:")
+    assert by[("curl", "8.10.1")]["cpe"].startswith("cpe:2.3:a:haxx:curl:")
+
+    app = a.app_entry(
+        {
+            "CFBundleIdentifier": "com.google.Chrome",
+            "CFBundleName": "Google Chrome",
+            "CFBundleShortVersionString": "130.0.1",
+        },
+        {},
+    )
+    assert app["purl"] == "pkg:generic/com.google.Chrome@130.0.1"
+    assert app["cpe"].startswith("cpe:2.3:a:google:chrome:130.0.1:")
+    assert a.app_entry({"CFBundleIdentifier": "com.x.y", "CFBundleName": "Y"}, {}) is None
+
+    assert a.split_image("ghcr.io/o/app:1.2") == ("ghcr.io/o/app", "1.2")
+    assert a.split_image("localhost:5000/app") == ("localhost:5000/app", "latest")
+    assert a.split_image("nginx@sha256:" + "a" * 64) == ("nginx", "sha256aaaaaaaaaaaa")
+
+
+class FakeTools:
+    """Stands in for the agent's run(): answers by tool and argument, records argv."""
+
+    def __init__(self, answers: dict[str, tuple[int, str, str]]):
+        self.answers = answers
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, timeout=1800, **kw):
+        self.calls.append(list(argv))
+        tool = Path(argv[0]).name
+        key = {"syft": f"syft {argv[2]}", "docker": "docker ps", "git": "git"}.get(tool, tool)
+        if key not in self.answers:
+            raise AssertionError(f"unexpected command {argv}")
+        return self.answers[key]
+
+
+class FakeResponse:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class FakeUrlopen:
+    def __init__(self):
+        self.requests: list[Any] = []
+
+    def __call__(self, req, timeout=None):
+        self.requests.append(req)
+        return FakeResponse(b'{"token": "tok-1"}')
+
+
+def agent_files(tmp_path, cfg: dict) -> Path:
+    d = tmp_path / "agent"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (d / "key").write_text("odt_agentkey\n", encoding="utf-8")
+    (d / "key").chmod(0o600)
+    return d / "config.json"
+
+
+def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
+    from vulnflow.machines import agent_config
+
+    a = load_agent()
+    inv, m = load_estate(tmp_path)
+    cfg_file = agent_files(tmp_path, agent_config(m.hosts["web1"], m, inv, "https://vf.ts.net:8180"))
+    good = syft_doc(("openssl", "3.0.15"))
+    tools = FakeTools(
+        {
+            "syft dir:/": (0, syft_doc(("libc6", "2.41")), ""),
+            "docker ps": (0, "nginx:1.27\nbroken:1\nnginx:1.27\n", ""),
+            "syft docker:nginx:1.27": (0, good, ""),
+            "syft docker:broken:1": (1, "", "cannot pull"),
+            "syft dir:/srv/myapp": (0, syft_doc(("django", "5.1")), ""),
+            "git": (0, "v1.4.0\n", ""),
+        }
+    )
+    monkeypatch.setattr(a, "run", tools)
+    monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(a, "os_version", lambda: "debian-13")
+    monkeypatch.setattr(a.sys, "platform", "linux")
+    opener = FakeUrlopen()
+    monkeypatch.setattr(a.urllib.request, "urlopen", opener)
+
+    assert a.main(["--config", str(cfg_file)]) == 1  # the broken image fails the run ...
+    assert "FAIL  container:broken" in capsys.readouterr().out
+    got = {}
+    for req in opener.requests:
+        assert (req.get_method(), req.full_url) == ("PUT", "https://vf.ts.net:8180/api/v1/bom")
+        assert req.get_header("X-api-key") == "odt_agentkey"
+        body = json.loads(req.data)
+        assert body["autoCreate"] is True
+        names = [c["name"] for c in json.loads(base64.b64decode(body["bom"]))["components"]]
+        got[body["projectName"]] = (
+            body["projectVersion"],
+            [t["name"] for t in body["projectTags"]],
+            names,
+        )
+    # ... but the host, the good image (scanned once) and the code were each uploaded to their owner
+    assert got == {
+        "host:web1": ("debian-13", ["team-sysadm", "kind-host", "group-servers"], ["libc6"]),
+        "container:nginx": ("1.27", ["team-dev", "kind-container", "host-web1"], ["openssl"]),
+        "code:myapp": ("v1.4.0", ["team-dev", "kind-app", "host-web1"], ["django"]),
+    }
+    assert sum(c[:3] == ["/usr/bin/syft", "scan", "docker:nginx:1.27"] for c in tools.calls) == 1
+    git = next(c for c in tools.calls if c[0].endswith("git"))
+    assert git[1:3] == ["-c", "safe.directory=/srv/myapp"]
+
+
+def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):
+    a = load_agent()
+    cfg = {
+        "vulnflow_agent_config": 1,
+        "host": "mbp",
+        "dt_url": "https://vf.ts.net:8180",
+        "host_project": {
+            "name": "host:mbp",
+            "version": "",
+            "tags": ["team-users"],
+            "scans": ["brew", "languages"],
+        },
+        "containers": None,
+        "code": [],
+        "language_paths": ["tools"],
+        "cpe_map": {},
+    }
+    cfg_file = agent_files(tmp_path, cfg)
+    monkeypatch.setattr(a.Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / "tools").mkdir()
+    opener = FakeUrlopen()
+    monkeypatch.setattr(a.urllib.request, "urlopen", opener)
+    monkeypatch.setattr(a, "os_version", lambda: "macos-27.2")
+    which = {"syft": "/opt/homebrew/bin/syft"}
+    monkeypatch.setattr(a, "which", which.get)  # no brew, no npm
+
+    # no Homebrew is "nothing to scan" for brew; languages still worked -> upload
+    monkeypatch.setattr(
+        a,
+        "run",
+        FakeTools({"syft dir:" + str(tmp_path / "tools"): (0, syft_doc(("black", "25.1")), "")}),
+    )
+    assert a.main(["--config", str(cfg_file)]) == 0
+    assert "skipped brew (Homebrew not found)" in capsys.readouterr().out
+    assert len(opener.requests) == 1
+
+    # a failing scan means no upload at all for the host project
+    monkeypatch.setattr(a, "run", FakeTools({"syft dir:" + str(tmp_path / "tools"): (1, "", "boom")}))
+    assert a.main(["--config", str(cfg_file)]) == 1
+    assert "FAIL  host:mbp" in capsys.readouterr().out and len(opener.requests) == 1
+
+    # --dry-run scans but neither reads the key nor uploads
+    (tmp_path / "agent" / "key").unlink()
+    monkeypatch.setattr(
+        a,
+        "run",
+        FakeTools({"syft dir:" + str(tmp_path / "tools"): (0, syft_doc(("black", "25.1")), "")}),
+    )
+    assert a.main(["--config", str(cfg_file), "--dry-run"]) == 0
+    assert "plan  host:mbp@macos-27.2" in capsys.readouterr().out and len(opener.requests) == 1
+
+
+def test_agent_rejects_bad_config(tmp_path):
+    a = load_agent()
+    f = tmp_path / "c.json"
+    for bad in ({"host": "x"}, {"vulnflow_agent_config": 1, "dt_url": "file:///etc/passwd"}):
+        f.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            a.load_config(f)

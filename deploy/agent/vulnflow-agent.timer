@@ -1,0 +1,12 @@
+# Daily push, spread over an hour so the servers don't all scan at once; Persistent=true
+# catches up after the machine was off at the scheduled time.
+[Unit]
+Description=Daily vulnflow agent run
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

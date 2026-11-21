@@ -15,6 +15,7 @@ OpenCVE  (checked against the v3.1.0 tag's source: web/opencve/api/v2/)
 Dependency-Track
   PUT  /api/v1/bom  (JSON, base64 BOM, projectTags)                    documented
   GET  /api/v1/project/tag/{tag}                                        documented
+       lastBomImport: a Date (Project.java in the 5.2.2 tag); epoch ms or ISO-8601 accepted
   GET  /api/v1/finding/project/{uuid}/export  (FPF)                    documented
 DefectDojo
   GET/POST /api/v2/product_types/                                       documented
@@ -27,6 +28,7 @@ from __future__ import annotations
 import base64
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -103,6 +105,19 @@ class DTProject:
     version: str
     active: bool
     tags: list[str]
+    last_bom_import: float | None = None  # epoch seconds
+
+
+def _epoch(value: Any) -> float | None:
+    """DT dates come as epoch milliseconds (Jackson default); accept ISO-8601 too."""
+    if isinstance(value, int | float):
+        return value / 1000
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
 
 
 class DependencyTrack:
@@ -131,6 +146,7 @@ class DependencyTrack:
                         # v4 uses "active"; some v5 builds expose "inactiveSince" instead
                         active=bool(p.get("active", p.get("inactiveSince") is None)),
                         tags=[t.get("name", "") for t in p.get("tags") or []],
+                        last_bom_import=_epoch(p.get("lastBomImport")),
                     )
                 )
             total = int(r.headers.get("X-Total-Count", len(out)) or len(out))

@@ -1,5 +1,5 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,
-dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,machines,agent-bundle,
+agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .clients import DefectDojo, DependencyTrack, OpenCVE
-from .config import Inventory, env, env_flag, load_dotenv, load_inventory
+from .config import Inventory, env, env_flag, load_dotenv, load_inventory, load_machines
 from .intel import Enricher
 from .jobs import dt_to_dojo, sync_inventory
 from .priority import assess
@@ -160,10 +160,80 @@ def _env_set(env_file: str) -> int:
     return 0
 
 
+def _agent_dt_url() -> str:
+    url = env("VULNFLOW_AGENT_DT_URL") or env("DT_PUBLIC_API_URL") or env("DT_URL")
+    if "localhost" in url or "127.0.0.1" in url:
+        print(
+            f"  warn  agents would upload to {url}, which only works on this server; set "
+            "VULNFLOW_TS_HOST (./poc.sh tailscale) or VULNFLOW_AGENT_DT_URL",
+            file=sys.stderr,
+        )
+    return url
+
+
+def _agent_bundle(a: argparse.Namespace, inv: Inventory) -> int:
+    from .bootstrap import BootstrapError, agent_key, dt_admin_http
+    from .machines import agent_config, read_bundle_key, write_bundle
+
+    machines = load_machines(a.machines, inv.teams)
+    names = sorted(machines.hosts) if a.all else a.hosts
+    unknown = [h for h in names if h not in machines.hosts]
+    if not names or unknown:
+        print(f"  error unknown or no hosts {unknown}; choose from {sorted(machines.hosts)}")
+        return 2
+    url = _agent_dt_url()
+    out = Path(a.out)
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+        for h in names:
+            key, new = agent_key(admin, h, read_bundle_key(out, h), rotate=a.rotate)
+            d = write_bundle(out, h, agent_config(machines.hosts[h], machines, inv, url), key)
+            print(f"  {'new ' if new else 'ok  '}  {d}/ (config.json, key{' (new)' if new else ''})")
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _agent_revoke(a: argparse.Namespace) -> int:
+    from .bootstrap import BootstrapError, dt_admin_http, revoke_agent
+
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+        for h in a.hosts:
+            gone = revoke_agent(admin, h)
+            print(f"  {'del ' if gone else 'none'}  team agent-{h}{'' if gone else ' (not found)'}")
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _machines(a: argparse.Namespace, inv: Inventory) -> int:
+    from .machines import last_pushes, report
+
+    machines = load_machines(a.machines, inv.teams)
+    if not machines.hosts:
+        print(f"  no hosts: copy machines.example.toml to {a.machines}")
+        return 0
+    dt = _dtrack()
+    stale = report(machines, last_pushes(dt) if dt else None, stale_days=a.stale_days)
+    return 1 if stale else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vulnflow", description=__doc__)
     ap.add_argument("--env-file", default=".env")
     ap.add_argument("--inventory", default="inventory/inventory.toml")
+    ap.add_argument(
+        "--machines",
+        default=None,
+        help="own hosts (not in git); default $VULNFLOW_MACHINES or machines.toml",
+    )
     ap.add_argument("--data-dir", default="data")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -202,6 +272,23 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--file", required=True, type=Path)
     u.add_argument("--tag", action="append", default=[], help="extra tags")
 
+    mc = sub.add_parser(
+        "machines", help="list own hosts by group and flag those that stopped pushing SBOMs"
+    )
+    mc.add_argument("--stale-days", type=float, default=2.0, metavar="DAYS")
+
+    ab = sub.add_parser(
+        "agent-bundle",
+        help="per host: agent config.json + its own DT API key, for Ansible to copy (see README)",
+    )
+    ab.add_argument("hosts", nargs="*")
+    ab.add_argument("--all", action="store_true", help="every host in machines.toml")
+    ab.add_argument("--out", default="data/agents", help="directory for <host>/config.json + key")
+    ab.add_argument("--rotate", action="store_true", help="new key even if the old one works")
+
+    ar = sub.add_parser("agent-revoke", help="delete a host's DT team agent-<host> and its keys")
+    ar.add_argument("hosts", nargs="+")
+
     b = sub.add_parser(
         "dt-bootstrap", help="first-run Dependency-Track setup: admin password, team, API key"
     )
@@ -237,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     load_dotenv(a.env_file)
+    a.machines = a.machines or env("VULNFLOW_MACHINES") or "machines.toml"
     if a.cmd == "env-set":
         return _env_set(a.env_file)
     if a.cmd == "dd-bootstrap":
@@ -322,6 +410,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if a.cmd == "machines":
+        return _machines(a, inv)
+
+    if a.cmd == "agent-bundle":
+        return _agent_bundle(a, inv)
+
+    if a.cmd == "agent-revoke":
+        return _agent_revoke(a)
 
     if a.cmd == "upload-sbom":
         team = inv.teams.get(a.team)

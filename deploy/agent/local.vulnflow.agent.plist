@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for scripts/vulnflow-agent.py on a MacBook (runs as the logged-in user, so
+  the brew, languages and apps scans see that user's Homebrew, $HOME and ~/Applications).
+  Install (Ansible): replace __HOME__ with the user's home directory, copy to
+  ~/Library/LaunchAgents/local.vulnflow.agent.plist, the script to
+  ~/.local/share/vulnflow-agent/vulnflow-agent.py and config.json + key from
+  `vulnflow agent-bundle` to ~/.config/vulnflow-agent/ (600), then
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.vulnflow.agent.plist
+  launchd runs a missed calendar slot when the Mac wakes up.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.vulnflow.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-I</string>
+    <string>__HOME__/.local/share/vulnflow-agent/vulnflow-agent.py</string>
+    <string>--config</string>
+    <string>__HOME__/.config/vulnflow-agent/config.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SYFT_CHECK_FOR_APP_UPDATE</key>
+    <string>false</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>11</integer>
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/vulnflow-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/vulnflow-agent.log</string>
+</dict>
+</plist>

@@ -165,6 +165,12 @@ cmd_check() {
   local mem
   mem="$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)"
   ((mem >= 12)) || warn "~${mem} GB RAM; all three stacks together want ~12 GB+"
+  local swap
+  swap="$(awk '/SwapTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+  if ((mem < 16 && swap < 4)); then
+    warn "~${mem} GB RAM and ${swap} GB swap: add 4-8 GB swap so the first imports don't get" \
+      "OOM-killed (README 'Own machines (push agents)')"
+  fi
 }
 
 clone_or_update() { # url dir ref
@@ -600,6 +606,10 @@ cmd_status() {
   if [[ -n "${VULNFLOW_TS_HOST:-}" ]] && command -v tailscale >/dev/null; then
     log "tailscale serve:"
     tailscale serve status || true
+  fi
+  if [[ -f "${VULNFLOW_MACHINES:-machines.toml}" ]]; then
+    log "Own machines (last SBOM push):"
+    vulnflow machines || true
   fi
 }
 

@@ -1,0 +1,12 @@
+# Build context of deploy/Dockerfile (it only copies vulnflow/). Keep secrets and the
+# operator's own host list out of it, like .gitignore does for git.
+.env
+machines.toml
+data/
+upstream/
+.git/
+.venv/
+**/__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

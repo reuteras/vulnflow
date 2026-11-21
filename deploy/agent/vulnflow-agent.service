@@ -1,0 +1,26 @@
+# systemd unit for scripts/vulnflow-agent.py on a Linux server (started by the .timer).
+# Install (Ansible): the script to /usr/local/lib/vulnflow-agent/vulnflow-agent.py,
+# config.json + key from `vulnflow agent-bundle` to /etc/vulnflow-agent/ (root, 600),
+# this file and vulnflow-agent.timer to /etc/systemd/system/, then
+#   systemctl daemon-reload && systemctl enable --now vulnflow-agent.timer
+# Runs as root: the system scan reads every package database, the containers scan needs
+# the docker socket, and the agent drops to the owner of brew for the Homebrew scan.
+[Unit]
+Description=vulnflow agent: push this host's SBOMs to Dependency-Track
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/lib/vulnflow-agent/vulnflow-agent.py --config /etc/vulnflow-agent/config.json
+Environment=SYFT_CHECK_FOR_APP_UPDATE=false
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
