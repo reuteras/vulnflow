@@ -122,6 +122,14 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   URLs (no allow-list; that arrives after v3.1.0), so `stacks/opencve/bootstrap_webhooks.py`
   writes the notification and its alert automation with the ORM. In v3.1.0 notifications
   only fire through an automation's `send_notification` action.
+- Exposure: every published port binds to 127.0.0.1, and the target server is reachable
+  only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
+  `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.
+  The serve setup also writes the browser-facing URLs (`DT_PUBLIC_API_URL`, `DD_SITE_URL`,
+  `DD_CSRF_TRUSTED_ORIGINS`, `OPENCVE_URL`) and a marked `CSRF_TRUSTED_ORIGINS` block in
+  OpenCVE's local `settings.py`. When bumping a stack, check its `ports:` lines and
+  whether a new browser-facing service needs a serve entry; `check_exposure` flags
+  listeners outside loopback/tailnet.
 
 ## Tests
 
