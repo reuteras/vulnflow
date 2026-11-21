@@ -430,9 +430,9 @@ def collect_all(
                         errors.append(f"{img.project}: {e}")
             except (CollectError, OSError) as e:
                 errors = [f"containers on {m.name}: {e}"]
-            for e in errors:
+            for problem in errors:
                 failed += 1
-                print(f"  FAIL  {e}")
+                print(f"  FAIL  {problem}")
     for c in code:
         try:
             upload(collect_code(c, inv, run))

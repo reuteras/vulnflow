@@ -102,13 +102,11 @@ def make_enricher(tmp_path, **kw) -> tuple[Enricher, FakeTransport]:
 
 # ----------------------------------------------------------------------- inventory
 def test_inventory_loads_teams_and_rules(inv):
-    assert set(inv.teams) == {"sysadm", "dev"}
+    assert set(inv.teams) == {"sysadm", "users", "dev"}
     s = inv.teams["sysadm"]
     assert s.opencve_project == "sysadm" and s.dtrack_tag == "team-sysadm"
-    assert "fortinet" in s.vendors
-    assert s.products["microsoft"] == sorted(
-        ["windows_server_2022", "windows_server_2025", "exchange_server"]
-    )
+    assert s.products["debian"] == ["debian_linux"] and s.products["linux"] == ["linux_kernel"]
+    assert inv.teams["users"].products["apple"] == ["macos"]
     assert inv.rules.chat_min_tier == 2 and inv.rules.ignore_event_types == ["references"]
     assert inv.team_for_opencve_project("dev").key == "dev"
 
@@ -227,7 +225,7 @@ def test_unknown_project_is_unrouted(inv, tmp_path):
 def test_format_chat_only_hot_tiers(inv, tmp_path):
     e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
     msg = format_chat(process_payload(PAYLOAD, inv, e), inv, "http://opencve.local")
-    assert msg is not None and msg.startswith("@drift-oncall")
+    assert msg is not None and msg.startswith("@sysadm")
     assert "CVE-2024-3400" in msg and "http://opencve.local/cve/CVE-2024-3400" in msg
     assert "CVE-2026-0001" not in msg and "lower-tier" in msg
 
@@ -382,7 +380,7 @@ def test_dt_to_dojo_routes_by_tag(inv):
     rep = dt_to_dojo(
         inv, DependencyTrack("http://dt", "k", transport=t), DefectDojo("http://dd", "k", transport=t)
     )
-    assert not rep.errors and len(rep.done) == 2
+    assert not rep.errors and len(rep.done) == 3
     posts = [c for c in t.calls if c[0] == "POST"]
     sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
     assert b"Sysadmin" in sysadm[3]
