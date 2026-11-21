@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
-import subprocess  # noqa: S404 - fixed argv; ssh/sh with operator-supplied inventory values
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,7 +82,9 @@ class RunResult:
 Runner = Callable[[Machine, str, bytes | None], RunResult]
 
 
-def run_command(machine: Machine, command: str, stdin: bytes | None = None, timeout: float = 900) -> RunResult:
+def run_command(
+    machine: Machine, command: str, stdin: bytes | None = None, timeout: float = 900
+) -> RunResult:
     """Run a shell command on the machine: through ssh, or locally when `ssh` is empty."""
     if machine.ssh:
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", machine.ssh, command]
@@ -96,7 +98,9 @@ def run_command(machine: Machine, command: str, stdin: bytes | None = None, time
         raise CollectError(f"timed out after {timeout:.0f}s") from e
     except OSError as e:
         raise CollectError(f"cannot run {argv[0]}: {e}") from e
-    return RunResult(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
+    return RunResult(
+        r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+    )
 
 
 # ------------------------------------------------------------------ commands per scan
@@ -218,9 +222,7 @@ def collect_machine(
     if not version:
         v = run(m, VERSION_PROBE, None)
         version = _clean_version(v.stdout) if v.returncode == 0 else "unknown"
-    return Collected(
-        m, version, json.dumps(merged).encode(), len(merged["components"]), done, skipped
-    )
+    return Collected(m, version, json.dumps(merged).encode(), len(merged["components"]), done, skipped)
 
 
 def project_name(m: Machine) -> str:

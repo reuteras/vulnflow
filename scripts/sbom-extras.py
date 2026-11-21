@@ -25,7 +25,7 @@ import os
 import plistlib
 import re
 import shutil
-import subprocess  # noqa: S404 - runs `brew`, found by absolute path
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -67,7 +67,9 @@ def clean_version(v: str) -> str:
     return re.sub(r"_\d+$", "", str(v).strip())
 
 
-def resolve_cpe(keys: list[str], vendor_product: tuple[str, str], cpe_map: dict[str, str]) -> tuple[str, str]:
+def resolve_cpe(
+    keys: list[str], vendor_product: tuple[str, str], cpe_map: dict[str, str]
+) -> tuple[str, str]:
     """vendor, product: first hit in the operator's map, then the built-in table, then the guess."""
     for table in (cpe_map, CPE_VENDORS):
         for k in keys:
@@ -113,8 +115,12 @@ def brew_bom(info: dict[str, object], cpe_map: dict[str, str]) -> dict[str, obje
             vendor, prod = resolve_cpe([name, product], (product, product), cpe_map)
             comps.append(
                 _component(
-                    name=name, version=ver, kind="application", source="homebrew",
-                    vendor=vendor, product=prod,
+                    name=name,
+                    version=ver,
+                    kind="application",
+                    source="homebrew",
+                    vendor=vendor,
+                    product=prod,
                 )
             )
     for c in info.get("casks") or []:  # type: ignore[attr-defined]
@@ -126,8 +132,12 @@ def brew_bom(info: dict[str, object], cpe_map: dict[str, str]) -> dict[str, obje
         vendor, prod = resolve_cpe([token], (token, token), cpe_map)
         comps.append(
             _component(
-                name=token, version=ver, kind="application", source="homebrew-cask",
-                vendor=vendor, product=prod,
+                name=token,
+                version=ver,
+                kind="application",
+                source="homebrew-cask",
+                vendor=vendor,
+                product=prod,
             )
         )
     return bom(comps)
@@ -144,8 +154,13 @@ def app_entry(plist: dict[str, object], cpe_map: dict[str, str]) -> dict[str, ob
     guess = (parts[1], parts[-1]) if len(parts) >= 3 else (parts[-1], parts[-1])
     vendor, prod = resolve_cpe([bundle_id, name], guess, cpe_map)
     return _component(
-        name=name, version=ver, kind="application", source="macos-app",
-        vendor=vendor, product=prod, ident=bundle_id,
+        name=name,
+        version=ver,
+        kind="application",
+        source="macos-app",
+        vendor=vendor,
+        product=prod,
+        ident=bundle_id,
     )
 
 
@@ -202,7 +217,11 @@ def main(argv: list[str]) -> int:
     env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_ANALYTICS": "1"}
     res = subprocess.run(  # noqa: S603 - fixed argv, brew path from PATH or a fixed list
         [brew, "info", "--json=v2", "--installed"],
-        capture_output=True, text=True, env=env, check=False, timeout=600,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=600,
     )
     if res.returncode != 0:
         print(f"brew info failed ({res.returncode}): {res.stderr.strip()[:500]}", file=sys.stderr)
