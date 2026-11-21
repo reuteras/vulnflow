@@ -67,6 +67,7 @@ The individual steps, if you want to run or rerun one:
 ./poc.sh opencve-prepare    # clone OpenCVE + generate config, upstream default passwords replaced
 ./poc.sh opencve-start      # upstream install steps without the interactive admin prompt
 ./poc.sh opencve-bootstrap  # admin, org, API token, projects, subscriptions, webhooks; starts the glue
+./poc.sh tailscale          # only with VULNFLOW_TS_HOST: tailnet URLs + tailscale serve
 ```
 
 No clicking through UIs is needed. Every bootstrap step is idempotent and can be rerun on
@@ -139,16 +140,50 @@ vulnflow host, in the repo directory, unless noted.
 
 ### 1. Reach the UIs
 
-Everything listens on `127.0.0.1` (except DefectDojo, see Security notes). From your
-workstation, tunnel the ports:
+Everything listens on `127.0.0.1`. Users and passwords are printed at the end of `setup`
+and `up` (passwords are in `.env`). There are two ways in.
+
+**Over Tailscale (a server that is only reachable on the tailnet).** Set
+`VULNFLOW_TS_HOST=auto` (or the node's full MagicDNS name) in `.env` before `setup`, or run
+`./poc.sh tailscale` afterwards. `tailscale serve` then publishes, on the Tailscale
+addresses only and with a MagicDNS HTTPS certificate:
+
+| URL | Service (local port) |
+| --- | --- |
+| `https://<host>.<tailnet>.ts.net` | OpenCVE (80) |
+| `https://<host>.<tailnet>.ts.net:8181` | Dependency-Track UI (8181) |
+| `https://<host>.<tailnet>.ts.net:8180` | Dependency-Track API (8180): the DT UI calls it from the browser; SBOM uploads from other tailnet machines can use it too |
+| `https://<host>.<tailnet>.ts.net:8280` | DefectDojo (8280) |
+
+The Airflow UI (8080) and the webhook receiver (8380) are not served; use `ssh -L` for
+Airflow. `poc.sh` also writes the matching browser-facing URLs to `.env`
+(`DT_PUBLIC_API_URL`, `DD_SITE_URL`, `DD_CSRF_TRUSTED_ORIGINS`, `OPENCVE_URL`) and adds
+the tailnet origin to OpenCVE's `CSRF_TRUSTED_ORIGINS`; without those the DT UI can't reach
+its API and the DefectDojo/OpenCVE login forms fail Django's CSRF check. Empty
+`VULNFLOW_TS_HOST` and rerun `./poc.sh tailscale` to remove the serve entries and go back
+to localhost URLs.
+
+What the host needs (e.g. from Ansible) before `./poc.sh setup`:
+
+- Tailscale installed and logged in, MagicDNS on, **HTTPS certificates enabled** for the
+  tailnet (admin console, DNS page), and the user that runs `poc.sh` allowed to configure
+  serve: `sudo tailscale set --operator=<user>`.
+- A firewall that drops inbound traffic on the public interface and allows `tailscale0`
+  (ssh over the tailnet too, if you want nothing public at all). The stacks don't depend on
+  it, since they bind to `127.0.0.1`, but it's the backstop if an upstream bump starts
+  publishing on `0.0.0.0` again: Docker-published ports bypass ufw's input rules.
+  `./poc.sh check` and `status` list every TCP listener that is not on loopback or a
+  Tailscale address.
+- Docker with the compose v2 plugin, git, curl, openssl and python3 ≥ 3.11.
+
+**Over ssh.** From your workstation, tunnel the ports:
 
 ```bash
 ssh -L 8000:127.0.0.1:80 -L 8181:127.0.0.1:8181 -L 8280:127.0.0.1:8280 user@vulnflow-host
 ```
 
 Then open OpenCVE on <http://localhost:8000>, Dependency-Track on <http://localhost:8181>
-and DefectDojo on <http://localhost:8280>. Users and passwords are printed at the end of
-`setup` (passwords are in `.env`).
+and DefectDojo on <http://localhost:8280>.
 
 ### 2. OSV in Dependency-Track (done by setup; needed for Debian and PyPI)
 
@@ -352,6 +387,10 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
   all-interfaces ports 80/8080 to `127.0.0.1:`; for DefectDojo, `stacks/defectdojo/override.yml`
   replaces upstream's all-interfaces 8280/8443 with `127.0.0.1` (`ports: !override`).
   Docker-published ports bypass an input-only host firewall, so this matters even behind one.
+  `./poc.sh check`/`status` warn about any TCP listener outside loopback and the tailnet.
+- With `VULNFLOW_TS_HOST` set, browser access goes through `tailscale serve`: TLS ends in
+  tailscaled, which listens only on the node's Tailscale addresses, so only tailnet members
+  that your ACLs allow can reach the UIs. Nothing is published with `tailscale funnel`.
 - Webhook auth is a shared-secret header compared in constant time. The token must be ≥ 16
   chars, the body ≤ 5 MB, and processing runs on a bounded queue.
 - The glue containers run read-only, with no capabilities, `no-new-privileges`, and a non-root
@@ -383,6 +422,8 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
+| Tailscale access: DefectDojo `DD_CSRF_TRUSTED_ORIGINS`/`DD_SITE_URL`, OpenCVE `ALLOWED_HOSTS = ["*"]` and nginx forwarding `Host` without the port | Checked against DefectDojo 3.5.201 and OpenCVE v3.1.0 source |
+| Tailscale access: `tailscale serve` keeps the `Host` header; DT apiserver allows the cross-origin UI (it already does for `localhost:8181` → `:8180`) | **Assumed**, not yet run on a tailnet |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests

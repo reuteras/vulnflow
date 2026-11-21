@@ -8,6 +8,14 @@ services:
   initializer:
     environment:
       DD_ADMIN_PASSWORD: "${DD_ADMIN_PASSWORD:?set DD_ADMIN_PASSWORD in .env (./poc.sh init)}"
+  # Upstream doesn't pass these to uwsgi. Behind tailscale serve (HTTPS to the browser,
+  # plain HTTP to nginx) Django's CSRF check rejects the https:// Origin of the login form
+  # unless it is trusted. poc.sh writes both to .env from VULNFLOW_TS_HOST. Never leave
+  # DD_CSRF_TRUSTED_ORIGINS empty: Django refuses an origin without a scheme.
+  uwsgi:
+    environment:
+      DD_CSRF_TRUSTED_ORIGINS: "${DD_CSRF_TRUSTED_ORIGINS:-http://localhost:8280}"
+      DD_SITE_URL: "${DD_SITE_URL:-http://localhost:8280}"
   # Upstream publishes nginx 8080/8443 on all interfaces. Docker-published ports
   # bypass an input-only host firewall, so bind them to 127.0.0.1 like the other
   # stacks (reach them over SSH or a reverse proxy).
