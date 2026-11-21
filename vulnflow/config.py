@@ -61,7 +61,7 @@ class PriorityRules:
 
 
 MACHINE_KINDS = ("linux", "macos")
-SCANS = ("system", "brew", "languages", "apps")
+SCANS = ("system", "brew", "languages", "apps", "containers")
 DEFAULT_SCANS = {"linux": ("system", "brew"), "macos": ("brew", "languages", "apps")}
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CPE_PAIR_RE = re.compile(r"^[a-z0-9._-]+:[a-z0-9._-]+$")
@@ -79,6 +79,18 @@ class Machine:
     sudo: bool = False  # run the system scan through `sudo -n`
     language_paths: list[str] = field(default_factory=list)  # relative to $HOME
     version: str = ""  # DT project version; empty = probe the OS
+    containers_team: str = "dev"  # owner of the container-image projects of the `containers` scan
+
+
+@dataclass
+class CodeTarget:
+    """A directory with application code (and its installed dependencies) on a machine."""
+
+    name: str
+    machine: str
+    path: str  # absolute, on that machine
+    team: str = "dev"
+    version: str = ""  # empty = `git describe` in the directory, else "unknown"
 
 
 @dataclass
@@ -86,6 +98,7 @@ class Inventory:
     teams: dict[str, Team]
     rules: PriorityRules
     machines: dict[str, Machine] = field(default_factory=dict)
+    code: dict[str, CodeTarget] = field(default_factory=dict)
     # "vendor:product" overrides for the CPE of Homebrew formulae/casks and Mac apps
     cpe_map: dict[str, str] = field(default_factory=dict)
 
@@ -117,6 +130,9 @@ def _load_machine(name: str, m: dict[str, Any], teams: dict[str, Team], path: st
     for p in paths:
         if p.startswith("/") or ".." in Path(p).parts:
             raise SystemExit(f"{where}: language_paths must be relative to $HOME, got {p!r}")
+    containers_team = str(m.get("containers_team", "dev"))
+    if containers_team not in teams:
+        raise SystemExit(f"{where}: containers_team {containers_team!r} is not one of {sorted(teams)}")
     return Machine(
         name=name,
         team=team,
@@ -126,7 +142,26 @@ def _load_machine(name: str, m: dict[str, Any], teams: dict[str, Team], path: st
         sudo=bool(m.get("sudo", False)),
         language_paths=paths,
         version=str(m.get("version", "")),
+        containers_team=containers_team,
     )
+
+
+def _load_code(
+    name: str, c: dict[str, Any], teams: dict[str, Team], machines: dict[str, Machine], path: str | Path
+) -> CodeTarget:
+    where = f"[code.{name}] in {path}"
+    if not _NAME_RE.match(name):
+        raise SystemExit(f"{where}: name must match {_NAME_RE.pattern}")
+    machine = str(c.get("machine", ""))
+    if machine not in machines:
+        raise SystemExit(f"{where}: machine {machine!r} is not one of {sorted(machines)}")
+    where_path = str(c.get("path", ""))
+    if not where_path.startswith("/") or ".." in Path(where_path).parts or "\n" in where_path:
+        raise SystemExit(f"{where}: path must be absolute and without '..', got {where_path!r}")
+    team = str(c.get("team", "dev"))
+    if team not in teams:
+        raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
+    return CodeTarget(name, machine, where_path, team, str(c.get("version", "")))
 
 
 def load_inventory(path: str | Path) -> Inventory:
@@ -151,8 +186,11 @@ def load_inventory(path: str | Path) -> Inventory:
     machines = {
         name: _load_machine(name, m, teams, path) for name, m in (data.get("machines") or {}).items()
     }
+    code = {
+        name: _load_code(name, c, teams, machines, path) for name, c in (data.get("code") or {}).items()
+    }
     cpe_map = {str(k): str(v) for k, v in (data.get("cpe_map") or {}).items()}
     for k, v in cpe_map.items():
         if not _CPE_PAIR_RE.match(v):
             raise SystemExit(f"[cpe_map] {k!r} in {path}: expected 'vendor:product', got {v!r}")
-    return Inventory(teams=teams, rules=rules, machines=machines, cpe_map=cpe_map)
+    return Inventory(teams=teams, rules=rules, machines=machines, code=code, cpe_map=cpe_map)

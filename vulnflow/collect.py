@@ -5,16 +5,25 @@ look). Nothing runs on a schedule and nothing on the machines needs to reach the
 on your own computer with the VM's Dependency-Track port tunnelled to localhost, and it pulls
 from every machine in `[machines.*]`, then uploads.
 
-Per machine, scans run one after another and their SBOMs are merged into a single
-Dependency-Track project `host:<name>`. An upload replaces the project's components, so a
-machine is only uploaded when *all* its scans worked; otherwise it is skipped and the
-previous SBOM stays in place.
+Three kinds of Dependency-Track project, each tagged for the team that owns it:
 
-Scans (see config.SCANS):
+  host:<machine>       the machine itself: its scans (below) merged into one SBOM. Owned by
+                       the machine's `team` (servers: sysadm, laptops: users).
+  container:<image>    one per running container image (`containers` scan). Owned by the
+                       machine's `containers_team` (dev).
+  code:<name>          a directory with application code and its installed dependencies,
+                       from `[code.<name>]`. Owned by that entry's `team` (dev).
+
+An upload replaces a project's components, so a project is only uploaded when *all* the
+scans that make it up worked; otherwise it is skipped and the previous SBOM stays in place.
+A failing container or code project does not hold back the host project, or the others.
+
+Host scans (see config.SCANS):
   system     syft on `/` (Linux; dpkg/rpm/apk packages, ...)
   brew       Homebrew formulae and casks (scripts/sbom-extras.py)
   languages  syft on pip/uv/pipx/npm/cargo locations under $HOME
   apps       macOS app bundles (scripts/sbom-extras.py)
+  containers (not part of the host SBOM) syft on each image `docker ps` lists
 
 Upstream behaviour relied on (not yet run live): `syft scan ... -o cyclonedx-json` with no
 file writes the SBOM to stdout; `GET /api/version` on Dependency-Track is unauthenticated.
@@ -32,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from .clients import DependencyTrack
-from .config import Inventory, Machine
+from .config import CodeTarget, Inventory, Machine
 from .net import HttpError
 
 EXTRAS_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "sbom-extras.py"
@@ -127,6 +136,33 @@ def extras_command(mode: str, cpe_map: dict[str, str]) -> str:
     return f"{PATH_PREFIX}python3 - {mode}{args}"
 
 
+CONTAINER_MARK = "@@vulnflow-image "
+
+
+def containers_command() -> str:
+    """Scan every running container image; each SBOM is preceded by a marker line.
+
+    A failing image prints no SBOM (syft's error goes to stderr); the collector reports it
+    and still uploads the others. Only a missing docker or syft fails the whole scan."""
+    return (
+        f"{PATH_PREFIX}{NEED_SYFT}"
+        'command -v docker >/dev/null 2>&1 || { echo "docker not installed" >&2; exit 127; }; '
+        "ps=$(docker ps --format '{{.Image}}') || exit 1; "
+        "images=$(printf '%s\\n' \"$ps\" | sort -u); "
+        'for img in $images; do printf "' + CONTAINER_MARK + '%s\\n" "$img"; '
+        'syft scan "docker:$img" -o cyclonedx-json -q || echo "syft failed for $img" >&2; '
+        "done"
+    )
+
+
+def code_command(c: CodeTarget) -> str:
+    return f"{PATH_PREFIX}{NEED_SYFT}syft scan dir:{shlex.quote(c.path)} -o cyclonedx-json -q"
+
+
+def code_version_command(c: CodeTarget) -> str:
+    return f"git -C {shlex.quote(c.path)} describe --tags --always 2>/dev/null"
+
+
 # --------------------------------------------------------------------------- merging
 def parse_docs(raw: str) -> list[dict[str, Any]]:
     """Zero or more concatenated JSON documents (one per syft run)."""
@@ -174,10 +210,14 @@ def merge_boms(docs: Sequence[dict[str, Any]]) -> dict[str, Any]:
 # ----------------------------------------------------------------------- collecting
 @dataclass
 class Collected:
-    machine: Machine
+    """One Dependency-Track project's worth of SBOM."""
+
+    project: str
     version: str
     sbom: bytes
     components: int
+    team: str
+    kind: str  # becomes the tag kind-<kind>: host, laptop, container, app
     scans: list[str]
     skipped: list[str] = field(default_factory=list)
 
@@ -187,14 +227,18 @@ def _clean_version(raw: str) -> str:
     return v or "unknown"
 
 
+def host_scans(m: Machine) -> list[str]:
+    return [s for s in m.scans if s != "containers"]
+
+
 def collect_machine(
     m: Machine, inv: Inventory, run: Runner = run_command, extras: Path = EXTRAS_SCRIPT
 ) -> Collected:
-    """All scans of one machine, merged. Raises CollectError if any requested scan fails."""
+    """The machine's host scans, merged. Raises CollectError if any requested scan fails."""
     docs: list[dict[str, Any]] = []
     done: list[str] = []
     skipped: list[str] = []
-    for scan in m.scans:
+    for scan in host_scans(m):
         stdin: bytes | None = None
         if scan == "system":
             cmd = system_command(m)
@@ -222,7 +266,96 @@ def collect_machine(
     if not version:
         v = run(m, VERSION_PROBE, None)
         version = _clean_version(v.stdout) if v.returncode == 0 else "unknown"
-    return Collected(m, version, json.dumps(merged).encode(), len(merged["components"]), done, skipped)
+    return Collected(
+        project_name(m),
+        version,
+        json.dumps(merged).encode(),
+        len(merged["components"]),
+        m.team,
+        "host" if m.kind == "linux" else "laptop",
+        done,
+        skipped,
+    )
+
+
+def split_image(ref: str) -> tuple[str, str]:
+    """`ghcr.io/o/app:1.2` -> (`ghcr.io/o/app`, `1.2`); a digest or no tag gives a stand-in."""
+    base, _, digest = ref.partition("@")
+    if ":" in base.rsplit("/", 1)[-1]:
+        name, tag = base.rsplit(":", 1)
+    else:
+        name, tag = base, ""
+    return name, _clean_version(tag or digest[:19] or "latest")
+
+
+def image_sections(raw: str) -> list[tuple[str, str]]:
+    """(image ref, output) per marker line in the output of containers_command()."""
+    out: list[tuple[str, list[str]]] = []
+    for line in raw.splitlines():
+        if line.startswith(CONTAINER_MARK):
+            out.append((line[len(CONTAINER_MARK) :].strip(), []))
+        elif out:
+            out[-1][1].append(line)
+    return [(ref, "\n".join(lines)) for ref, lines in out]
+
+
+def collect_containers(m: Machine, run: Runner = run_command) -> tuple[list[Collected], list[str]]:
+    """One project per running image. Returns (projects, per-image errors)."""
+    r = run(m, containers_command(), None)
+    if r.returncode != 0:
+        raise CollectError(f"containers scan failed ({r.returncode}): {r.stderr.strip()[:300]}")
+    found: list[Collected] = []
+    errors: list[str] = []
+    for ref, body in image_sections(r.stdout):
+        name, version = split_image(ref)
+        try:
+            docs = parse_docs(body)
+        except ValueError as e:
+            errors.append(f"container:{name}: invalid JSON for {ref}: {e}")
+            continue
+        if not docs:
+            errors.append(
+                f"container:{name}: no SBOM for {ref} ({r.stderr.strip()[-200:] or 'no error output'})"
+            )
+            continue
+        merged = merge_boms(docs)
+        found.append(
+            Collected(
+                f"container:{name}",
+                version,
+                json.dumps(merged).encode(),
+                len(merged["components"]),
+                m.containers_team,
+                "container",
+                ["containers"],
+            )
+        )
+    return found, errors
+
+
+def collect_code(c: CodeTarget, inv: Inventory, run: Runner = run_command) -> Collected:
+    m = inv.machines[c.machine]
+    r = run(m, code_command(c), None)
+    if r.returncode != 0:
+        raise CollectError(f"code scan failed ({r.returncode}): {r.stderr.strip()[:300]}")
+    try:
+        docs = parse_docs(r.stdout)
+    except ValueError as e:
+        raise CollectError(f"code scan printed invalid JSON: {e}") from e
+    merged = merge_boms(docs)
+    version = c.version
+    if not version:
+        v = run(m, code_version_command(c), None)
+        version = _clean_version(v.stdout) if v.returncode == 0 else "unknown"
+    return Collected(
+        f"code:{c.name}",
+        version,
+        json.dumps(merged).encode(),
+        len(merged["components"]),
+        c.team,
+        "app",
+        ["code"],
+    )
 
 
 def project_name(m: Machine) -> str:
@@ -238,7 +371,7 @@ def collect_all(
     run: Runner = run_command,
     extras: Path = EXTRAS_SCRIPT,
 ) -> int:
-    """Collect and upload; returns the process exit code (1 if any machine failed)."""
+    """Collect and upload; returns the process exit code (1 if anything failed)."""
     if not inv.machines:
         print("  error no [machines.*] in the inventory", flush=True)
         return 1
@@ -247,11 +380,18 @@ def collect_all(
         print(f"  error unknown machine(s) {unknown}; choose from {sorted(inv.machines)}")
         return 2
     chosen = [inv.machines[n] for n in names] if names else list(inv.machines.values())
+    chosen_names = {m.name for m in chosen}
+    code = [c for c in inv.code.values() if c.machine in chosen_names]
 
     if dry_run:
         for m in chosen:
             where = m.ssh or "this machine"
-            print(f"  plan  {project_name(m)} [{m.team}] via {where}: {', '.join(m.scans)}")
+            if host_scans(m):
+                print(f"  plan  {project_name(m)} [{m.team}] via {where}: {', '.join(host_scans(m))}")
+            if "containers" in m.scans:
+                print(f"  plan  container:<image> [{m.containers_team}] via {where}: running images")
+        for c in code:
+            print(f"  plan  code:{c.name} [{c.team}] {c.path} on {c.machine}")
         return 0
 
     if dt is None:
@@ -263,19 +403,40 @@ def collect_all(
         return 1
 
     failed = 0
-    for m in chosen:
-        name = project_name(m)
-        try:
-            got = collect_machine(m, inv, run, extras)
-            tags = [inv.teams[m.team].dtrack_tag, "kind-host" if m.kind == "linux" else "kind-laptop"]
-            token = dt.upload_bom(name, got.version, got.sbom, tags)
-        except (CollectError, HttpError, OSError) as e:
-            failed += 1
-            print(f"  FAIL  {name}: {e}")
-            continue
+
+    def upload(got: Collected) -> None:
+        tags = [inv.teams[got.team].dtrack_tag, f"kind-{got.kind}"]
+        token = dt.upload_bom(got.project, got.version, got.sbom, tags)
         extra = f"; skipped {', '.join(got.skipped)}" if got.skipped else ""
         print(
-            f"  ok    {name}@{got.version}: {got.components} components from "
+            f"  ok    {got.project}@{got.version} [{got.team}]: {got.components} components from "
             f"{', '.join(got.scans)}{extra} (token {token or '-'})"
         )
+
+    for m in chosen:
+        if host_scans(m):
+            try:
+                upload(collect_machine(m, inv, run, extras))
+            except (CollectError, HttpError, OSError) as e:
+                failed += 1
+                print(f"  FAIL  {project_name(m)}: {e}")
+        if "containers" in m.scans:
+            try:
+                images, errors = collect_containers(m, run)
+                for img in images:
+                    try:
+                        upload(img)
+                    except (HttpError, OSError) as e:
+                        errors.append(f"{img.project}: {e}")
+            except (CollectError, OSError) as e:
+                errors = [f"containers on {m.name}: {e}"]
+            for e in errors:
+                failed += 1
+                print(f"  FAIL  {e}")
+    for c in code:
+        try:
+            upload(collect_code(c, inv, run))
+        except (CollectError, HttpError, OSError) as e:
+            failed += 1
+            print(f"  FAIL  code:{c.name}: {e}")
     return 1 if failed else 0

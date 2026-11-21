@@ -1,4 +1,4 @@
-# vulnflow PoC — CVE tracking for the dev and sysadmin teams
+# vulnflow PoC — CVE tracking for the sysadmin, users and dev teams
 
 A proof of concept for three-layer vulnerability tracking:
 
@@ -16,7 +16,7 @@ A proof of concept for three-layer vulnerability tracking:
      ▼           ▼                             ▼
   OpenCVE     DefectDojo (product types)   Dependency-Track (team tags)
   projects ◄──── triage write-back            ▲  SBOMs from CI + hosts
-  sysadm/dev  │ webhook                        │  (scripts/ci-sbom-upload.sh,
+  per team    │ webhook                        │  (scripts/ci-sbom-upload.sh,
      │        │                                │   scripts/host-sbom.sh)
      ▼        │                                │
   vulnflow receiver ── KEV + EPSS + CIRCL ──► tier P1..P4 ──► chat (team mention) + alerts.jsonl
@@ -306,10 +306,11 @@ run `./poc.sh glue-up`.
 ## Own machines on a small VM
 
 The PoC can run against a real estate on a VM that is **not always on**, for example a
-12 GB / 6 vCore / 100 GB VPS: three Linux servers (apt, plus Homebrew) and MacBooks (Homebrew
-formulae and casks, language tools, apps in `/Applications`). Nothing on the machines needs
-to reach the VM and nothing runs on a schedule; you pull, from your own computer, when the VM
-is up.
+12 GB / 6 vCore / 100 GB VPS: three Linux servers (apt, plus Homebrew, running containers and
+some application code) and MacBooks (Homebrew formulae and casks, language tools, apps in
+`/Applications`). Ownership is split three ways: **sysadm** gets the servers, **users** the
+MacBooks, **dev** the code and containers. Nothing on the machines needs to reach the VM and
+nothing runs on a schedule; you pull, from your own computer, when the VM is up.
 
 ```text
  your computer ──ssh──► server1..3, macbook-2      each machine builds its own SBOM
@@ -320,9 +321,9 @@ is up.
 
 ### One-time setup
 
-1. Edit the `[machines.*]` entries in `inventory/inventory.toml` (placeholders for three
-   servers and two MacBooks are there; leave out `ssh` for the machine you run `collect` on).
-   `python3 -m vulnflow collect --dry-run` shows the plan.
+1. Edit the `[machines.*]` and `[code.*]` entries in `inventory/inventory.toml` (placeholders
+   for three servers, two MacBooks and one application are there; leave out `ssh` for the
+   machine you run `collect` on). `python3 -m vulnflow collect --dry-run` shows the plan.
 2. On every machine: [syft](#4-install-syft-sbom-generator) (Homebrew: `brew install syft`)
    and `python3` (needed for the Homebrew and app scans). The servers need key-based
    non-interactive ssh from your computer (`ssh -o BatchMode=yes server1 true` must work).
@@ -353,11 +354,19 @@ python3 -m vulnflow dt2dojo
 ./poc.sh down
 ```
 
-`collect` makes **one Dependency-Track project per machine** (`host:<name>`, tagged with the
-team and `kind-host` / `kind-laptop`; the version is probed from the OS, e.g. `debian-13`,
-`macos-15.1`). A machine's scans are merged into one SBOM. Uploading replaces the project's
-components, so a machine is uploaded only if all its scans worked; one that is unreachable
-is reported (`FAIL`) and its previous SBOM stays. The exit code is 1 if any machine failed.
+`collect` makes three kinds of Dependency-Track project, each tagged with its owner:
+
+| Project | From | Owner | Version |
+| --- | --- | --- | --- |
+| `host:<machine>` (tag `kind-host` / `kind-laptop`) | the machine's host scans, merged into one SBOM | the machine's `team` (sysadm, users) | probed from the OS, e.g. `debian-13`, `macos-15.1` |
+| `container:<image>` (`kind-container`) | the `containers` scan: every image `docker ps` lists | `containers_team` (dev) | the image tag |
+| `code:<name>` (`kind-app`) | `[code.<name>]`: a directory with the code and its installed dependencies | the entry's `team` (dev) | `git describe`, or `version` |
+
+Uploading replaces a project's components, so a project is uploaded only if everything that
+makes it up worked; an unreachable machine is reported (`FAIL`) and its previous SBOM stays.
+A failing container or code project does not hold back the host project or the others. The
+exit code is 1 if anything failed. `--machine server1` refreshes that machine, its containers
+and the code on it.
 
 | Scan | Run on | What it lists | How it is matched |
 | --- | --- | --- | --- |
@@ -365,6 +374,7 @@ is reported (`FAIL`) and its previous SBOM stays. The exit code is 1 if any mach
 | `brew` | Linux, macOS | Homebrew formulae and casks (`scripts/sbom-extras.py`) | CPE only, see below |
 | `languages` | any | uv tools, pipx venvs, `~/.cargo/bin`, `npm root -g` (syft) | OSV by purl (PyPI, npm) |
 | `apps` | macOS | `/Applications` and `~/Applications` bundles (`Info.plist`) | CPE only, see below |
+| `containers` | any with docker | running container images (syft on each image) | OSV by purl for language packages, OS packages by distro |
 
 ### What to expect
 
@@ -387,19 +397,24 @@ is reported (`FAIL`) and its previous SBOM stays. The exit code is 1 if any mach
   (its docs suggest more for a large portfolio); with this few projects that should do, but
   it is the first thing to raise if the JVM runs out of memory.
 
-## How "dev vs sysadmin" works
+## How the teams work
 
-Everything is keyed on the team entries in `inventory/inventory.toml`:
+Everything is keyed on the team entries in `inventory/inventory.toml`. The example estate has
+three groups:
 
-| | sysadm | dev |
-| --- | --- | --- |
-| OpenCVE project | `sysadm` (vendors/products subscribed) | `dev` |
-| Dependency-Track tag | `team-sysadm` (host SBOMs) | `team-dev` (app SBOMs) |
-| DefectDojo product type | `Sysadmin` | `Development` |
-| Chat mention | `@drift-oncall` | `@dev-security` |
+| | sysadm | users | dev |
+| --- | --- | --- | --- |
+| Owns | the servers | the MacBooks | code and containers |
+| OpenCVE project | `sysadm` | `users` | `dev` |
+| Dependency-Track tag | `team-sysadm` | `team-users` | `team-dev` |
+| DefectDojo product type | `Sysadmin` | `Users` | `Development` |
+| Chat mention | `@sysadm` | `@users` | `@dev` |
+| DT projects | `host:<server>` | `host:<macbook>` | `container:<image>`, `code:<name>` |
 
-Products that both teams care about can be listed under both teams. Each team then gets its
-own alert and its own status in OpenCVE.
+Products that several teams care about can be listed under each. Each team then gets its
+own alert and its own status in OpenCVE. A machine's `team` owns its `host:` project; the
+containers running on it belong to `containers_team` (default `dev`) and `[code.*]` entries
+to their own `team` (default `dev`).
 
 ## Priority tiers (vulnflow receiver)
 
@@ -466,7 +481,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
-| `collect`: syft/ssh commands, merge, per-machine upload | Shell commands run locally against a stub `syft` and tested offline with a fake runner; **not run against real servers, Macs or a live DT** |
+| `collect`: syft/ssh commands, merge, per-project upload (hosts, containers, code) | Shell commands run locally against a stub `syft` and tested offline with a fake runner; **not run against real servers, Macs or a live DT** |
 | Homebrew/app SBOMs (`scripts/sbom-extras.py`) | `brew info --json=v2 --installed` shape assumed from Homebrew's formula/cask JSON, not run against a real brew; CPE vendors are guesses (see "Own machines") |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 

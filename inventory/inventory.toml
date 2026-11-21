@@ -19,72 +19,103 @@ chat_min_tier = 2
 ignore_event_types = ["references"]
 
 # ---------------------------------------------------------------------------
+# Three groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
+#   sysadm  the servers (OS packages, Homebrew on the servers)
+#   users   the MacBooks (macOS, Homebrew, apps, language tools)
+#   dev     code and containers (application dependencies, container images)
+# A machine's `team` owns its host project; its containers and code go to dev (below).
 [teams.sysadm]
-display_name   = "Drift / sysadmin"
+display_name   = "Sysadmin"
 opencve_project = "sysadm"
 defectdojo_product_type = "Sysadmin"
 dtrack_tag     = "team-sysadm"
-chat_mention   = "@drift-oncall"
+chat_mention   = "@sysadm"
 
 [teams.sysadm.opencve]
-vendors  = ["fortinet", "citrix", "vmware", "openssh"]
+vendors  = []
 [teams.sysadm.opencve.products]
-microsoft = ["windows_server_2022", "windows_server_2025", "exchange_server"]
-apache    = ["http_server", "tomcat"]
-redhat    = ["enterprise_linux"]
+debian    = ["debian_linux"]
+canonical = ["ubuntu_linux"]
 linux     = ["linux_kernel"]
+# Add what the servers run (names are NVD's; see README "Describe what you run" for how to
+# check one): nginx, openssh, postgresql, ...
 
-# ---------------------------------------------------------------------------
+[teams.users]
+display_name   = "Users"
+opencve_project = "users"
+defectdojo_product_type = "Users"
+dtrack_tag     = "team-users"
+chat_mention   = "@users"
+
+[teams.users.opencve]
+vendors  = []
+[teams.users.opencve.products]
+apple = ["macos"]
+# Add the apps that matter (Homebrew and app SBOMs are matched by CPE only, so product
+# subscriptions are the reliable signal for them).
+
 [teams.dev]
-display_name   = "Utveckling"
+display_name   = "Development"
 opencve_project = "dev"
 defectdojo_product_type = "Development"
 dtrack_tag     = "team-dev"
-chat_mention   = "@dev-security"
+chat_mention   = "@dev"
 
 [teams.dev.opencve]
 vendors  = ["python", "nodejs"]
 [teams.dev.opencve.products]
 postgresql = ["postgresql"]
-gitlab     = ["gitlab"]
-jenkins    = ["jenkins"]
 # Libraries are better tracked by SBOM in Dependency-Track (purl/OSV/GHSA matching)
 # than by CPE subscriptions here, because NVD no longer adds CPEs to most CVEs.
 
 # ---------------------------------------------------------------------------
 # Machines for `python -m vulnflow collect` (SBOMs over ssh, uploaded to Dependency-Track).
 # Replace these placeholders with your own. Each becomes one DT project `host:<name>`.
+#   team    owner of the host project
 #   kind    "linux" (default scans: system, brew) or "macos" (brew, languages, apps)
 #   ssh     ssh host/alias or user@host; leave out for the machine you run collect on
-#   scans   any of system | brew | languages | apps
+#   scans   any of system | brew | languages | apps | containers
+#           `containers` scans the images of running containers (needs docker access) into
+#           one project `container:<image>` each, owned by `containers_team` (default dev)
 #   sudo    run the syft system scan through `sudo -n` (usually not needed: dpkg's database
 #           is world-readable)
 #   language_paths  directories under $HOME for the `languages` scan (default: uv tools,
 #           pipx venvs, ~/.cargo/bin, plus `npm root -g`)
 #   version  DT project version; default is probed from the OS (debian-13, macos-15.1)
 [machines.server1]
-team = "sysadm"
-kind = "linux"
-ssh  = "server1"
+team  = "sysadm"
+kind  = "linux"
+ssh   = "server1"
+scans = ["system", "brew", "containers"]
 
 [machines.server2]
-team = "sysadm"
-kind = "linux"
-ssh  = "server2"
+team  = "sysadm"
+kind  = "linux"
+ssh   = "server2"
+scans = ["system", "brew", "containers"]
 
 [machines.server3]
-team = "sysadm"
-kind = "linux"
-ssh  = "server3"
+team  = "sysadm"
+kind  = "linux"
+ssh   = "server3"
+scans = ["system", "brew", "containers"]
 
 [machines.macbook-1]
-team = "dev"
+team = "users"
 kind = "macos"          # the machine you run collect on: no ssh
 
 [machines.macbook-2]
-team = "dev"
+team = "users"
 kind = "macos"
 ssh  = "macbook-2"
+
+# Application code: a directory on one of the machines with the code *and* its installed
+# dependencies (e.g. a project with its venv or node_modules). One DT project `code:<name>`,
+# owned by `team` (default dev). The version is `git describe` in that directory unless set.
+# Run collect --machine <machine> to refresh just that machine and its code.
+[code.myapp]
+machine = "server1"
+path    = "/srv/myapp"
 
 # Homebrew formulae/casks and Mac apps are matched by CPE only, and NVD's vendor name
 # can't be derived from Homebrew metadata (default guess: vendor = product). Pin the ones

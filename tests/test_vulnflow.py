@@ -18,10 +18,13 @@ from vulnflow.collect import (
     CollectError,
     RunResult,
     collect_all,
+    collect_containers,
     collect_machine,
+    image_sections,
     languages_command,
     merge_boms,
     parse_docs,
+    split_image,
     system_command,
 )
 from vulnflow.config import Machine, PriorityRules, load_inventory
@@ -802,6 +805,10 @@ kind = "linux"
 ssh = "web1"
 sudo = true
 
+[code.myapp]
+machine = "web1"
+path = "/srv/myapp"
+
 [machines.laptop]
 team = "dev"
 kind = "macos"
@@ -930,17 +937,21 @@ class FakeMachines:
         self.calls: list[tuple[str, str, bool]] = []
 
     def __call__(self, m: Machine, cmd: str, stdin: bytes | None) -> RunResult:
-        kind = (
-            "probe"
-            if "os-release" in cmd
-            else "system"
-            if "dir:/ " in cmd
-            else "brew"
-            if cmd.rstrip().endswith("brew") or " brew " in cmd
-            else "apps"
-            if " apps" in cmd
-            else "languages"
-        )
+        kind = "languages"
+        for needle, name in (
+            ("os-release", "probe"),
+            ("docker ps", "containers"),
+            ("git -C", "codever"),
+            ("dir:/srv/myapp", "code"),
+            ("dir:/ ", "system"),
+            (" apps", "apps"),
+        ):
+            if needle in cmd:
+                kind = name
+                break
+        else:
+            if cmd.rstrip().endswith("brew") or " brew " in cmd:
+                kind = "brew"
         self.calls.append((m.name, kind, stdin is not None))
         return self.results.get((m.name, kind), RunResult(1, "", f"no canned result for {kind}"))
 
@@ -1015,7 +1026,7 @@ def test_collect_all_uploads_whole_machines_only(tmp_path, capsys):
     assert body["projectTags"] == [{"name": "team-dev"}, {"name": "kind-laptop"}]
     assert {c["name"] for c in json.loads(base64.b64decode(body["bom"]))["components"]} == {"jq", "B"}
     out = capsys.readouterr().out
-    assert "FAIL  host:web1" in out and "ok    host:laptop@macos-15.1: 2 components" in out
+    assert "FAIL  host:web1" in out and "ok    host:laptop@macos-15.1 [dev]: 2 components" in out
 
 
 def test_collect_all_dry_run_unknown_machine_and_dt_down(tmp_path):
@@ -1027,3 +1038,81 @@ def test_collect_all_dry_run_unknown_machine_and_dt_down(tmp_path):
     assert collect_all(inv, dt, ["nope"], run=run) == 2
     assert collect_all(inv, dt, run=run) == 1  # DT not answering: nothing is collected
     assert run.calls == [] and [c[0] for c in t.calls] == ["GET"]
+
+
+def test_code_and_container_validation(tmp_path):
+    inv = machines_inv(tmp_path)
+    assert inv.code["myapp"].team == "dev" and inv.code["myapp"].machine == "web1"
+    assert inv.machines["web1"].containers_team == "dev"
+    for bad in (
+        MACHINES_TOML.replace('machine = "web1"', 'machine = "nope"'),
+        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "srv/myapp"'),
+        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "/srv/../etc"'),
+        MACHINES_TOML.replace("sudo = true", 'containers_team = "nope"'),
+    ):
+        with pytest.raises(SystemExit):
+            machines_inv(tmp_path, bad)
+
+
+def test_split_image_and_sections():
+    assert split_image("ghcr.io/o/app:1.2") == ("ghcr.io/o/app", "1.2")
+    assert split_image("localhost:5000/app") == ("localhost:5000/app", "latest")
+    assert split_image("nginx") == ("nginx", "latest")
+    assert split_image("nginx@sha256:" + "a" * 64) == ("nginx", "sha256aaaaaaaaaaaa")
+    out = "@@vulnflow-image a:1\n{}\n@@vulnflow-image b\n"
+    assert image_sections(out) == [("a:1", "{}"), ("b", "")]
+    assert image_sections("no marker\n") == []
+
+
+def containers_out(good: str, bad: str) -> str:
+    sbom = syft_doc(("openssl", "3.0.15")).replace("\n", " ")
+    return f"@@vulnflow-image {good}\n{sbom}\n@@vulnflow-image {bad}\n"
+
+
+def test_collect_containers_reports_failed_images_but_keeps_the_rest(tmp_path):
+    inv = machines_inv(tmp_path)
+    run = FakeMachines(
+        {("web1", "containers"): RunResult(0, containers_out("nginx:1.27", "broken:1"), "syft failed")}
+    )
+    found, errors = collect_containers(inv.machines["web1"], run)
+    assert [(c.project, c.version, c.team, c.components) for c in found] == [
+        ("container:nginx", "1.27", "dev", 1)
+    ]
+    assert len(errors) == 1 and "container:broken" in errors[0] and "syft failed" in errors[0]
+    run.results[("web1", "containers")] = RunResult(127, "", "docker not installed")
+    with pytest.raises(CollectError, match="docker not installed"):
+        collect_containers(inv.machines["web1"], run)
+
+
+def test_collect_all_splits_projects_by_owner(tmp_path, capsys):
+    inv = machines_inv(
+        tmp_path, MACHINES_TOML.replace("sudo = true", 'scans = ["system", "containers"]')
+    )
+    run = FakeMachines(
+        {
+            ("web1", "system"): ok(syft_doc(("openssl", "3.0.15"))),
+            ("web1", "probe"): ok("debian-13"),
+            ("web1", "containers"): RunResult(0, containers_out("nginx:1.27", "broken:1"), "boom"),
+            ("web1", "code"): ok(syft_doc(("django", "5.1"))),
+            ("web1", "codever"): ok("v1.4.0\n"),
+        }
+    )
+    t = FakeTransport({"GET /api/version": {"version": "5.2.2"}, "PUT /api/v1/bom": {"token": "tok"}})
+    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
+    assert collect_all(inv, dt, run=run) == 1  # the broken image fails the run ...
+    bodies = [json.loads(c[3]) for c in t.calls if c[0] == "PUT"]
+    got = {
+        b["projectName"]: (b["projectVersion"], [x["name"] for x in b["projectTags"]]) for b in bodies
+    }
+    # ... but host, the good container and the code were all uploaded, each to its owner
+    assert got == {
+        "host:web1": ("debian-13", ["team-sysadm", "kind-host"]),
+        "container:nginx": ("1.27", ["team-dev", "kind-container"]),
+        "code:myapp": ("v1.4.0", ["team-dev", "kind-app"]),
+    }
+    assert "FAIL  container:broken" in capsys.readouterr().out
+    # --machine selects its containers and code too; an unrelated machine selects none
+    t.calls.clear()
+    assert collect_all(inv, None, dry_run=True, run=run) == 0
+    out = capsys.readouterr().out
+    assert "plan  host:web1 [sysadm]" in out and "plan  code:myapp [dev]" in out
