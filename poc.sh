@@ -525,7 +525,7 @@ cmd_setup() {
   log "  DefectDojo       http://localhost:${DD_PORT:-8280}  ${DD_ADMIN_USER:-admin} / DD_ADMIN_PASSWORD"
   log "  OpenCVE          ${OPENCVE_URL:-http://localhost}  ${OPENCVE_ADMIN_USER:-admin} / OPENCVE_ADMIN_PASSWORD"
   log "Still yours: feed SBOMs (README 'Feed SBOMs'), optional VULNFLOW_CHAT_WEBHOOK,"
-  log "TLS/reverse proxy, and firewalling DefectDojo's 8280/8443."
+  log "and a TLS/reverse proxy (all ports are bound to 127.0.0.1)."
 }
 
 case "${1:-}" in
