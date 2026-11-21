@@ -10,11 +10,17 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
 - `poc.sh` orchestrates the three upstream stacks with each project's *own* install method
   (OpenCVE `install.sh`, DefectDojo's compose file, Dependency-Track's quickstart compose)
   plus small overlays in `stacks/` and `deploy/`. Don't merge them into one compose file.
-- `vulnflow/collect.py` (`vulnflow collect`) builds one SBOM per `[machines.*]` entry over
-  ssh and uploads it; it runs on the operator's computer, not in the glue containers.
-  `scripts/sbom-extras.py` (Homebrew, macOS apps) is piped to the machines over ssh, so it
-  must stay standard-library only and run on macOS's Python 3.9. A machine is uploaded only
-  when all its scans worked (an upload replaces the project's components).
+- Own machines **push**: `scripts/vulnflow-agent.py` runs on each server/laptop from a timer
+  (`deploy/agent/`) and uploads to Dependency-Track over the tailnet; nothing connects to the
+  machines. It is one file, standard library only, and must keep running on macOS's
+  Python 3.9 (no `match`, no runtime `X | Y`; annotations are fine with `from __future__
+  import annotations`). CI runs it on 3.9 (`agent-py39` in `tests.yml`). Its
+  `CONFIG_FORMAT` must match `AGENT_CONFIG_FORMAT` in `vulnflow/machines.py`, which renders
+  the per-host config (`vulnflow agent-bundle`). Each host has its own DT team
+  `agent-<host>` with only `BOM_UPLOAD` + `PROJECT_CREATION_UPLOAD`.
+- The operator's hosts and groups are in `machines.toml` (repo root), which is gitignored and
+  dockerignored like `.env`; only `machines.example.toml` with placeholders is committed. Never
+  put real host names in tracked files: the repository is public.
 - `upstream/` (clones), `data/` and `.env` are gitignored and only exist at runtime.
 - `stacks/opencve/bootstrap_org.py` runs *inside* OpenCVE's webserver container via
   `manage.py shell`; it is not importable from `vulnflow` and is excluded from mypy.

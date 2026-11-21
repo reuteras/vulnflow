@@ -1,0 +1,55 @@
+# Own hosts that push their SBOMs to Dependency-Track (scripts/vulnflow-agent.py).
+#
+#   cp machines.example.toml machines.toml
+#
+# machines.toml is gitignored and dockerignored, like .env: real host names and
+# what runs where are targeting data. Keep the real file in a private place (your Ansible
+# repo or vault) and copy it to the vulnflow server; set VULNFLOW_MACHINES in .env if it
+# lives somewhere else. After a change: python3 -m vulnflow agent-bundle --all
+#
+# Teams are the [teams.*] keys of inventory/inventory.toml (sysadm, users, dev).
+
+# ---- Groups: shared settings plus the hosts in them -------------------------------
+# A host belongs to at most one group. Settings:
+#   team             owner of the host project (DT project host:<name>)  required
+#   kind             "linux" (default scans: system) or "macos" (brew, languages, apps)
+#   scans            any of system | brew | languages | apps | containers
+#                    containers: each running image becomes container:<image>, owned by
+#                    containers_team (default dev); needs docker access for the agent
+#   containers_team  owner of the container projects (default dev)
+#   language_paths   directories under $HOME for the languages scan (default: uv tools,
+#                    pipx venvs, ~/.cargo/bin, plus `npm root -g`)
+[groups.servers]
+team  = "sysadm"
+kind  = "linux"
+scans = ["system", "containers"]
+hosts = ["server1", "server2", "server3"]
+
+[groups.laptops]
+team  = "users"
+kind  = "macos"
+scans = ["brew", "languages", "apps"]
+hosts = ["laptop1", "laptop2"]
+
+# ---- Per-host overrides (or a host without a group) ---------------------------------
+# Any group setting, plus:
+#   group    join a group without being in its hosts list
+#   version  fixed DT project version (default: probed from the OS, e.g. debian-13)
+[hosts.server1]
+scans = ["system", "brew", "containers"]   # this one also has Homebrew
+
+# ---- Application code ----------------------------------------------------------------
+# A directory with the code *and* its installed dependencies (venv, node_modules) on one
+# of the hosts above; that host's agent scans it into DT project code:<name>.
+#   team     owner (default dev)
+#   version  default: `git describe` in the directory
+[code.myapp]
+host = "server1"
+path = "/srv/myapp"
+
+# ---- CPE overrides for Homebrew and macOS apps ------------------------------------------
+# Matched by CPE only; NVD's vendor can't be derived from Homebrew metadata (default guess:
+# vendor = product). "<formula | cask | bundle id>" = "<nvd vendor>:<nvd product>".
+[cpe_map]
+# ripgrep = "burntsushi:ripgrep"
+# "com.amazon.Lassen" = "amazon:kindle"

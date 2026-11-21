@@ -47,3 +47,29 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+  agent-py39:
+    # scripts/vulnflow-agent.py runs on macOS's built-in Python 3.9 (the package needs 3.11)
+    name: "Agent on Python 3.9"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Run the agent on Python 3.9
+        run: |
+          uv python install 3.9
+          py="$(uv python find 3.9)"
+          "$py" -I scripts/vulnflow-agent.py --help
+          printf '%s' '{"vulnflow_agent_config": 1, "host": "ci", "dt_url": "https://dt.invalid",
+            "host_project": null, "containers": null, "code": []}' > "$RUNNER_TEMP/agent.json"
+          "$py" -I scripts/vulnflow-agent.py --config "$RUNNER_TEMP/agent.json" --dry-run

@@ -338,85 +338,131 @@ run `./poc.sh glue-up`.
 - **Both:** P1/P2 alerts arrive in chat (when configured) and are marked `to_evaluate` in
   OpenCVE, but only if nobody has triaged them yet.
 
-## Own machines on a small VM
+## Own machines (push agents)
 
-The PoC can run against a real estate on a VM that is **not always on**, for example a
-12 GB / 6 vCore / 100 GB VPS: three Linux servers (apt, plus Homebrew, running containers and
-some application code) and MacBooks (Homebrew formulae and casks, language tools, apps in
-`/Applications`). Ownership is split three ways: **sysadm** gets the servers, **users** the
-MacBooks, **dev** the code and containers. Nothing on the machines needs to reach the VM and
-nothing runs on a schedule; you pull, from your own computer, when the VM is up.
+The vulnflow server is always on and every machine **pushes** to it; nothing connects to
+the machines. Each server and MacBook runs `scripts/vulnflow-agent.py` once a day (systemd
+timer on Linux, launchd on macOS). The agent builds the machine's SBOMs locally with syft,
+Homebrew and the app bundles and uploads them to Dependency-Track over the tailnet
+(`https://<host>.<tailnet>.ts.net:8180`, see [Reach the UIs](#1-reach-the-uis)). Ownership is
+split three ways: **sysadm** gets the servers, **users** the MacBooks, **dev** the code and
+containers.
 
 ```text
- your computer ──ssh──► server1..3, macbook-2      each machine builds its own SBOM
-      │                  (syft / brew / app scan)  and prints it to stdout
-      │ python -m vulnflow collect
-      └──ssh -L 8180──► VM: Dependency-Track ──► dt2dojo ──► DefectDojo
+ server1..3  ─┐  vulnflow-agent.py (timer)   ┌─► Dependency-Track ──► dt2dojo ──► DefectDojo
+ laptop1..2  ─┼── HTTPS over the tailnet ────┤   (tailscale serve :8180, one API key per host)
+ code dirs   ─┘  syft / brew / app bundles   └─► vulnflow machines: who stopped pushing?
 ```
 
-### One-time setup
+### Your hosts: `machines.toml` (not in git)
 
-1. Edit the `[machines.*]` and `[code.*]` entries in `inventory/inventory.toml` (placeholders
-   for three servers, two MacBooks and one application are there; leave out `ssh` for the
-   machine you run `collect` on). `python3 -m vulnflow collect --dry-run` shows the plan.
-2. On every machine: [syft](#4-install-syft-sbom-generator) (Homebrew: `brew install syft`)
-   and `python3` (needed for the Homebrew and app scans). The servers need key-based
-   non-interactive ssh from your computer (`ssh -o BatchMode=yes server1 true` must work).
-   No root is needed: dpkg's database is world-readable. If you want `sudo` anyway, set
-   `sudo = true` and allow `sudo -n syft` for that user.
-3. On your computer, a clone of this repo with `.env` containing only `DT_URL=http://localhost:8180`
-   and `DT_API_KEY=...` (copy both from the VM's `.env`; the key can upload and read).
-4. On the VM: 4-8 GB of swap, so the first imports can't get OOM-killed (`./poc.sh check`
-   warns when there is none):
+Host names and what runs where are targeting data, and this repository is public. They live
+in `machines.toml` next to `.env`, which is gitignored and dockerignored in the same way;
+the committed [`machines.example.toml`](machines.example.toml) has placeholders only. Keep the
+real file in a private place (your Ansible repo or vault) and copy it to the server
+(`VULNFLOW_MACHINES` in `.env` if it lives elsewhere).
 
-   ```bash
-   sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
-   sudo mkswap /swapfile && sudo swapon /swapfile
-   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-   ```
+```toml
+[groups.servers]                 # shared settings for the hosts in the group
+team  = "sysadm"
+kind  = "linux"
+scans = ["system", "containers"]
+hosts = ["server1", "server2", "server3"]
 
-### A session
+[groups.laptops]
+team  = "users"
+kind  = "macos"                  # default scans: brew, languages, apps
+hosts = ["laptop1", "laptop2"]
+
+[hosts.server1]                  # per-host override (or a host without a group)
+scans = ["system", "brew", "containers"]
+
+[code.myapp]                     # application code on one of the hosts, owned by dev
+host = "server1"
+path = "/srv/myapp"
+```
+
+`python3 -m vulnflow machines` lists the hosts by group. Once Dependency-Track is up it also
+shows each host's last upload and marks hosts as `STALE` when they haven't pushed for
+`--stale-days` (default 2) or never did; the exit code is 1 then. With push, a machine that
+has gone quiet is the failure you would otherwise not notice. `./poc.sh status` runs it.
+
+### Rolling out the agents (Ansible)
+
+On the server, after a change to `machines.toml`:
 
 ```bash
-# VM:    start the stacks (the first time: ./poc.sh setup)
-./poc.sh up
-# your computer: tunnel Dependency-Track, then pull from every machine
-ssh -N -L 8180:127.0.0.1:8180 -L 8181:127.0.0.1:8181 -L 8280:127.0.0.1:8280 -L 8000:127.0.0.1:80 vm &
-python3 -m vulnflow collect                  # or: collect --machine server2 --machine macbook-1
-# VM:    don't wait 30 minutes for the loop
-python3 -m vulnflow dt2dojo
-# ... look at Dependency-Track / DefectDojo / OpenCVE in the browser ...
-./poc.sh down
+python3 -m vulnflow agent-bundle --all          # or: agent-bundle server1 laptop2
 ```
 
-`collect` makes three kinds of Dependency-Track project, each tagged with its owner:
+This writes `data/agents/<host>/config.json` (what to scan, project names and tags,
+`cpe_map`, the DT URL from `VULNFLOW_AGENT_DT_URL` or `DT_PUBLIC_API_URL`) and
+`data/agents/<host>/key` (directory 700, files 600). Every host gets **its own**
+Dependency-Track team `agent-<host>` with only `BOM_UPLOAD` and `PROJECT_CREATION_UPLOAD`:
+a key taken from a laptop can upload SBOMs but can't read the portfolio. Rerunning keeps a
+key that still works (`--rotate` forces a new one). `agent-revoke <host>` deletes that team
+and every key of that host, for example when a laptop is lost.
 
-| Project | From | Owner | Version |
+Then Ansible copies, per host:
+
+| | Linux server (runs as root) | MacBook (runs as the user) |
+| --- | --- | --- |
+| agent | `/usr/local/lib/vulnflow-agent/vulnflow-agent.py` | `~/.local/share/vulnflow-agent/vulnflow-agent.py` |
+| bundle | `/etc/vulnflow-agent/config.json` + `key` (root, 600) | `~/.config/vulnflow-agent/config.json` + `key` (600) |
+| timer | [`deploy/agent/vulnflow-agent.service`](deploy/agent/vulnflow-agent.service) + `.timer` to `/etc/systemd/system/`, `systemctl enable --now vulnflow-agent.timer` | [`deploy/agent/local.vulnflow.agent.plist`](deploy/agent/local.vulnflow.agent.plist) (`__HOME__` replaced) to `~/Library/LaunchAgents/`, `launchctl bootstrap gui/$(id -u) …` |
+| tools | syft (pinned), python3, docker for `containers` | syft (`brew install syft`); macOS's own `/usr/bin/python3` (3.9) is enough |
+
+The agent is one standard-library-only file and needs nothing else. On Linux it runs as
+root: the system scan reads every package database, and the containers scan needs the
+docker socket. For the Homebrew scan it switches to the user that owns `brew`, because
+Homebrew refuses to run as root. Try it by hand first:
+
+```bash
+sudo python3 /usr/local/lib/vulnflow-agent/vulnflow-agent.py --dry-run   # scan, upload nothing
+python3 ~/.local/share/vulnflow-agent/vulnflow-agent.py --out /tmp/sboms # write the SBOMs
+```
+
+Tailscale ACLs: the machines only need to reach the vulnflow server on TCP 8180.
+
+### What the agents upload
+
+| Project | From | Owner (tag) | Version |
 | --- | --- | --- | --- |
-| `host:<machine>` (tag `kind-host` / `kind-laptop`) | the machine's host scans, merged into one SBOM | the machine's `team` (sysadm, users) | probed from the OS, e.g. `debian-13`, `macos-15.1` |
-| `container:<image>` (`kind-container`) | the `containers` scan: every image `docker ps` lists | `containers_team` (dev) | the image tag |
-| `code:<name>` (`kind-app`) | `[code.<name>]`: a directory with the code and its installed dependencies | the entry's `team` (dev) | `git describe`, or `version` |
+| `host:<host>` (`kind-host` / `kind-laptop`, `group-<group>`) | the host scans, merged into one SBOM | the host's `team` (sysadm, users) | probed from the OS, e.g. `debian-13`, `macos-15.1` |
+| `container:<image>` (`kind-container`, `host-<host>`) | the `containers` scan: every image `docker ps` lists | `containers_team` (dev) | the image tag |
+| `code:<name>` (`kind-app`, `host-<host>`) | `[code.<name>]`: a directory with the code and its installed dependencies | the entry's `team` (dev) | `git describe`, or `version` |
 
 Uploading replaces a project's components, so a project is uploaded only if everything that
-makes it up worked; an unreachable machine is reported (`FAIL`) and its previous SBOM stays.
-A failing container or code project does not hold back the host project or the others. The
-exit code is 1 if anything failed. `--machine server1` refreshes that machine, its containers
-and the code on it.
+makes it up worked; otherwise the agent reports `FAIL` and the previous SBOM stays. A failing
+container or code project does not hold back the host project or the others; the exit code
+is 1 if anything failed (visible in `systemctl status vulnflow-agent` /
+`~/Library/Logs/vulnflow-agent.log`). Dependency-Track applies the tags when it creates a
+project. An agent key can't change them later, so after moving a host to another group or
+team, fix the tags in the DT UI (or delete the project and let the next push recreate it).
 
 | Scan | Run on | What it lists | How it is matched |
 | --- | --- | --- | --- |
 | `system` | Linux | dpkg/rpm/apk packages (syft on `/`) | OSV (Debian; add `Ubuntu` to `DT_OSV_ECOSYSTEMS` if relevant) |
-| `brew` | Linux, macOS | Homebrew formulae and casks (`scripts/sbom-extras.py`) | CPE only, see below |
+| `brew` | Linux, macOS | Homebrew formulae and casks (`brew info --json=v2 --installed`) | CPE only, see below |
 | `languages` | any | uv tools, pipx venvs, `~/.cargo/bin`, `npm root -g` (syft) | OSV by purl (PyPI, npm) |
 | `apps` | macOS | `/Applications` and `~/Applications` bundles (`Info.plist`) | CPE only, see below |
 | `containers` | any with docker | running container images (syft on each image) | OSV by purl for language packages, OS packages by distro |
+
+The server itself needs 4-8 GB of swap if it has less than 16 GB RAM, so the first imports
+can't get OOM-killed (`./poc.sh check` warns):
+
+```bash
+sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
 
 ### What to expect
 
 - **Homebrew and apps have no package-URL type and no OSV data**, so Dependency-Track can only
   match them by CPE, and NVD's vendor name can't be derived from Homebrew metadata. The
   default guess is vendor = product, with a few built-in exceptions (curl, git, openssl,
-  python, ...). Expect misses. Pin the ones you care about in `[cpe_map]`
+  python, ...). Expect misses. Pin the ones you care about in `[cpe_map]` of `machines.toml`
   (`ripgrep = "burntsushi:ripgrep"`), and use OpenCVE product subscriptions for the rest:
   they work on vendor/product names and need no SBOM.
 - A cask also shows up as an app (two entries for the same program). Harmless, a bit noisy.
@@ -425,9 +471,7 @@ and the code on it.
 - OSV has to cover the ecosystems you use: `DT_OSV_ECOSYSTEMS` in `.env` (default
   `Debian,PyPI`; npm is in DT's own default list, `crates.io` and `Ubuntu` are OSV names you
   can add) and rerun `./poc.sh dt-bootstrap`.
-- After a start, Dependency-Track and OpenCVE need time to catch up on their feeds (assumed:
-  they pick up at their next scheduled run). Findings for a fresh upload can take a while on a
-  cold VM; the Dependency-Track UI shows the analysis queue.
+- Findings for a fresh upload take a while; the Dependency-Track UI shows the analysis queue.
 - Dependency-Track's API server is capped at 2 GB in `stacks/dependency-track/docker-compose.yml`
   (its docs suggest more for a large portfolio); with this few projects that should do, but
   it is the first thing to raise if the JVM runs out of memory.
@@ -478,6 +522,10 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 - **The inventory is sensitive.** The list of products you run, and especially what is
   unpatched, is targeting data. Keep all of this self-hosted, behind SSO and a TLS reverse
   proxy, on an admin network. Don't put the subscriptions in a SaaS.
+- **Your host list stays out of git.** `machines.toml` (hosts, groups, code paths) is
+  gitignored and dockerignored like `.env`, and isn't mounted into the glue containers.
+  Agent bundles in `data/agents/` hold one upload-only DT key per host (files 600); revoke a
+  host with `python3 -m vulnflow agent-revoke <host>`.
 - **Enrichment leaks interest, not exposure.** The receiver sends only CVE IDs to CISA (KEV
   file download), FIRST (EPSS) and CIRCL (sightings). You can turn each one off with
   `VULNFLOW_ENRICH_*=0`. For an isolated network, mirror the KEV and EPSS files internally and
@@ -521,8 +569,10 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
-| `collect`: syft/ssh commands, merge, per-project upload (hosts, containers, code) | Shell commands run locally against a stub `syft` and tested offline with a fake runner; **not run against real servers, Macs or a live DT** |
-| Homebrew/app SBOMs (`scripts/sbom-extras.py`) | `brew info --json=v2 --installed` shape assumed from Homebrew's formula/cask JSON, not run against a real brew; CPE vendors are guesses (see "Own machines") |
+| Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6 (262 components). **Not yet run on a Linux server (system/containers as root) or against a live DT** |
+| Homebrew JSON shape (`formulae[].installed[].version`, `casks[].installed`) | Checked against a real `brew info --json=v2 --installed` on 2026-11-21; CPE vendors are still guesses (see "What to expect") |
+| Per-host agent teams (`agent-bundle`/`agent-revoke`), BOM upload permissions and tags | Checked against the DT 5.2.2 tag (TeamResource, DeleteTeamRequest, BomResource); not yet run live |
+| systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) **not yet run** with syft's docker scan |
 | Tailscale access: DefectDojo `DD_CSRF_TRUSTED_ORIGINS`/`DD_SITE_URL`, OpenCVE `ALLOWED_HOSTS = ["*"]` and nginx forwarding `Host` without the port | Checked against DefectDojo 3.5.201 and OpenCVE v3.1.0 source |
 | Tailscale access: `tailscale serve` keeps the `Host` header; DT apiserver allows the cross-origin UI (it already does for `localhost:8181` → `:8180`) | **Assumed**, not yet run on a tailnet |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |

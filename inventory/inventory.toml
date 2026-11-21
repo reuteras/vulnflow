@@ -69,56 +69,6 @@ postgresql = ["postgresql"]
 # than by CPE subscriptions here, because NVD no longer adds CPEs to most CVEs.
 
 # ---------------------------------------------------------------------------
-# Machines for `python -m vulnflow collect` (SBOMs over ssh, uploaded to Dependency-Track).
-# Replace these placeholders with your own. Each becomes one DT project `host:<name>`.
-#   team    owner of the host project
-#   kind    "linux" (default scans: system, brew) or "macos" (brew, languages, apps)
-#   ssh     ssh host/alias or user@host; leave out for the machine you run collect on
-#   scans   any of system | brew | languages | apps | containers
-#           `containers` scans the images of running containers (needs docker access) into
-#           one project `container:<image>` each, owned by `containers_team` (default dev)
-#   sudo    run the syft system scan through `sudo -n` (usually not needed: dpkg's database
-#           is world-readable)
-#   language_paths  directories under $HOME for the `languages` scan (default: uv tools,
-#           pipx venvs, ~/.cargo/bin, plus `npm root -g`)
-#   version  DT project version; default is probed from the OS (debian-13, macos-15.1)
-[machines.server1]
-team  = "sysadm"
-kind  = "linux"
-ssh   = "server1"
-scans = ["system", "brew", "containers"]
-
-[machines.server2]
-team  = "sysadm"
-kind  = "linux"
-ssh   = "server2"
-scans = ["system", "brew", "containers"]
-
-[machines.server3]
-team  = "sysadm"
-kind  = "linux"
-ssh   = "server3"
-scans = ["system", "brew", "containers"]
-
-[machines.macbook-1]
-team = "users"
-kind = "macos"          # the machine you run collect on: no ssh
-
-[machines.macbook-2]
-team = "users"
-kind = "macos"
-ssh  = "macbook-2"
-
-# Application code: a directory on one of the machines with the code *and* its installed
-# dependencies (e.g. a project with its venv or node_modules). One DT project `code:<name>`,
-# owned by `team` (default dev). The version is `git describe` in that directory unless set.
-# Run collect --machine <machine> to refresh just that machine and its code.
-[code.myapp]
-machine = "server1"
-path    = "/srv/myapp"
-
-# Homebrew formulae/casks and Mac apps are matched by CPE only, and NVD's vendor name
-# can't be derived from Homebrew metadata (default guess: vendor = product). Pin the ones
-# that matter: "<formula | cask | bundle id>" = "<nvd vendor>:<nvd product>".
-[cpe_map]
-# ripgrep = "burntsushi:ripgrep"
+# Your own hosts (servers, laptops, code directories) are NOT listed here: they go in
+# machines.toml (next to .env), which is kept out of git like .env. Start from
+# machines.example.toml.

@@ -169,7 +169,7 @@ cmd_check() {
   swap="$(awk '/SwapTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)"
   if ((mem < 16 && swap < 4)); then
     warn "~${mem} GB RAM and ${swap} GB swap: add 4-8 GB swap so the first imports don't get" \
-      "OOM-killed (README 'Own machines on a small VM')"
+      "OOM-killed (README 'Own machines (push agents)')"
   fi
 }
 
@@ -606,6 +606,10 @@ cmd_status() {
   if [[ -n "${VULNFLOW_TS_HOST:-}" ]] && command -v tailscale >/dev/null; then
     log "tailscale serve:"
     tailscale serve status || true
+  fi
+  if [[ -f "${VULNFLOW_MACHINES:-machines.toml}" ]]; then
+    log "Own machines (last SBOM push):"
+    vulnflow machines || true
   fi
 }
 

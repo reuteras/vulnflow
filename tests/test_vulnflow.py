@@ -14,20 +14,7 @@ from typing import Any
 import pytest
 
 from vulnflow.clients import DefectDojo, DependencyTrack, OpenCVE
-from vulnflow.collect import (
-    CollectError,
-    RunResult,
-    collect_all,
-    collect_containers,
-    collect_machine,
-    image_sections,
-    languages_command,
-    merge_boms,
-    parse_docs,
-    split_image,
-    system_command,
-)
-from vulnflow.config import Machine, PriorityRules, load_inventory
+from vulnflow.config import PriorityRules, load_inventory, load_machines
 from vulnflow.intel import Enricher, Signals
 from vulnflow.jobs import dt_to_dojo, sync_inventory
 from vulnflow.net import Response
@@ -444,6 +431,7 @@ class FakeDT:
         self.password, self.force = password, force_change
         self.teams: dict[str, dict] = {}
         self.keys: dict[str, str] = {}
+        self.issued = 0  # key counter (keys of deleted teams must not come back)
         self.calls: list[tuple[str, str]] = []
         # DT 5.2.2 stores the factory default on startup; None = nothing stored (404)
         self.osv: dict | None = {
@@ -492,6 +480,14 @@ class FakeDT:
         assert headers.get("Authorization") == "Bearer jwt-token", path
         if path == "api/v1/team" and method == "GET":
             return ok(list(self.teams.values()))
+        if path == "api/v1/team" and method == "DELETE":
+            uuid = json.loads(body)["uuid"]
+            name = next((n for n, t in self.teams.items() if t["uuid"] == uuid), None)
+            if name is None:
+                return Response(404, b"", {})
+            del self.teams[name]
+            self.keys = {k: v for k, v in self.keys.items() if v != name}
+            return Response(204, b"", {})
         if path == "api/v1/team" and method == "PUT":
             name = json.loads(body)["name"]
             self.teams[name] = {"uuid": f"uuid-{name}", "name": name, "permissions": []}
@@ -506,7 +502,8 @@ class FakeDT:
         if path.endswith("/key") and method == "PUT":
             uuid = path.split("/")[3]
             name = next(n for n, t in self.teams.items() if t["uuid"] == uuid)
-            key = f"odt_{len(self.keys):08d}_secret"
+            self.issued += 1
+            key = f"odt_{self.issued:08d}_secret"
             self.keys[key] = name
             return ok({"key": key, "publicId": key[4:12]}, 201)
         if path == "api/v2/extension-points/vuln-data-source/extensions/osv/config":
@@ -790,37 +787,63 @@ def test_env_set_cli_reads_stdin(tmp_path, monkeypatch):
     assert env_file.read_text() == "A=1\nOPENCVE_TOKEN=opc_org.a.b=c\n"
 
 
-# ------------------------------------------------------------------ collect (own machines)
-MACHINES_TOML = """
+# ------------------------------------------------------- own machines (push agents)
+TEAMS_TOML = """
 [teams.sysadm]
 dtrack_tag = "team-sysadm"
+[teams.users]
+dtrack_tag = "team-users"
 [teams.dev]
 dtrack_tag = "team-dev"
+"""
 
-[machines.web1]
+MACHINES_TOML = """
+[groups.servers]
 team = "sysadm"
+scans = ["system", "containers"]
+hosts = ["web1", "db1"]
+
+[groups.laptops]
+team = "users"
+kind = "macos"
+hosts = ["mbp"]
+
+[hosts.db1]
+scans = ["system"]
+version = "pinned-1"
+
+[hosts.lone]
+team = "dev"
 kind = "linux"
-ssh = "web1"
-sudo = true
 
 [code.myapp]
-machine = "web1"
+host = "web1"
 path = "/srv/myapp"
-
-[machines.laptop]
-team = "dev"
-kind = "macos"
-scans = ["brew", "apps"]
 
 [cpe_map]
 ripgrep = "burntsushi:ripgrep"
 """
 
 
-def machines_inv(tmp_path, text: str = MACHINES_TOML):
-    f = tmp_path / "inv.toml"
+def load_estate(tmp_path, text: str = MACHINES_TOML):
+    inv_file = tmp_path / "inv.toml"
+    inv_file.write_text(TEAMS_TOML, encoding="utf-8")
+    inv = load_inventory(inv_file)
+    f = tmp_path / "machines.toml"
     f.write_text(text, encoding="utf-8")
-    return load_inventory(f)
+    return inv, load_machines(f, inv.teams)
+
+
+def load_agent():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "vulnflow_agent", ROOT / "scripts" / "vulnflow-agent.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def syft_doc(*pkgs: tuple[str, str], spec: str = "1.6") -> str:
@@ -837,74 +860,168 @@ def syft_doc(*pkgs: tuple[str, str], spec: str = "1.6") -> str:
     return json.dumps({"bomFormat": "CycloneDX", "specVersion": spec, "components": comps})
 
 
-def load_extras():
-    import importlib.util
+def test_machines_groups_overrides_and_defaults(tmp_path):
+    _, m = load_estate(tmp_path)
+    assert m.groups == {"servers": ["web1", "db1"], "laptops": ["mbp"]}
+    web1, db1, mbp, lone = (m.hosts[h] for h in ("web1", "db1", "mbp", "lone"))
+    assert (web1.group, web1.team, web1.kind, web1.scans) == (
+        "servers",
+        "sysadm",
+        "linux",
+        ["system", "containers"],
+    )
+    assert (db1.scans, db1.version, db1.group) == (["system"], "pinned-1", "servers")
+    assert (mbp.kind, mbp.scans) == ("macos", ["brew", "languages", "apps"])
+    assert (lone.group, lone.scans) == ("", ["system"])
+    assert m.code["myapp"].host == "web1" and m.cpe_map == {"ripgrep": "burntsushi:ripgrep"}
+    assert load_machines(tmp_path / "absent.toml", {}).hosts == {}
 
-    spec = importlib.util.spec_from_file_location("sbom_extras", ROOT / "scripts" / "sbom-extras.py")
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-def test_machines_defaults_and_validation(tmp_path):
-    inv = machines_inv(tmp_path)
-    assert inv.machines["web1"].scans == ["system", "brew"] and inv.machines["web1"].sudo
-    assert inv.machines["laptop"].scans == ["brew", "apps"] and inv.machines["laptop"].ssh == ""
-    assert inv.cpe_map == {"ripgrep": "burntsushi:ripgrep"}
-    for bad in (
-        MACHINES_TOML.replace('team = "dev"', 'team = "nope"'),
-        MACHINES_TOML.replace('ssh = "web1"', 'ssh = "-oProxyCommand=x"'),
-        MACHINES_TOML.replace('scans = ["brew", "apps"]', 'scans = ["rm"]'),
+@pytest.mark.parametrize(
+    "bad",
+    [
+        MACHINES_TOML.replace('hosts = ["mbp"]', 'hosts = ["mbp", "web1"]'),  # in two groups
+        MACHINES_TOML.replace('team = "users"', 'team = "nope"'),
+        MACHINES_TOML.replace('scans = ["system"]', 'scans = ["rm"]'),
+        MACHINES_TOML.replace('version = "pinned-1"', 'ssh = "db1"'),  # pull-mode key is gone
+        MACHINES_TOML.replace('host = "web1"', 'host = "ghost"'),
+        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "srv/../x"'),
         MACHINES_TOML.replace("burntsushi:ripgrep", "no-colon"),
-    ):
-        with pytest.raises(SystemExit):
-            machines_inv(tmp_path, bad)
+        MACHINES_TOML + '[hosts.x]\nteam = "dev"\nlanguage_paths = ["/etc"]\n',
+        MACHINES_TOML + '[hosts.y]\ngroup = "nogroup"\nteam = "dev"\n',
+        MACHINES_TOML + "[machines.old]\n",
+    ],
+)
+def test_machines_validation(tmp_path, bad):
     with pytest.raises(SystemExit):
-        machines_inv(tmp_path, MACHINES_TOML + '[machines.x]\nteam = "dev"\nlanguage_paths = ["/etc"]\n')
+        load_estate(tmp_path, bad)
 
 
-def test_parse_docs_and_merge_dedupes():
+def test_agent_config_projects_and_tags(tmp_path):
+    from vulnflow.machines import agent_config
+
+    inv, m = load_estate(tmp_path)
+    url = "https://vf.tail1.ts.net:8180"
+    web1 = agent_config(m.hosts["web1"], m, inv, url)
+    assert web1["vulnflow_agent_config"] == load_agent().CONFIG_FORMAT
+    assert web1["host_project"] == {
+        "name": "host:web1",
+        "version": "",
+        "tags": ["team-sysadm", "kind-host", "group-servers"],
+        "scans": ["system"],
+    }
+    assert web1["containers"] == {"tags": ["team-dev", "kind-container", "host-web1"]}
+    assert web1["code"] == [
+        {
+            "name": "code:myapp",
+            "path": "/srv/myapp",
+            "version": "",
+            "tags": ["team-dev", "kind-app", "host-web1"],
+        }
+    ]
+    assert web1["dt_url"] == url and web1["cpe_map"] == {"ripgrep": "burntsushi:ripgrep"}
+    mbp = agent_config(m.hosts["mbp"], m, inv, url)
+    assert mbp["host_project"]["tags"] == ["team-users", "kind-laptop", "group-laptops"]
+    assert mbp["containers"] is None and mbp["code"] == []
+    assert agent_config(m.hosts["lone"], m, inv, url)["host_project"]["tags"] == [
+        "team-dev",
+        "kind-host",
+    ]
+
+
+def test_agent_keys_per_host_team_keep_rotate_revoke():
+    from vulnflow.bootstrap import DT_AGENT_PERMISSIONS, agent_key, dt_admin_http, revoke_agent
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    admin = dt_admin_http("http://dt:8180", TEST_PW, transport=dt)
+    k1, new1 = agent_key(admin, "web1")
+    assert new1 and dt.keys[k1] == "agent-web1"
+    assert {p["name"] for p in dt.teams["agent-web1"]["permissions"]} == set(DT_AGENT_PERMISSIONS)
+    assert agent_key(admin, "web1", k1) == (k1, False)  # a working key is kept
+    k2, new2 = agent_key(admin, "web1", k1, rotate=True)
+    assert new2 and k2 != k1 and k1 not in dt.keys  # the old team and its keys are gone
+    assert ("DELETE", "api/v1/team") in dt.calls
+    k3, _ = agent_key(admin, "db1", k2)  # another host's key is not reused
+    assert k3 != k2 and dt.keys[k3] == "agent-db1"
+    assert revoke_agent(admin, "web1") and "agent-web1" not in dt.teams and k2 not in dt.keys
+    assert not revoke_agent(admin, "web1")
+    with pytest.raises(Exception, match="log in"):
+        dt_admin_http("http://dt:8180", "wrong", transport=dt)
+
+
+def test_write_bundle_is_private(tmp_path):
+    from vulnflow.machines import read_bundle_key, write_bundle
+
+    d = write_bundle(tmp_path / "agents", "web1", {"host": "web1"}, "odt_k")
+    assert json.loads((d / "config.json").read_text()) == {"host": "web1"}
+    assert read_bundle_key(tmp_path / "agents", "web1") == "odt_k"
+    assert read_bundle_key(tmp_path / "agents", "other") == ""
+    assert (d.stat().st_mode & 0o777, (d / "key").stat().st_mode & 0o777) == (0o700, 0o600)
+    assert (d / "config.json").stat().st_mode & 0o077 == 0
+
+
+def test_last_pushes_and_stale_report(tmp_path, capsys):
+    from vulnflow.machines import last_pushes, report
+
+    _, m = load_estate(tmp_path)
+    now = 1_800_000_000.0
+    hosts = [
+        {
+            "uuid": "1",
+            "name": "host:web1",
+            "version": "debian-12",
+            "lastBomImport": (now - 9 * 86400) * 1000,
+        },
+        {"uuid": "2", "name": "host:web1", "version": "debian-13", "lastBomImport": (now - 3600) * 1000},
+        {
+            "uuid": "3",
+            "name": "host:db1",
+            "version": "pinned-1",
+            "lastBomImport": "2020-01-01T00:00:00Z",
+        },
+    ]
+    t = FakeTransport(
+        {"GET /api/v1/project/tag/kind-host": hosts, "GET /api/v1/project/tag/kind-laptop": []}
+    )
+    pushes = last_pushes(DependencyTrack("http://dt:8180", "odt_key", transport=t))
+    assert pushes["host:web1"] == pytest.approx(now - 3600)  # newest version wins
+    assert report(m, pushes, stale_days=2, now=now) == 3  # db1 old, mbp and lone never
+    out = capsys.readouterr().out
+    assert "[servers]" in out and "[no group]" in out
+    assert "web1" in out and "ok last push 0.0 days ago" in out
+    assert "STALE never pushed" in out
+    assert report(m, None, stale_days=2) == 0  # DT not asked: list only
+
+
+def test_agent_merge_brew_apps_and_images():
+    a = load_agent()
     raw = (
         syft_doc(("curl", "8"), ("bash", "5")) + "\n" + syft_doc(("curl", "8"), ("git", "2"), spec="1.5")
     )
-    docs = parse_docs(raw)
-    assert len(docs) == 2 and parse_docs("  \n") == []
-    merged = merge_boms(docs)
+    docs = a.parse_docs(raw)
+    merged = a.merge_boms(docs)
     assert merged["specVersion"] == "1.6"
     assert [c["name"] for c in merged["components"]] == ["curl", "bash", "git"]
-    refs = [c["bom-ref"] for c in merged["components"]]
-    assert len(set(refs)) == 3
-    with pytest.raises(ValueError):
-        parse_docs("{} not json")
+    assert len({c["bom-ref"] for c in merged["components"]}) == 3
+    with pytest.raises(a.ScanError):
+        a.parse_docs("{} not json")
 
-
-def test_collect_commands_quote_and_sudo(tmp_path):
-    inv = machines_inv(tmp_path)
-    assert "sudo -n syft scan dir:/" in system_command(inv.machines["web1"])
-    assert "sudo" not in system_command(Machine("m", "dev", "linux"))
-    m = Machine("m", "dev", "macos", language_paths=["a b/c;d"])
-    cmd = languages_command(m)
-    assert "\"$HOME\"/'a b/c;d'" in cmd and "npm root -g" in cmd
-
-
-def test_brew_and_apps_sbom_from_brew_json():
-    x = load_extras()
     info = {
         "formulae": [
             {"name": "python@3.12", "installed": [{"version": "3.12.7_1"}]},
-            {"name": "ripgrep", "installed": [{"version": "14.1.1"}, {"version": "14.0.3"}]},
+            {"name": "ripgrep", "installed": [{"version": "14.1.1"}]},
             {"name": "curl", "installed": [{"version": "8.10.1"}]},
             {"name": "orphan", "installed": []},
         ],
         "casks": [{"token": "firefox", "installed": "131.0", "version": "132.0"}, {"token": "nover"}],
     }
-    doc = x.brew_bom(info, {"ripgrep": "burntsushi:ripgrep"})
-    by = {(c["name"], c["version"]): c for c in doc["components"]}
+    by = {
+        (c["name"], c["version"]): c
+        for c in a.brew_bom(info, {"ripgrep": "burntsushi:ripgrep"})["components"]
+    }
     assert set(by) == {
         ("python@3.12", "3.12.7"),
         ("ripgrep", "14.1.1"),
-        ("ripgrep", "14.0.3"),
         ("curl", "8.10.1"),
         ("firefox", "131.0"),
     }
@@ -912,9 +1029,8 @@ def test_brew_and_apps_sbom_from_brew_json():
     assert by[("python@3.12", "3.12.7")]["purl"] == "pkg:generic/python%403.12@3.12.7"
     assert by[("ripgrep", "14.1.1")]["cpe"].startswith("cpe:2.3:a:burntsushi:ripgrep:14.1.1:")
     assert by[("curl", "8.10.1")]["cpe"].startswith("cpe:2.3:a:haxx:curl:")
-    assert by[("firefox", "131.0")]["cpe"].startswith("cpe:2.3:a:firefox:firefox:131.0:")
 
-    app = x.app_entry(
+    app = a.app_entry(
         {
             "CFBundleIdentifier": "com.google.Chrome",
             "CFBundleName": "Google Chrome",
@@ -922,195 +1038,168 @@ def test_brew_and_apps_sbom_from_brew_json():
         },
         {},
     )
-    assert app["name"] == "Google Chrome" and app["purl"] == "pkg:generic/com.google.Chrome@130.0.1"
+    assert app["purl"] == "pkg:generic/com.google.Chrome@130.0.1"
     assert app["cpe"].startswith("cpe:2.3:a:google:chrome:130.0.1:")
-    assert x.app_entry({"CFBundleIdentifier": "com.x.y", "CFBundleName": "Y"}, {}) is None
+    assert a.app_entry({"CFBundleIdentifier": "com.x.y", "CFBundleName": "Y"}, {}) is None
+
+    assert a.split_image("ghcr.io/o/app:1.2") == ("ghcr.io/o/app", "1.2")
+    assert a.split_image("localhost:5000/app") == ("localhost:5000/app", "latest")
+    assert a.split_image("nginx@sha256:" + "a" * 64) == ("nginx", "sha256aaaaaaaaaaaa")
 
 
-class FakeMachines:
-    """Runner: canned output per (machine, kind of command); records what ran."""
+class FakeTools:
+    """Stands in for the agent's run(): answers by tool and argument, records argv."""
 
-    def __init__(self, results: dict[tuple[str, str], RunResult]):
-        self.results = results
-        self.calls: list[tuple[str, str, bool]] = []
+    def __init__(self, answers: dict[str, tuple[int, str, str]]):
+        self.answers = answers
+        self.calls: list[list[str]] = []
 
-    def __call__(self, m: Machine, cmd: str, stdin: bytes | None) -> RunResult:
-        kind = "languages"
-        for needle, name in (
-            ("os-release", "probe"),
-            ("docker ps", "containers"),
-            ("git -C", "codever"),
-            ("dir:/srv/myapp", "code"),
-            ("dir:/ ", "system"),
-            (" apps", "apps"),
-        ):
-            if needle in cmd:
-                kind = name
-                break
-        else:
-            if cmd.rstrip().endswith("brew") or " brew " in cmd:
-                kind = "brew"
-        self.calls.append((m.name, kind, stdin is not None))
-        return self.results.get((m.name, kind), RunResult(1, "", f"no canned result for {kind}"))
+    def __call__(self, argv, timeout=1800, **kw):
+        self.calls.append(list(argv))
+        tool = Path(argv[0]).name
+        key = {"syft": f"syft {argv[2]}", "docker": "docker ps", "git": "git"}.get(tool, tool)
+        if key not in self.answers:
+            raise AssertionError(f"unexpected command {argv}")
+        return self.answers[key]
 
 
-def ok(out: str) -> RunResult:
-    return RunResult(0, out, "")
+class FakeResponse:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
 
 
-def test_collect_machine_merges_scans_and_probes_version(tmp_path):
-    inv = machines_inv(tmp_path)
-    x = load_extras()
-    brew = json.dumps(x.brew_bom({"formulae": [{"name": "jq", "installed": [{"version": "1.7"}]}]}, {}))
-    run = FakeMachines(
+class FakeUrlopen:
+    def __init__(self):
+        self.requests: list[Any] = []
+
+    def __call__(self, req, timeout=None):
+        self.requests.append(req)
+        return FakeResponse(b'{"token": "tok-1"}')
+
+
+def agent_files(tmp_path, cfg: dict) -> Path:
+    d = tmp_path / "agent"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (d / "key").write_text("odt_agentkey\n", encoding="utf-8")
+    (d / "key").chmod(0o600)
+    return d / "config.json"
+
+
+def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
+    from vulnflow.machines import agent_config
+
+    a = load_agent()
+    inv, m = load_estate(tmp_path)
+    cfg_file = agent_files(tmp_path, agent_config(m.hosts["web1"], m, inv, "https://vf.ts.net:8180"))
+    good = syft_doc(("openssl", "3.0.15"))
+    tools = FakeTools(
         {
-            ("web1", "system"): ok(syft_doc(("openssl", "3.0.15"))),
-            ("web1", "brew"): ok(brew),
-            ("web1", "probe"): ok("debian-13\n"),
+            "syft dir:/": (0, syft_doc(("libc6", "2.41")), ""),
+            "docker ps": (0, "nginx:1.27\nbroken:1\nnginx:1.27\n", ""),
+            "syft docker:nginx:1.27": (0, good, ""),
+            "syft docker:broken:1": (1, "", "cannot pull"),
+            "syft dir:/srv/myapp": (0, syft_doc(("django", "5.1")), ""),
+            "git": (0, "v1.4.0\n", ""),
         }
     )
-    got = collect_machine(inv.machines["web1"], inv, run)
-    assert got.version == "debian-13" and got.scans == ["system", "brew"] and got.components == 2
-    names = {c["name"] for c in json.loads(got.sbom)["components"]}
-    assert names == {"openssl", "jq"}
-    # the extras script travels on stdin; the plain syft scan has none
-    assert ("web1", "brew", True) in run.calls and ("web1", "system", False) in run.calls
+    monkeypatch.setattr(a, "run", tools)
+    monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(a, "os_version", lambda: "debian-13")
+    monkeypatch.setattr(a.sys, "platform", "linux")
+    opener = FakeUrlopen()
+    monkeypatch.setattr(a.urllib.request, "urlopen", opener)
 
-
-def test_collect_machine_skips_missing_homebrew_but_fails_on_errors(tmp_path):
-    inv = machines_inv(tmp_path)
-    run = FakeMachines(
-        {
-            ("web1", "system"): ok(syft_doc(("openssl", "3"))),
-            ("web1", "brew"): RunResult(3, "", "brew: Homebrew not found, nothing to scan"),
-            ("web1", "probe"): ok("debian-13"),
-        }
-    )
-    got = collect_machine(inv.machines["web1"], inv, run)
-    assert got.scans == ["system"] and "Homebrew not found" in got.skipped[0]
-    run.results[("web1", "system")] = RunResult(127, "", "syft not installed")
-    with pytest.raises(CollectError, match="syft not installed"):
-        collect_machine(inv.machines["web1"], inv, run)
-    run.results[("web1", "system")] = ok("<html>banner</html>")
-    with pytest.raises(CollectError, match="invalid JSON"):
-        collect_machine(inv.machines["web1"], inv, run)
-
-
-def test_collect_all_uploads_whole_machines_only(tmp_path, capsys):
-    inv = machines_inv(tmp_path)
-    x = load_extras()
-    brew = json.dumps(x.brew_bom({"formulae": [{"name": "jq", "installed": [{"version": "1.7"}]}]}, {}))
-    apps = json.dumps(
-        x.apps_bom(
-            [{"CFBundleIdentifier": "com.a.b", "CFBundleName": "B", "CFBundleShortVersionString": "1"}],
-            {},
-        )
-    )
-    run = FakeMachines(
-        {
-            ("web1", "system"): RunResult(255, "", "ssh: connect to host web1: Connection timed out"),
-            ("laptop", "brew"): ok(brew),
-            ("laptop", "apps"): ok(apps),
-            ("laptop", "probe"): ok("macos-15.1"),
-        }
-    )
-    t = FakeTransport({"GET /api/version": {"version": "5.2.2"}, "PUT /api/v1/bom": {"token": "tok"}})
-    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
-    assert collect_all(inv, dt, run=run) == 1  # web1 down => failure, laptop still uploaded
-    puts = [c for c in t.calls if c[0] == "PUT"]
-    assert len(puts) == 1  # a partial/failed machine is never uploaded (it would replace the SBOM)
-    body = json.loads(puts[0][3])
-    assert body["projectName"] == "host:laptop" and body["projectVersion"] == "macos-15.1"
-    assert body["projectTags"] == [{"name": "team-dev"}, {"name": "kind-laptop"}]
-    assert {c["name"] for c in json.loads(base64.b64decode(body["bom"]))["components"]} == {"jq", "B"}
-    out = capsys.readouterr().out
-    assert "FAIL  host:web1" in out and "ok    host:laptop@macos-15.1 [dev]: 2 components" in out
-
-
-def test_collect_all_dry_run_unknown_machine_and_dt_down(tmp_path):
-    inv = machines_inv(tmp_path)
-    t = FakeTransport({})  # /api/version -> 404
-    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
-    run = FakeMachines({})
-    assert collect_all(inv, None, dry_run=True, run=run) == 0 and run.calls == []
-    assert collect_all(inv, dt, ["nope"], run=run) == 2
-    assert collect_all(inv, dt, run=run) == 1  # DT not answering: nothing is collected
-    assert run.calls == [] and [c[0] for c in t.calls] == ["GET"]
-
-
-def test_code_and_container_validation(tmp_path):
-    inv = machines_inv(tmp_path)
-    assert inv.code["myapp"].team == "dev" and inv.code["myapp"].machine == "web1"
-    assert inv.machines["web1"].containers_team == "dev"
-    for bad in (
-        MACHINES_TOML.replace('machine = "web1"', 'machine = "nope"'),
-        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "srv/myapp"'),
-        MACHINES_TOML.replace('path = "/srv/myapp"', 'path = "/srv/../etc"'),
-        MACHINES_TOML.replace("sudo = true", 'containers_team = "nope"'),
-    ):
-        with pytest.raises(SystemExit):
-            machines_inv(tmp_path, bad)
-
-
-def test_split_image_and_sections():
-    assert split_image("ghcr.io/o/app:1.2") == ("ghcr.io/o/app", "1.2")
-    assert split_image("localhost:5000/app") == ("localhost:5000/app", "latest")
-    assert split_image("nginx") == ("nginx", "latest")
-    assert split_image("nginx@sha256:" + "a" * 64) == ("nginx", "sha256aaaaaaaaaaaa")
-    out = "@@vulnflow-image a:1\n{}\n@@vulnflow-image b\n"
-    assert image_sections(out) == [("a:1", "{}"), ("b", "")]
-    assert image_sections("no marker\n") == []
-
-
-def containers_out(good: str, bad: str) -> str:
-    sbom = syft_doc(("openssl", "3.0.15")).replace("\n", " ")
-    return f"@@vulnflow-image {good}\n{sbom}\n@@vulnflow-image {bad}\n"
-
-
-def test_collect_containers_reports_failed_images_but_keeps_the_rest(tmp_path):
-    inv = machines_inv(tmp_path)
-    run = FakeMachines(
-        {("web1", "containers"): RunResult(0, containers_out("nginx:1.27", "broken:1"), "syft failed")}
-    )
-    found, errors = collect_containers(inv.machines["web1"], run)
-    assert [(c.project, c.version, c.team, c.components) for c in found] == [
-        ("container:nginx", "1.27", "dev", 1)
-    ]
-    assert len(errors) == 1 and "container:broken" in errors[0] and "syft failed" in errors[0]
-    run.results[("web1", "containers")] = RunResult(127, "", "docker not installed")
-    with pytest.raises(CollectError, match="docker not installed"):
-        collect_containers(inv.machines["web1"], run)
-
-
-def test_collect_all_splits_projects_by_owner(tmp_path, capsys):
-    inv = machines_inv(
-        tmp_path, MACHINES_TOML.replace("sudo = true", 'scans = ["system", "containers"]')
-    )
-    run = FakeMachines(
-        {
-            ("web1", "system"): ok(syft_doc(("openssl", "3.0.15"))),
-            ("web1", "probe"): ok("debian-13"),
-            ("web1", "containers"): RunResult(0, containers_out("nginx:1.27", "broken:1"), "boom"),
-            ("web1", "code"): ok(syft_doc(("django", "5.1"))),
-            ("web1", "codever"): ok("v1.4.0\n"),
-        }
-    )
-    t = FakeTransport({"GET /api/version": {"version": "5.2.2"}, "PUT /api/v1/bom": {"token": "tok"}})
-    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
-    assert collect_all(inv, dt, run=run) == 1  # the broken image fails the run ...
-    bodies = [json.loads(c[3]) for c in t.calls if c[0] == "PUT"]
-    got = {
-        b["projectName"]: (b["projectVersion"], [x["name"] for x in b["projectTags"]]) for b in bodies
-    }
-    # ... but host, the good container and the code were all uploaded, each to its owner
-    assert got == {
-        "host:web1": ("debian-13", ["team-sysadm", "kind-host"]),
-        "container:nginx": ("1.27", ["team-dev", "kind-container"]),
-        "code:myapp": ("v1.4.0", ["team-dev", "kind-app"]),
-    }
+    assert a.main(["--config", str(cfg_file)]) == 1  # the broken image fails the run ...
     assert "FAIL  container:broken" in capsys.readouterr().out
-    # --machine selects its containers and code too; an unrelated machine selects none
-    t.calls.clear()
-    assert collect_all(inv, None, dry_run=True, run=run) == 0
-    out = capsys.readouterr().out
-    assert "plan  host:web1 [sysadm]" in out and "plan  code:myapp [dev]" in out
+    got = {}
+    for req in opener.requests:
+        assert (req.get_method(), req.full_url) == ("PUT", "https://vf.ts.net:8180/api/v1/bom")
+        assert req.get_header("X-api-key") == "odt_agentkey"
+        body = json.loads(req.data)
+        assert body["autoCreate"] is True
+        names = [c["name"] for c in json.loads(base64.b64decode(body["bom"]))["components"]]
+        got[body["projectName"]] = (
+            body["projectVersion"],
+            [t["name"] for t in body["projectTags"]],
+            names,
+        )
+    # ... but the host, the good image (scanned once) and the code were each uploaded to their owner
+    assert got == {
+        "host:web1": ("debian-13", ["team-sysadm", "kind-host", "group-servers"], ["libc6"]),
+        "container:nginx": ("1.27", ["team-dev", "kind-container", "host-web1"], ["openssl"]),
+        "code:myapp": ("v1.4.0", ["team-dev", "kind-app", "host-web1"], ["django"]),
+    }
+    assert sum(c[:3] == ["/usr/bin/syft", "scan", "docker:nginx:1.27"] for c in tools.calls) == 1
+    git = next(c for c in tools.calls if c[0].endswith("git"))
+    assert git[1:3] == ["-c", "safe.directory=/srv/myapp"]
+
+
+def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):
+    a = load_agent()
+    cfg = {
+        "vulnflow_agent_config": 1,
+        "host": "mbp",
+        "dt_url": "https://vf.ts.net:8180",
+        "host_project": {
+            "name": "host:mbp",
+            "version": "",
+            "tags": ["team-users"],
+            "scans": ["brew", "languages"],
+        },
+        "containers": None,
+        "code": [],
+        "language_paths": ["tools"],
+        "cpe_map": {},
+    }
+    cfg_file = agent_files(tmp_path, cfg)
+    monkeypatch.setattr(a.Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / "tools").mkdir()
+    opener = FakeUrlopen()
+    monkeypatch.setattr(a.urllib.request, "urlopen", opener)
+    monkeypatch.setattr(a, "os_version", lambda: "macos-27.2")
+    which = {"syft": "/opt/homebrew/bin/syft"}
+    monkeypatch.setattr(a, "which", which.get)  # no brew, no npm
+
+    # no Homebrew is "nothing to scan" for brew; languages still worked -> upload
+    monkeypatch.setattr(
+        a,
+        "run",
+        FakeTools({"syft dir:" + str(tmp_path / "tools"): (0, syft_doc(("black", "25.1")), "")}),
+    )
+    assert a.main(["--config", str(cfg_file)]) == 0
+    assert "skipped brew (Homebrew not found)" in capsys.readouterr().out
+    assert len(opener.requests) == 1
+
+    # a failing scan means no upload at all for the host project
+    monkeypatch.setattr(a, "run", FakeTools({"syft dir:" + str(tmp_path / "tools"): (1, "", "boom")}))
+    assert a.main(["--config", str(cfg_file)]) == 1
+    assert "FAIL  host:mbp" in capsys.readouterr().out and len(opener.requests) == 1
+
+    # --dry-run scans but neither reads the key nor uploads
+    (tmp_path / "agent" / "key").unlink()
+    monkeypatch.setattr(
+        a,
+        "run",
+        FakeTools({"syft dir:" + str(tmp_path / "tools"): (0, syft_doc(("black", "25.1")), "")}),
+    )
+    assert a.main(["--config", str(cfg_file), "--dry-run"]) == 0
+    assert "plan  host:mbp@macos-27.2" in capsys.readouterr().out and len(opener.requests) == 1
+
+
+def test_agent_rejects_bad_config(tmp_path):
+    a = load_agent()
+    f = tmp_path / "c.json"
+    for bad in ({"host": "x"}, {"vulnflow_agent_config": 1, "dt_url": "file:///etc/passwd"}):
+        f.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            a.load_config(f)
