@@ -10,6 +10,11 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
 - `poc.sh` orchestrates the three upstream stacks with each project's *own* install method
   (OpenCVE `install.sh`, DefectDojo's compose file, Dependency-Track's quickstart compose)
   plus small overlays in `stacks/` and `deploy/`. Don't merge them into one compose file.
+- `vulnflow/collect.py` (`vulnflow collect`) builds one SBOM per `[machines.*]` entry over
+  ssh and uploads it; it runs on the operator's computer, not in the glue containers.
+  `scripts/sbom-extras.py` (Homebrew, macOS apps) is piped to the machines over ssh, so it
+  must stay standard-library only and run on macOS's Python 3.9. A machine is uploaded only
+  when all its scans worked (an upload replaces the project's components).
 - `upstream/` (clones), `data/` and `.env` are gitignored and only exist at runtime.
 - `stacks/opencve/bootstrap_org.py` runs *inside* OpenCVE's webserver container via
   `manage.py shell`; it is not importable from `vulnflow` and is excluded from mypy.

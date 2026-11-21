@@ -1,4 +1,4 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,collect,
 dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -202,6 +202,14 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--file", required=True, type=Path)
     u.add_argument("--tag", action="append", default=[], help="extra tags")
 
+    c = sub.add_parser(
+        "collect",
+        help="build SBOMs of the [machines.*] over ssh and upload them (run where the VM's "
+        "Dependency-Track is reachable, e.g. through an ssh tunnel)",
+    )
+    c.add_argument("--machine", action="append", default=[], help="only this machine (repeatable)")
+    c.add_argument("--dry-run", action="store_true", help="show the plan, touch nothing")
+
     b = sub.add_parser(
         "dt-bootstrap", help="first-run Dependency-Track setup: admin password, team, API key"
     )
@@ -322,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if a.cmd == "collect":
+        from .collect import collect_all
+
+        return collect_all(inv, _dtrack(required=not a.dry_run), a.machine, dry_run=a.dry_run)
 
     if a.cmd == "upload-sbom":
         team = inv.teams.get(a.team)

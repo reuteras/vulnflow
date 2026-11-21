@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,16 +60,73 @@ class PriorityRules:
     ignore_event_types: list[str] = field(default_factory=list)
 
 
+MACHINE_KINDS = ("linux", "macos")
+SCANS = ("system", "brew", "languages", "apps")
+DEFAULT_SCANS = {"linux": ("system", "brew"), "macos": ("brew", "languages", "apps")}
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_CPE_PAIR_RE = re.compile(r"^[a-z0-9._-]+:[a-z0-9._-]+$")
+
+
+@dataclass
+class Machine:
+    """A machine `vulnflow collect` inventories (servers, laptops)."""
+
+    name: str
+    team: str
+    kind: str  # "linux" or "macos"
+    ssh: str = ""  # ssh destination (alias or user@host); empty = this machine
+    scans: list[str] = field(default_factory=list)
+    sudo: bool = False  # run the system scan through `sudo -n`
+    language_paths: list[str] = field(default_factory=list)  # relative to $HOME
+    version: str = ""  # DT project version; empty = probe the OS
+
+
 @dataclass
 class Inventory:
     teams: dict[str, Team]
     rules: PriorityRules
+    machines: dict[str, Machine] = field(default_factory=dict)
+    # "vendor:product" overrides for the CPE of Homebrew formulae/casks and Mac apps
+    cpe_map: dict[str, str] = field(default_factory=dict)
 
     def team_for_opencve_project(self, project: str) -> Team | None:
         for t in self.teams.values():
             if t.opencve_project == project:
                 return t
         return None
+
+
+def _load_machine(name: str, m: dict[str, Any], teams: dict[str, Team], path: str | Path) -> Machine:
+    where = f"[machines.{name}] in {path}"
+    if not _NAME_RE.match(name):
+        raise SystemExit(f"{where}: name must match {_NAME_RE.pattern}")
+    kind = m.get("kind", "linux")
+    if kind not in MACHINE_KINDS:
+        raise SystemExit(f"{where}: kind must be one of {MACHINE_KINDS}, got {kind!r}")
+    team = m.get("team", "")
+    if team not in teams:
+        raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
+    ssh = str(m.get("ssh", ""))
+    if ssh.startswith("-") or any(c.isspace() for c in ssh):
+        raise SystemExit(f"{where}: ssh must be a host or user@host, got {ssh!r}")
+    scans = list(m.get("scans") or DEFAULT_SCANS[kind])
+    bad = [x for x in scans if x not in SCANS]
+    if bad:
+        raise SystemExit(f"{where}: unknown scans {bad}, choose from {SCANS}")
+    paths = [str(x) for x in m.get("language_paths") or []]
+    for p in paths:
+        if p.startswith("/") or ".." in Path(p).parts:
+            raise SystemExit(f"{where}: language_paths must be relative to $HOME, got {p!r}")
+    return Machine(
+        name=name,
+        team=team,
+        kind=kind,
+        ssh=ssh,
+        scans=scans,
+        sudo=bool(m.get("sudo", False)),
+        language_paths=paths,
+        version=str(m.get("version", "")),
+    )
 
 
 def load_inventory(path: str | Path) -> Inventory:
@@ -90,4 +148,11 @@ def load_inventory(path: str | Path) -> Inventory:
     rules = PriorityRules(**{k: v for k, v in pr.items() if k in PriorityRules.__dataclass_fields__})
     if not teams:
         raise SystemExit(f"No [teams.*] defined in {path}")
-    return Inventory(teams=teams, rules=rules)
+    machines = {
+        name: _load_machine(name, m, teams, path) for name, m in (data.get("machines") or {}).items()
+    }
+    cpe_map = {str(k): str(v) for k, v in (data.get("cpe_map") or {}).items()}
+    for k, v in cpe_map.items():
+        if not _CPE_PAIR_RE.match(v):
+            raise SystemExit(f"[cpe_map] {k!r} in {path}: expected 'vendor:product', got {v!r}")
+    return Inventory(teams=teams, rules=rules, machines=machines, cpe_map=cpe_map)

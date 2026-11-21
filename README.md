@@ -303,6 +303,90 @@ run `./poc.sh glue-up`.
 - **Both:** P1/P2 alerts arrive in chat (when configured) and are marked `to_evaluate` in
   OpenCVE, but only if nobody has triaged them yet.
 
+## Own machines on a small VM
+
+The PoC can run against a real estate on a VM that is **not always on**, for example a
+12 GB / 6 vCore / 100 GB VPS: three Linux servers (apt, plus Homebrew) and MacBooks (Homebrew
+formulae and casks, language tools, apps in `/Applications`). Nothing on the machines needs
+to reach the VM and nothing runs on a schedule; you pull, from your own computer, when the VM
+is up.
+
+```text
+ your computer ──ssh──► server1..3, macbook-2      each machine builds its own SBOM
+      │                  (syft / brew / app scan)  and prints it to stdout
+      │ python -m vulnflow collect
+      └──ssh -L 8180──► VM: Dependency-Track ──► dt2dojo ──► DefectDojo
+```
+
+### One-time setup
+
+1. Edit the `[machines.*]` entries in `inventory/inventory.toml` (placeholders for three
+   servers and two MacBooks are there; leave out `ssh` for the machine you run `collect` on).
+   `python3 -m vulnflow collect --dry-run` shows the plan.
+2. On every machine: [syft](#4-install-syft-sbom-generator) (Homebrew: `brew install syft`)
+   and `python3` (needed for the Homebrew and app scans). The servers need key-based
+   non-interactive ssh from your computer (`ssh -o BatchMode=yes server1 true` must work).
+   No root is needed: dpkg's database is world-readable. If you want `sudo` anyway, set
+   `sudo = true` and allow `sudo -n syft` for that user.
+3. On your computer, a clone of this repo with `.env` containing only `DT_URL=http://localhost:8180`
+   and `DT_API_KEY=...` (copy both from the VM's `.env`; the key can upload and read).
+4. On the VM: 4-8 GB of swap, so the first imports can't get OOM-killed (`./poc.sh check`
+   warns when there is none):
+
+   ```bash
+   sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+### A session
+
+```bash
+# VM:    start the stacks (the first time: ./poc.sh setup)
+./poc.sh up
+# your computer: tunnel Dependency-Track, then pull from every machine
+ssh -N -L 8180:127.0.0.1:8180 -L 8181:127.0.0.1:8181 -L 8280:127.0.0.1:8280 -L 8000:127.0.0.1:80 vm &
+python3 -m vulnflow collect                  # or: collect --machine server2 --machine macbook-1
+# VM:    don't wait 30 minutes for the loop
+python3 -m vulnflow dt2dojo
+# ... look at Dependency-Track / DefectDojo / OpenCVE in the browser ...
+./poc.sh down
+```
+
+`collect` makes **one Dependency-Track project per machine** (`host:<name>`, tagged with the
+team and `kind-host` / `kind-laptop`; the version is probed from the OS, e.g. `debian-13`,
+`macos-15.1`). A machine's scans are merged into one SBOM. Uploading replaces the project's
+components, so a machine is uploaded only if all its scans worked; one that is unreachable
+is reported (`FAIL`) and its previous SBOM stays. The exit code is 1 if any machine failed.
+
+| Scan | Run on | What it lists | How it is matched |
+| --- | --- | --- | --- |
+| `system` | Linux | dpkg/rpm/apk packages (syft on `/`) | OSV (Debian; add `Ubuntu` to `DT_OSV_ECOSYSTEMS` if relevant) |
+| `brew` | Linux, macOS | Homebrew formulae and casks (`scripts/sbom-extras.py`) | CPE only, see below |
+| `languages` | any | uv tools, pipx venvs, `~/.cargo/bin`, `npm root -g` (syft) | OSV by purl (PyPI, npm) |
+| `apps` | macOS | `/Applications` and `~/Applications` bundles (`Info.plist`) | CPE only, see below |
+
+### What to expect
+
+- **Homebrew and apps have no package-URL type and no OSV data**, so Dependency-Track can only
+  match them by CPE, and NVD's vendor name can't be derived from Homebrew metadata. The
+  default guess is vendor = product, with a few built-in exceptions (curl, git, openssl,
+  python, ...). Expect misses. Pin the ones you care about in `[cpe_map]`
+  (`ripgrep = "burntsushi:ripgrep"`), and use OpenCVE product subscriptions for the rest:
+  they work on vendor/product names and need no SBOM.
+- A cask also shows up as an app (two entries for the same program). Harmless, a bit noisy.
+- `~/.cargo/bin` only yields components for binaries built with `cargo auditable`; for others
+  syft finds nothing.
+- OSV has to cover the ecosystems you use: `DT_OSV_ECOSYSTEMS` in `.env` (default
+  `Debian,PyPI`; npm is in DT's own default list, `crates.io` and `Ubuntu` are OSV names you
+  can add) and rerun `./poc.sh dt-bootstrap`.
+- After a start, Dependency-Track and OpenCVE need time to catch up on their feeds (assumed:
+  they pick up at their next scheduled run). Findings for a fresh upload can take a while on a
+  cold VM; the Dependency-Track UI shows the analysis queue.
+- Dependency-Track's API server is capped at 2 GB in `stacks/dependency-track/docker-compose.yml`
+  (its docs suggest more for a large portfolio); with this few projects that should do, but
+  it is the first thing to raise if the JVM runs out of memory.
+
 ## How "dev vs sysadmin" works
 
 Everything is keyed on the team entries in `inventory/inventory.toml`:
@@ -382,6 +466,8 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
+| `collect`: syft/ssh commands, merge, per-machine upload | Shell commands run locally against a stub `syft` and tested offline with a fake runner; **not run against real servers, Macs or a live DT** |
+| Homebrew/app SBOMs (`scripts/sbom-extras.py`) | `brew info --json=v2 --installed` shape assumed from Homebrew's formula/cask JSON, not run against a real brew; CPE vendors are guesses (see "Own machines") |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests

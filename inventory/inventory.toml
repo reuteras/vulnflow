@@ -50,3 +50,44 @@ gitlab     = ["gitlab"]
 jenkins    = ["jenkins"]
 # Libraries are better tracked by SBOM in Dependency-Track (purl/OSV/GHSA matching)
 # than by CPE subscriptions here, because NVD no longer adds CPEs to most CVEs.
+
+# ---------------------------------------------------------------------------
+# Machines for `python -m vulnflow collect` (SBOMs over ssh, uploaded to Dependency-Track).
+# Replace these placeholders with your own. Each becomes one DT project `host:<name>`.
+#   kind    "linux" (default scans: system, brew) or "macos" (brew, languages, apps)
+#   ssh     ssh host/alias or user@host; leave out for the machine you run collect on
+#   scans   any of system | brew | languages | apps
+#   sudo    run the syft system scan through `sudo -n` (usually not needed: dpkg's database
+#           is world-readable)
+#   language_paths  directories under $HOME for the `languages` scan (default: uv tools,
+#           pipx venvs, ~/.cargo/bin, plus `npm root -g`)
+#   version  DT project version; default is probed from the OS (debian-13, macos-15.1)
+[machines.server1]
+team = "sysadm"
+kind = "linux"
+ssh  = "server1"
+
+[machines.server2]
+team = "sysadm"
+kind = "linux"
+ssh  = "server2"
+
+[machines.server3]
+team = "sysadm"
+kind = "linux"
+ssh  = "server3"
+
+[machines.macbook-1]
+team = "dev"
+kind = "macos"          # the machine you run collect on: no ssh
+
+[machines.macbook-2]
+team = "dev"
+kind = "macos"
+ssh  = "macbook-2"
+
+# Homebrew formulae/casks and Mac apps are matched by CPE only, and NVD's vendor name
+# can't be derived from Homebrew metadata (default guess: vendor = product). Pin the ones
+# that matter: "<formula | cask | bundle id>" = "<nvd vendor>:<nvd product>".
+[cpe_map]
+# ripgrep = "burntsushi:ripgrep"

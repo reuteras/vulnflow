@@ -14,7 +14,17 @@ from typing import Any
 import pytest
 
 from vulnflow.clients import DefectDojo, DependencyTrack, OpenCVE
-from vulnflow.config import PriorityRules, load_inventory
+from vulnflow.collect import (
+    CollectError,
+    RunResult,
+    collect_all,
+    collect_machine,
+    languages_command,
+    merge_boms,
+    parse_docs,
+    system_command,
+)
+from vulnflow.config import Machine, PriorityRules, load_inventory
 from vulnflow.intel import Enricher, Signals
 from vulnflow.jobs import dt_to_dojo, sync_inventory
 from vulnflow.net import Response
@@ -777,3 +787,243 @@ def test_env_set_cli_reads_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("OPENCVE_TOKEN=opc_org.a.b=c\n"))
     assert main(["--env-file", str(env_file), "env-set"]) == 0
     assert env_file.read_text() == "A=1\nOPENCVE_TOKEN=opc_org.a.b=c\n"
+
+
+# ------------------------------------------------------------------ collect (own machines)
+MACHINES_TOML = """
+[teams.sysadm]
+dtrack_tag = "team-sysadm"
+[teams.dev]
+dtrack_tag = "team-dev"
+
+[machines.web1]
+team = "sysadm"
+kind = "linux"
+ssh = "web1"
+sudo = true
+
+[machines.laptop]
+team = "dev"
+kind = "macos"
+scans = ["brew", "apps"]
+
+[cpe_map]
+ripgrep = "burntsushi:ripgrep"
+"""
+
+
+def machines_inv(tmp_path, text: str = MACHINES_TOML):
+    f = tmp_path / "inv.toml"
+    f.write_text(text, encoding="utf-8")
+    return load_inventory(f)
+
+
+def syft_doc(*pkgs: tuple[str, str], spec: str = "1.6") -> str:
+    comps = [
+        {
+            "type": "library",
+            "bom-ref": f"r-{n}",
+            "name": n,
+            "version": v,
+            "purl": f"pkg:deb/debian/{n}@{v}",
+        }
+        for n, v in pkgs
+    ]
+    return json.dumps({"bomFormat": "CycloneDX", "specVersion": spec, "components": comps})
+
+
+def load_extras():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sbom_extras", ROOT / "scripts" / "sbom-extras.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_machines_defaults_and_validation(tmp_path):
+    inv = machines_inv(tmp_path)
+    assert inv.machines["web1"].scans == ["system", "brew"] and inv.machines["web1"].sudo
+    assert inv.machines["laptop"].scans == ["brew", "apps"] and inv.machines["laptop"].ssh == ""
+    assert inv.cpe_map == {"ripgrep": "burntsushi:ripgrep"}
+    for bad in (
+        MACHINES_TOML.replace('team = "dev"', 'team = "nope"'),
+        MACHINES_TOML.replace('ssh = "web1"', 'ssh = "-oProxyCommand=x"'),
+        MACHINES_TOML.replace('scans = ["brew", "apps"]', 'scans = ["rm"]'),
+        MACHINES_TOML.replace("burntsushi:ripgrep", "no-colon"),
+    ):
+        with pytest.raises(SystemExit):
+            machines_inv(tmp_path, bad)
+    with pytest.raises(SystemExit):
+        machines_inv(tmp_path, MACHINES_TOML + '[machines.x]\nteam = "dev"\nlanguage_paths = ["/etc"]\n')
+
+
+def test_parse_docs_and_merge_dedupes():
+    raw = (
+        syft_doc(("curl", "8"), ("bash", "5")) + "\n" + syft_doc(("curl", "8"), ("git", "2"), spec="1.5")
+    )
+    docs = parse_docs(raw)
+    assert len(docs) == 2 and parse_docs("  \n") == []
+    merged = merge_boms(docs)
+    assert merged["specVersion"] == "1.6"
+    assert [c["name"] for c in merged["components"]] == ["curl", "bash", "git"]
+    refs = [c["bom-ref"] for c in merged["components"]]
+    assert len(set(refs)) == 3
+    with pytest.raises(ValueError):
+        parse_docs("{} not json")
+
+
+def test_collect_commands_quote_and_sudo(tmp_path):
+    inv = machines_inv(tmp_path)
+    assert "sudo -n syft scan dir:/" in system_command(inv.machines["web1"])
+    assert "sudo" not in system_command(Machine("m", "dev", "linux"))
+    m = Machine("m", "dev", "macos", language_paths=["a b/c;d"])
+    cmd = languages_command(m)
+    assert "\"$HOME\"/'a b/c;d'" in cmd and "npm root -g" in cmd
+
+
+def test_brew_and_apps_sbom_from_brew_json():
+    x = load_extras()
+    info = {
+        "formulae": [
+            {"name": "python@3.12", "installed": [{"version": "3.12.7_1"}]},
+            {"name": "ripgrep", "installed": [{"version": "14.1.1"}, {"version": "14.0.3"}]},
+            {"name": "curl", "installed": [{"version": "8.10.1"}]},
+            {"name": "orphan", "installed": []},
+        ],
+        "casks": [{"token": "firefox", "installed": "131.0", "version": "132.0"}, {"token": "nover"}],
+    }
+    doc = x.brew_bom(info, {"ripgrep": "burntsushi:ripgrep"})
+    by = {(c["name"], c["version"]): c for c in doc["components"]}
+    assert set(by) == {
+        ("python@3.12", "3.12.7"),
+        ("ripgrep", "14.1.1"),
+        ("ripgrep", "14.0.3"),
+        ("curl", "8.10.1"),
+        ("firefox", "131.0"),
+    }
+    assert by[("python@3.12", "3.12.7")]["cpe"] == "cpe:2.3:a:python:python:3.12.7:*:*:*:*:*:*:*"
+    assert by[("python@3.12", "3.12.7")]["purl"] == "pkg:generic/python%403.12@3.12.7"
+    assert by[("ripgrep", "14.1.1")]["cpe"].startswith("cpe:2.3:a:burntsushi:ripgrep:14.1.1:")
+    assert by[("curl", "8.10.1")]["cpe"].startswith("cpe:2.3:a:haxx:curl:")
+    assert by[("firefox", "131.0")]["cpe"].startswith("cpe:2.3:a:firefox:firefox:131.0:")
+
+    app = x.app_entry(
+        {
+            "CFBundleIdentifier": "com.google.Chrome",
+            "CFBundleName": "Google Chrome",
+            "CFBundleShortVersionString": "130.0.1",
+        },
+        {},
+    )
+    assert app["name"] == "Google Chrome" and app["purl"] == "pkg:generic/com.google.Chrome@130.0.1"
+    assert app["cpe"].startswith("cpe:2.3:a:google:chrome:130.0.1:")
+    assert x.app_entry({"CFBundleIdentifier": "com.x.y", "CFBundleName": "Y"}, {}) is None
+
+
+class FakeMachines:
+    """Runner: canned output per (machine, kind of command); records what ran."""
+
+    def __init__(self, results: dict[tuple[str, str], RunResult]):
+        self.results = results
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def __call__(self, m: Machine, cmd: str, stdin: bytes | None) -> RunResult:
+        kind = (
+            "probe"
+            if "os-release" in cmd
+            else "system"
+            if "dir:/ " in cmd
+            else "brew"
+            if cmd.rstrip().endswith("brew") or " brew " in cmd
+            else "apps"
+            if " apps" in cmd
+            else "languages"
+        )
+        self.calls.append((m.name, kind, stdin is not None))
+        return self.results.get((m.name, kind), RunResult(1, "", f"no canned result for {kind}"))
+
+
+def ok(out: str) -> RunResult:
+    return RunResult(0, out, "")
+
+
+def test_collect_machine_merges_scans_and_probes_version(tmp_path):
+    inv = machines_inv(tmp_path)
+    x = load_extras()
+    brew = json.dumps(x.brew_bom({"formulae": [{"name": "jq", "installed": [{"version": "1.7"}]}]}, {}))
+    run = FakeMachines(
+        {
+            ("web1", "system"): ok(syft_doc(("openssl", "3.0.15"))),
+            ("web1", "brew"): ok(brew),
+            ("web1", "probe"): ok("debian-13\n"),
+        }
+    )
+    got = collect_machine(inv.machines["web1"], inv, run)
+    assert got.version == "debian-13" and got.scans == ["system", "brew"] and got.components == 2
+    names = {c["name"] for c in json.loads(got.sbom)["components"]}
+    assert names == {"openssl", "jq"}
+    # the extras script travels on stdin; the plain syft scan has none
+    assert ("web1", "brew", True) in run.calls and ("web1", "system", False) in run.calls
+
+
+def test_collect_machine_skips_missing_homebrew_but_fails_on_errors(tmp_path):
+    inv = machines_inv(tmp_path)
+    run = FakeMachines(
+        {
+            ("web1", "system"): ok(syft_doc(("openssl", "3"))),
+            ("web1", "brew"): RunResult(3, "", "brew: Homebrew not found, nothing to scan"),
+            ("web1", "probe"): ok("debian-13"),
+        }
+    )
+    got = collect_machine(inv.machines["web1"], inv, run)
+    assert got.scans == ["system"] and "Homebrew not found" in got.skipped[0]
+    run.results[("web1", "system")] = RunResult(127, "", "syft not installed")
+    with pytest.raises(CollectError, match="syft not installed"):
+        collect_machine(inv.machines["web1"], inv, run)
+    run.results[("web1", "system")] = ok("<html>banner</html>")
+    with pytest.raises(CollectError, match="invalid JSON"):
+        collect_machine(inv.machines["web1"], inv, run)
+
+
+def test_collect_all_uploads_whole_machines_only(tmp_path, capsys):
+    inv = machines_inv(tmp_path)
+    x = load_extras()
+    brew = json.dumps(x.brew_bom({"formulae": [{"name": "jq", "installed": [{"version": "1.7"}]}]}, {}))
+    apps = json.dumps(
+        x.apps_bom(
+            [{"CFBundleIdentifier": "com.a.b", "CFBundleName": "B", "CFBundleShortVersionString": "1"}],
+            {},
+        )
+    )
+    run = FakeMachines(
+        {
+            ("web1", "system"): RunResult(255, "", "ssh: connect to host web1: Connection timed out"),
+            ("laptop", "brew"): ok(brew),
+            ("laptop", "apps"): ok(apps),
+            ("laptop", "probe"): ok("macos-15.1"),
+        }
+    )
+    t = FakeTransport({"GET /api/version": {"version": "5.2.2"}, "PUT /api/v1/bom": {"token": "tok"}})
+    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
+    assert collect_all(inv, dt, run=run) == 1  # web1 down => failure, laptop still uploaded
+    puts = [c for c in t.calls if c[0] == "PUT"]
+    assert len(puts) == 1  # a partial/failed machine is never uploaded (it would replace the SBOM)
+    body = json.loads(puts[0][3])
+    assert body["projectName"] == "host:laptop" and body["projectVersion"] == "macos-15.1"
+    assert body["projectTags"] == [{"name": "team-dev"}, {"name": "kind-laptop"}]
+    assert {c["name"] for c in json.loads(base64.b64decode(body["bom"]))["components"]} == {"jq", "B"}
+    out = capsys.readouterr().out
+    assert "FAIL  host:web1" in out and "ok    host:laptop@macos-15.1: 2 components" in out
+
+
+def test_collect_all_dry_run_unknown_machine_and_dt_down(tmp_path):
+    inv = machines_inv(tmp_path)
+    t = FakeTransport({})  # /api/version -> 404
+    dt = DependencyTrack("http://dt:8180", "odt_key", transport=t)
+    run = FakeMachines({})
+    assert collect_all(inv, None, dry_run=True, run=run) == 0 and run.calls == []
+    assert collect_all(inv, dt, ["nope"], run=run) == 2
+    assert collect_all(inv, dt, run=run) == 1  # DT not answering: nothing is collected
+    assert run.calls == [] and [c[0] for c in t.calls] == ["GET"]
