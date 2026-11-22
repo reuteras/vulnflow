@@ -53,3 +53,14 @@ path = "/srv/myapp"
 [cpe_map]
 # ripgrep = "burntsushi:ripgrep"
 # "com.amazon.Lassen" = "amazon:kindle"
+
+# ---- Extra OpenCVE subscriptions per team ---------------------------------------------
+# Added to the team's [teams.<team>.opencve] in inventory/inventory.toml when
+# `vulnflow sync` runs. Here rather than there because a detailed list shows your software
+# stack and the repository is public. `python3 -m vulnflow suggest-subscriptions` prints
+# candidates from what Dependency-Track has seen on the machines.
+# [subscriptions.sysadm]
+# vendors = ["nginx"]
+# [subscriptions.sysadm.products]
+# openbsd = ["openssh"]
+# postgresql = ["postgresql"]

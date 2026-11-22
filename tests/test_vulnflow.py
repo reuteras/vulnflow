@@ -835,6 +835,108 @@ def load_estate(tmp_path, text: str = MACHINES_TOML):
     return inv, load_machines(f, inv.teams)
 
 
+def test_machines_subscriptions_merge_into_teams(tmp_path):
+    from vulnflow.config import add_subscriptions
+
+    text = (
+        MACHINES_TOML
+        + """
+[subscriptions.sysadm]
+vendors = ["nginx"]
+[subscriptions.sysadm.products]
+openbsd = ["openssh"]
+linux = ["linux_kernel"]
+"""
+    )
+    inv_file = tmp_path / "inv.toml"
+    inv_file.write_text(TEAMS_TOML + '[teams.sysadm.opencve.products]\nlinux = ["linux_kernel"]\n')
+    inv = load_inventory(inv_file)
+    (tmp_path / "m.toml").write_text(text, encoding="utf-8")
+    add_subscriptions(inv, load_machines(tmp_path / "m.toml", inv.teams))
+    assert inv.teams["sysadm"].vendors == ["nginx"]
+    assert inv.teams["sysadm"].products == {"linux": ["linux_kernel"], "openbsd": ["openssh"]}
+    assert inv.teams["dev"].vendors == []
+
+    for bad in ('[subscriptions.nope]\nvendors = ["x"]', '[subscriptions.dev]\nvendors = ["Bad Name"]'):
+        (tmp_path / "m.toml").write_text(MACHINES_TOML + bad, encoding="utf-8")
+        with pytest.raises(SystemExit):
+            load_machines(tmp_path / "m.toml", inv.teams)
+
+
+def test_suggest_subscriptions_from_dt_components():
+    from vulnflow.clients import DependencyTrack
+    from vulnflow.subscriptions import suggest
+
+    inv_text = TEAMS_TOML + '[teams.sysadm.opencve.products]\nlinux = ["linux_kernel"]\n'
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "inv.toml").write_text(inv_text, encoding="utf-8")
+        inv = load_inventory(Path(d) / "inv.toml")
+
+    def comp(cpe, purl, classifier="LIBRARY"):
+        return {"cpe": cpe, "purl": purl, "classifier": classifier}
+
+    cpe = "cpe:2.3:{}:*:*:*:*:*:*:*"
+    projects = {
+        "team-sysadm": [
+            {"uuid": "h1", "name": "host:web1", "active": True},
+            {"uuid": "h2", "name": "host:db1", "active": True},
+            {"uuid": "old", "name": "host:gone", "active": False},
+        ],
+    }
+    components = {
+        "h1": [
+            comp(cpe.format("a:openssl:openssl:3.5.4"), "pkg:deb/debian/libssl3t64@3.5.4"),
+            comp(cpe.format("a:nginx:nginx:1.27.4"), "pkg:deb/debian/nginx@1.27.4"),
+            comp(cpe.format("o:linux:linux_kernel:7.3.5"), "pkg:generic/linux@7.3.5"),  # followed
+            comp(cpe.format("a:psf:requests:2.32.3"), "pkg:pypi/requests@2.32.3"),  # library
+            comp("", "pkg:deb/debian/libc6@2.41"),  # no CPE
+        ],
+        "h2": [
+            comp(cpe.format("a:openssl:openssl:3.5.4"), "pkg:deb/debian/libssl3t64@3.5.4"),
+            comp(cpe.format("a:openssl:libcrypto:3.5.4"), "", "APPLICATION"),
+        ],
+        "old": [comp(cpe.format("a:ancient:thing:1"), "pkg:deb/debian/thing@1")],
+    }
+
+    def route(m, url, h, b):
+        if "/project/tag/" in url:
+            tag = url.split("/project/tag/")[1].split("?")[0]
+            return Response(200, json.dumps(projects.get(tag, [])).encode(), {})
+        uuid = url.split("/component/project/")[1].split("?")[0]
+        return Response(200, json.dumps(components[uuid]).encode(), {})
+
+    t = FakeTransport({"GET /api/v1/": route})
+    out = suggest(inv, DependencyTrack("http://dt", "k", transport=t))
+    assert any("/api/v1/component/project/h1?pageSize=100&pageNumber=1" in c[1] for c in t.calls)
+    lines = [ln for ln in out.splitlines() if ln.startswith("# ") and " = [" in ln]
+    # openssl first (2 projects), its two products on one line; nothing followed, inactive
+    # or from pypi; one line per vendor
+    assert [ln.split(" = ")[0] for ln in lines] == ["# openssl", "# nginx"]
+    assert lines[0].startswith('# openssl = ["openssl", "libcrypto"]')
+    assert "openssl: 2 (host:db1, host:web1; deb)" in lines[0]
+    assert "[subscriptions.sysadm.products]" in out
+    assert "# users: 0 projects tagged team-users; nothing new to suggest" in out
+    assert "requests" not in out and "linux_kernel" not in out and "ancient" not in out
+    assert "requests" in suggest(inv, DependencyTrack("http://dt", "k", transport=t), libraries=True)
+    assert "not checked against OpenCVE" in out
+
+    # with OpenCVE: names it doesn't know are skipped and listed apart
+    from vulnflow.clients import OpenCVE
+
+    oc_t = FakeTransport(
+        {
+            "GET /api/v2/vendors/openssl/products/libcrypto": Response(404, b"{}", {}),
+            "GET /api/v2/vendors/": {"name": "ok"},
+        }
+    )
+    oc = OpenCVE("http://oc", "org", "tok", transport=oc_t)
+    out = suggest(inv, DependencyTrack("http://dt", "k", transport=t), opencve=oc)
+    assert '# openssl = ["openssl"]' in out
+    assert "not in OpenCVE (syft's CPE guesses), skipped: openssl:libcrypto" in out
+
+
 def load_agent():
     import importlib.util
 
