@@ -202,6 +202,13 @@ set_kv() { # file key value
 opencve_args() { if [[ -n "${OPENCVE_REF:-}" ]]; then echo "-r $OPENCVE_REF"; fi; }
 opencve_compose() { (cd "$UP/opencve/docker" && docker compose "$@"); }
 
+# restart: unless-stopped for OpenCVE's long-running services (upstream: on-failure, so a
+# reboot left them down). docker compose loads the file from that directory by itself.
+opencve_overlay() {
+  [[ -d "$UP/opencve/docker" ]] || return 0
+  cp "$ROOT/stacks/opencve/docker-compose.override.yaml" "$UP/opencve/docker/"
+}
+
 # OpenCVE v3.1.0 pins apache-airflow-providers-celery but not celery, so a fresh build gets
 # celery 5.7.0 (2026-11-05), which removed celery.backends.database.retry; the Airflow worker
 # and scheduler then crash on import (opencve/opencve#810). Pin the versions from Airflow
@@ -285,6 +292,7 @@ cmd_opencve_prepare() {
     log "OpenCVE: random Airflow UI password (in $denv)"
   fi
   opencve_harden_airflow "$denv"
+  opencve_overlay
   chmod 600 "$denv" "$wenv"
   if [[ -n "${VULNFLOW_TS_HOST:-}" ]]; then
     ts_resolve || die "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST (is tailscale up?)"
@@ -638,6 +646,7 @@ cmd_up() {
   log "DefectDojo"
   dojo_compose up -d
   log "OpenCVE"
+  opencve_overlay
   opencve_compose up -d
   # settings.py is a bind mount: a running webserver only sees a change after a restart
   if ((OPENCVE_SETTINGS_CHANGED)); then opencve_compose restart webserver; fi

@@ -4,7 +4,17 @@
 # DD_CREDENTIAL_AES_256_KEY, DJANGO_VERSION and NGINX_VERSION are read by upstream's
 # compose from the environment (poc.sh exports them from .env), replacing its
 # hard-coded keys and ":latest" images.
+#
+# Upstream sets no restart policy, so nothing of DefectDojo came back after a reboot.
+# unless-stopped restarts the long-running services on boot unless they were stopped on
+# purpose; the initializer is a one-shot job and keeps none.
+x-restart: &restart
+  restart: unless-stopped
 services:
+  postgres: *restart
+  valkey: *restart
+  celerybeat: *restart
+  celeryworker: *restart
   initializer:
     environment:
       DD_ADMIN_PASSWORD: "${DD_ADMIN_PASSWORD:?set DD_ADMIN_PASSWORD in .env (./poc.sh init)}"
@@ -13,6 +23,7 @@ services:
   # unless it is trusted. poc.sh writes both to .env from VULNFLOW_TS_HOST. Never leave
   # DD_CSRF_TRUSTED_ORIGINS empty: Django refuses an origin without a scheme.
   uwsgi:
+    <<: *restart
     environment:
       DD_CSRF_TRUSTED_ORIGINS: "${DD_CSRF_TRUSTED_ORIGINS:-http://localhost:8280}"
       DD_SITE_URL: "${DD_SITE_URL:-http://localhost:8280}"
@@ -20,6 +31,7 @@ services:
   # bypass an input-only host firewall, so bind them to 127.0.0.1 like the other
   # stacks (reach them over SSH or a reverse proxy).
   nginx:
+    <<: *restart
     ports: !override
       - target: 8080
         published: ${DD_PORT:-8080}

@@ -1,0 +1,23 @@
+# Copied by poc.sh (opencve-prepare and up) next to upstream's docker/docker-compose.yaml,
+# where `docker compose` loads it automatically: upstream's install.sh and poc.sh both run
+# plain `docker compose` in that directory.
+#
+# Upstream sets `restart: on-failure`, and a clean shutdown stops the containers with exit
+# code 0, so after a reboot Docker left OpenCVE down (only redis and the scheduler, which
+# happened to exit non-zero, came back). unless-stopped restarts them on boot unless they
+# were stopped on purpose. airflow-init is a one-shot job and keeps upstream's policy.
+services:
+  webserver:
+    restart: unless-stopped
+  nginx:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  postgres:
+    restart: unless-stopped
+  airflow-webserver:
+    restart: unless-stopped
+  airflow-scheduler:
+    restart: unless-stopped
+  airflow-worker:
+    restart: unless-stopped
