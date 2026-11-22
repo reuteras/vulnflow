@@ -18,8 +18,9 @@ package cataloguing; Homebrew and macOS apps are read directly.
 Dependency-Track projects, each tagged with its owner (team-<team>) and kind-<kind>:
   host:<host>        the host scans (system, brew, languages, apps) merged into one SBOM
   container:<image>  one per running container image of docker, root's podman (needs its
-                     API socket: podman.socket) and users' rootless podman (exported to an
-                     OCI archive under /var/tmp); Forgejo runner job containers are skipped
+                     API socket: podman.socket) and users' rootless podman (exported as an
+                     OCI archive on stdout to a file under /var/tmp); Forgejo runner job
+                     containers are skipped
   code:<name>        a directory with application code and its installed dependencies
 
 An upload replaces a project's components, so a project is only uploaded when every scan
@@ -80,6 +81,11 @@ SYSTEM_EXCLUDES = (
     "./var/lib/docker/**",  # images belong to the containers scan
     "./var/lib/containerd/**",
     "./var/lib/containers/**",  # podman/buildah storage
+    # one component per kernel module (1,100+); the kernel itself is found from /boot and
+    # dpkg. The systemd unit's ProtectKernelModules hides these anyway, so a run by hand
+    # and a timer run give the same SBOM.
+    "./usr/lib/modules/**",
+    "./lib/modules/**",
 )
 # syft lists every file a package owns as a `file` component (40k+ on a Debian server);
 # Dependency-Track can't match files, so they are neither catalogued nor uploaded.
@@ -138,18 +144,25 @@ def which(tool: str) -> str | None:
     return shutil.which(tool, path=search_path())
 
 
-def run(argv: list[str], timeout: float = 1800, **kw: Any) -> tuple[int, str, str]:
-    """Run argv (never through a shell); returns (code, stdout, stderr)."""
+def run(
+    argv: list[str], timeout: float = 1800, stdout_file: Any = None, **kw: Any
+) -> tuple[int, str, str]:
+    """Run argv (never through a shell); returns (code, stdout, stderr). With stdout_file
+    (an open binary file) stdout goes there instead and "" is returned for it."""
     env = kw.pop("env", None) or {**os.environ, "PATH": search_path()}
+    out: dict[str, Any] = (
+        {"stdout": stdout_file, "stderr": subprocess.PIPE} if stdout_file else {"capture_output": True}
+    )
     try:
         r = subprocess.run(  # noqa: S603 - argv list from fixed tools and config paths
-            argv, capture_output=True, timeout=timeout, check=False, env=env, **kw
+            argv, timeout=timeout, check=False, env=env, **out, **kw
         )
     except subprocess.TimeoutExpired as e:
         raise ScanError(f"{argv[0]} timed out after {timeout:.0f}s") from e
     except OSError as e:
         raise ScanError(f"cannot run {argv[0]}: {e}") from e
-    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+    stdout = "" if stdout_file else r.stdout.decode("utf-8", "replace")
+    return r.returncode, stdout, r.stderr.decode("utf-8", "replace")
 
 
 def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
@@ -475,7 +488,10 @@ def running_images() -> tuple[list[tuple[str, str]], list[str]]:
 
 def scan_image(source: str, ref: str) -> list[Doc]:
     """syft reads docker's and root's podman's images through their sockets; a user's
-    rootless image is exported by that user to an OCI archive, which root then scans."""
+    rootless image is exported by that user as an OCI archive on stdout into a file of
+    root's, which root then scans. The archive is never a path podman has to open: rootless
+    podman runs in the user's own mount namespace, which doesn't see the systemd unit's
+    private /tmp and /var/tmp."""
     runtime, _, user = source.partition("@")
     if not user:
         try:
@@ -488,10 +504,10 @@ def scan_image(source: str, ref: str) -> list[Doc]:
     pw = pwd.getpwnam(user)
     d = Path(tempfile.mkdtemp(prefix="vulnflow-agent-", dir=ARCHIVE_DIR))
     try:
-        os.chown(d, pw.pw_uid, pw.pw_gid)
         archive = d / "image.tar"
-        argv = [podman, "image", "save", "--format", "oci-archive", "-o", str(archive), ref]
-        code, _, err = run(argv, timeout=1800, **as_user(pw))
+        argv = [podman, "image", "save", "--format", "oci-archive", ref]
+        with archive.open("wb") as fh:
+            code, _, err = run(argv, timeout=1800, stdout_file=fh, **as_user(pw))
         if code != 0:
             raise ScanError(f"podman image save as {user} failed ({code}): {err.strip()[:300]}")
         return syft(f"oci-archive:{archive}")
