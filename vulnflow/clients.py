@@ -5,7 +5,8 @@ Endpoints used, and how sure we are of them:
 OpenCVE  (checked against the v3.1.0 tag's source: web/opencve/api/v2/)
   PUT   /api/v2/organizations/{org}/projects/{project}/subscriptions
   GET   /api/v2/organizations/{org}/projects/{name}
-  GET   /api/v2/vendors/{vendor}/products/{product}   404 = no such name (catalog.py)
+  GET   /api/v2/vendors/{vendor}/products/{product}/cves?page_size=1   {"count": N}; 404 =
+        no such vendor/product (catalog.py ProductCveViewSet, DRF PageNumberPagination)
   POST  /api/v2/organizations/{org}/projects             {"name","description","active"}
   GET   /api/v2/organizations/{org}/projects/{project}/cves/{cve_id}   -> {"tracker": {...}|null}
   PATCH /api/v2/organizations/{org}/projects/{project}/cves/{cve_id}   {"status", "assignee"}
@@ -72,15 +73,16 @@ class OpenCVE:
             self.http.get(self._proj(project))  # raise with details
         return True
 
-    def product_exists(self, vendor: str, product: str) -> bool:
-        """Is vendor/product in OpenCVE's catalog (subscriptions to unknown names fail)?"""
-        path = f"vendors/{quote(vendor, safe='')}/products/{quote(product, safe='')}"
+    def cve_count(self, vendor: str, product: str) -> int | None:
+        """CVEs OpenCVE has for vendor/product; None if it doesn't know the name (a
+        subscription to an unknown name fails)."""
+        path = f"vendors/{quote(vendor, safe='')}/products/{quote(product, safe='')}/cves?page_size=1"
         r = self.http.get(path, expect_ok=False)
         if r.status == 404:
-            return False
+            return None
         if not r.ok:
             self.http.get(path)  # raise with details
-        return True
+        return int((r.json() or {}).get("count") or 0)
 
     def create_project(self, project: str, description: str) -> None:
         self.http.post(

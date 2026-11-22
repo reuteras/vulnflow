@@ -244,12 +244,15 @@ To see what's worth following, let the agents' SBOMs answer:
 python3 -m vulnflow suggest-subscriptions   # --top N, --libraries
 ```
 
-It counts every component with a CPE in each team's Dependency-Track projects by NVD
-vendor:product, leaves out what the team already follows and language libraries (DT
-matches those by package URL), checks the names against OpenCVE (syft guesses many CPEs;
-OpenCVE rejects unknown names) and prints commented-out `[subscriptions.<team>]` lines,
-most widespread first. Nothing is changed: uncomment what you want, paste it into
-`machines.toml`, run `sync`.
+It turns every component in each team's Dependency-Track projects into NVD vendor:product
+candidates (the component's CPE, often syft's guess, plus the right NVD names for common
+packages: OpenSSH is `openbsd:openssh`, curl `haxx:curl`), leaves out what the team already
+follows and language libraries (DT matches those by package URL), and asks OpenCVE how many
+CVEs each one has. Names OpenCVE doesn't know and ones with fewer than `--min-cves` (1) are
+dropped, which also removes wrong vendors that happen to exist; the rest is ranked by the
+number of projects, then CVEs, and printed as commented-out `[subscriptions.<team>]` lines
+(`--list-skipped` lists what was left out). Nothing is changed: uncomment what you want,
+paste it into `machines.toml`, run `sync`.
 
 Then push it, and restart the glue containers so they reload the inventory (it's a
 mounted file, so `glue-up` alone doesn't recreate them):

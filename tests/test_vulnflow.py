@@ -875,8 +875,8 @@ def test_suggest_subscriptions_from_dt_components():
         (Path(d) / "inv.toml").write_text(inv_text, encoding="utf-8")
         inv = load_inventory(Path(d) / "inv.toml")
 
-    def comp(cpe, purl, classifier="LIBRARY"):
-        return {"cpe": cpe, "purl": purl, "classifier": classifier}
+    def comp(name, cpe, purl, classifier="LIBRARY"):
+        return {"name": name, "cpe": cpe, "purl": purl, "classifier": classifier}
 
     cpe = "cpe:2.3:{}:*:*:*:*:*:*:*"
     projects = {
@@ -888,17 +888,30 @@ def test_suggest_subscriptions_from_dt_components():
     }
     components = {
         "h1": [
-            comp(cpe.format("a:openssl:openssl:3.5.4"), "pkg:deb/debian/libssl3t64@3.5.4"),
-            comp(cpe.format("a:nginx:nginx:1.27.4"), "pkg:deb/debian/nginx@1.27.4"),
-            comp(cpe.format("o:linux:linux_kernel:7.3.5"), "pkg:generic/linux@7.3.5"),  # followed
-            comp(cpe.format("a:psf:requests:2.32.3"), "pkg:pypi/requests@2.32.3"),  # library
-            comp("", "pkg:deb/debian/libc6@2.41"),  # no CPE
+            comp(
+                "libssl3t64",
+                cpe.format("a:libssl3t64:libssl3t64:3.5.4"),
+                "pkg:deb/debian/libssl3t64@3.5.4",
+            ),
+            comp("nginx", cpe.format("a:nginx:nginx:1.27.4"), "pkg:deb/debian/nginx@1.27.4"),
+            comp(
+                "openssh-server",
+                cpe.format("a:openssh:openssh:10.0"),
+                "pkg:deb/debian/openssh-server@10.0",
+            ),
+            comp("linux_kernel", cpe.format("o:linux:linux_kernel:7.3.5"), "pkg:generic/linux@7.3.5"),
+            comp("requests", cpe.format("a:psf:requests:2.32.3"), "pkg:pypi/requests@2.32.3"),
+            comp("acl", "", "pkg:deb/debian/acl@2.3"),  # no CPE, not a known package
         ],
         "h2": [
-            comp(cpe.format("a:openssl:openssl:3.5.4"), "pkg:deb/debian/libssl3t64@3.5.4"),
-            comp(cpe.format("a:openssl:libcrypto:3.5.4"), "", "APPLICATION"),
+            comp(
+                "libssl3t64",
+                cpe.format("a:libssl3t64:libssl3t64:3.5.4"),
+                "pkg:deb/debian/libssl3t64@3.5.4",
+            ),
+            comp("libcrypto", cpe.format("a:openssl:libcrypto:3.5.4"), "", "APPLICATION"),
         ],
-        "old": [comp(cpe.format("a:ancient:thing:1"), "pkg:deb/debian/thing@1")],
+        "old": [comp("thing", cpe.format("a:ancient:thing:1"), "pkg:deb/debian/thing@1")],
     }
 
     def route(m, url, h, b):
@@ -909,33 +922,51 @@ def test_suggest_subscriptions_from_dt_components():
         return Response(200, json.dumps(components[uuid]).encode(), {})
 
     t = FakeTransport({"GET /api/v1/": route})
-    out = suggest(inv, DependencyTrack("http://dt", "k", transport=t))
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    out = suggest(inv, dt)
     assert any("/api/v1/component/project/h1?pageSize=100&pageNumber=1" in c[1] for c in t.calls)
-    lines = [ln for ln in out.splitlines() if ln.startswith("# ") and " = [" in ln]
-    # openssl first (2 projects), its two products on one line; nothing followed, inactive
-    # or from pypi; one line per vendor
-    assert [ln.split(" = ")[0] for ln in lines] == ["# openssl", "# nginx"]
-    assert lines[0].startswith('# openssl = ["openssl", "libcrypto"]')
-    assert "openssl: 2 (host:db1, host:web1; deb)" in lines[0]
-    assert "[subscriptions.sysadm.products]" in out
-    assert "# users: 0 projects tagged team-users; nothing new to suggest" in out
+    assert "not checked against OpenCVE (no OPENCVE_TOKEN): expect wrong names" in out
+    # unchecked: syft's guesses and the known NVD names side by side; libssl3t64 is in both
+    # projects, so its known name openssl:openssl comes first
+    assert '# openssl = ["openssl", "libcrypto"]' in out
+    for pair in ('# f5 = ["nginx"]', '# nginx = ["nginx"]', '# openbsd = ["openssh"]'):
+        assert pair in out
     assert "requests" not in out and "linux_kernel" not in out and "ancient" not in out
-    assert "requests" in suggest(inv, DependencyTrack("http://dt", "k", transport=t), libraries=True)
-    assert "not checked against OpenCVE" in out
+    assert "# users: 0 projects tagged team-users, 0 candidates" in out
+    assert "requests" in suggest(inv, dt, libraries=True)
 
-    # with OpenCVE: names it doesn't know are skipped and listed apart
+    # with OpenCVE: ranked by projects, then CVEs; unknown names and ones without CVEs go
     from vulnflow.clients import OpenCVE
 
-    oc_t = FakeTransport(
-        {
-            "GET /api/v2/vendors/openssl/products/libcrypto": Response(404, b"{}", {}),
-            "GET /api/v2/vendors/": {"name": "ok"},
-        }
+    counts = {
+        ("openssl", "openssl"): 300,
+        ("openssl", "libcrypto"): 0,
+        ("f5", "nginx"): 40,
+        ("nginx", "nginx"): 3,
+        ("openbsd", "openssh"): 120,
+    }
+
+    def oc_route(m, url, h, b):
+        vendor, product = url.split("/vendors/")[1].split("/cves")[0].split("/products/")
+        n = counts.get((vendor, product))
+        if n is None:
+            return Response(404, b"{}", {})
+        assert "page_size=1" in url
+        return Response(200, json.dumps({"count": n, "results": []}).encode(), {})
+
+    oc = OpenCVE("http://oc", "org", "tok", transport=FakeTransport({"GET /api/v2/vendors/": oc_route}))
+    out = suggest(inv, dt, opencve=oc)
+    lines = [ln for ln in out.splitlines() if ln.startswith("# ") and " = [" in ln]
+    assert [ln.split(" = ")[0] for ln in lines] == ["# openssl", "# openbsd", "# f5", "# nginx"]
+    assert lines[0].startswith(
+        '# openssl = ["openssl"]   # openssl: 300 CVEs, 2 projects (host:db1, host:web1; deb)'
     )
-    oc = OpenCVE("http://oc", "org", "tok", transport=oc_t)
-    out = suggest(inv, DependencyTrack("http://dt", "k", transport=t), opencve=oc)
-    assert '# openssl = ["openssl"]' in out
-    assert "not in OpenCVE (syft's CPE guesses), skipped: openssl:libcrypto" in out
+    assert "left out: 2 names OpenCVE doesn't know, 1 with fewer than 1 CVEs (--list-skipped" in out
+    listed = suggest(inv, dt, opencve=oc, list_skipped=True)
+    assert "unknown: libssl3t64:libssl3t64, openssh:openssh" in listed
+    assert "few CVEs: openssl:libcrypto (0)" in listed
+    # --min-cves raises the bar
+    assert "# nginx = " not in suggest(inv, dt, opencve=oc, min_cves=10)
 
 
 def load_agent():
