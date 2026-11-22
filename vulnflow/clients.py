@@ -5,6 +5,7 @@ Endpoints used, and how sure we are of them:
 OpenCVE  (checked against the v3.1.0 tag's source: web/opencve/api/v2/)
   PUT   /api/v2/organizations/{org}/projects/{project}/subscriptions
   GET   /api/v2/organizations/{org}/projects/{name}
+  GET   /api/v2/vendors/{vendor}/products/{product}   404 = no such name (catalog.py)
   POST  /api/v2/organizations/{org}/projects             {"name","description","active"}
   GET   /api/v2/organizations/{org}/projects/{project}/cves/{cve_id}   -> {"tracker": {...}|null}
   PATCH /api/v2/organizations/{org}/projects/{project}/cves/{cve_id}   {"status", "assignee"}
@@ -17,6 +18,8 @@ Dependency-Track
   GET  /api/v1/project/tag/{tag}                                        documented
        lastBomImport: a Date (Project.java in the 5.2.2 tag); epoch ms or ISO-8601 accepted
   GET  /api/v1/finding/project/{uuid}/export  (FPF)                    documented
+  GET  /api/v1/component/project/{uuid}  paginated, VIEW_PORTFOLIO; cpe, purl, classifier
+       (ComponentResource/Component.java in the 5.2.2 tag)
 DefectDojo
   GET/POST /api/v2/product_types/                                       documented
   POST /api/v2/reimport-scan/  scan_type "Dependency Track Finding
@@ -67,6 +70,16 @@ class OpenCVE:
             return False
         if not r.ok:
             self.http.get(self._proj(project))  # raise with details
+        return True
+
+    def product_exists(self, vendor: str, product: str) -> bool:
+        """Is vendor/product in OpenCVE's catalog (subscriptions to unknown names fail)?"""
+        path = f"vendors/{quote(vendor, safe='')}/products/{quote(product, safe='')}"
+        r = self.http.get(path, expect_ok=False)
+        if r.status == 404:
+            return False
+        if not r.ok:
+            self.http.get(path)  # raise with details
         return True
 
     def create_project(self, project: str, description: str) -> None:
@@ -149,6 +162,20 @@ class DependencyTrack:
                         last_bom_import=_epoch(p.get("lastBomImport")),
                     )
                 )
+            total = int(r.headers.get("X-Total-Count", len(out)) or len(out))
+            if len(items) < self.PAGE or len(out) >= total:
+                return out
+            page += 1
+
+    def components(self, project_uuid: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = self.http.get(
+                f"api/v1/component/project/{project_uuid}?pageSize={self.PAGE}&pageNumber={page}"
+            )
+            items: list[dict[str, Any]] = r.json() or []
+            out.extend(items)
             total = int(r.headers.get("X-Total-Count", len(out)) or len(out))
             if len(items) < self.PAGE or len(out) >= total:
                 return out

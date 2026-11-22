@@ -12,7 +12,15 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .clients import DefectDojo, DependencyTrack, OpenCVE
-from .config import Inventory, env, env_flag, load_dotenv, load_inventory, load_machines
+from .config import (
+    Inventory,
+    add_subscriptions,
+    env,
+    env_flag,
+    load_dotenv,
+    load_inventory,
+    load_machines,
+)
 from .intel import Enricher
 from .jobs import dt_to_dojo, sync_inventory
 from .priority import assess
@@ -286,6 +294,12 @@ def main(argv: list[str] | None = None) -> int:
     ab.add_argument("--out", default="data/agents", help="directory for <host>/config.json + key")
     ab.add_argument("--rotate", action="store_true", help="new key even if the old one works")
 
+    ss = sub.add_parser(
+        "suggest-subscriptions",
+        help="suggest OpenCVE subscriptions from what Dependency-Track has seen (prints TOML)",
+    )
+    ss.add_argument("--top", type=int, default=40, help="per team (default 40)")
+    ss.add_argument("--libraries", action="store_true", help="include pypi/npm/golang/... libraries")
     ar = sub.add_parser("agent-revoke", help="delete a host's DT team agent-<host> and its keys")
     ar.add_argument("hosts", nargs="+")
 
@@ -331,6 +345,22 @@ def main(argv: list[str] | None = None) -> int:
         return _dd_bootstrap(a.env_file, a.wait)
     inv = load_inventory(a.inventory)
     data_dir = Path(a.data_dir)
+    if a.cmd in ("sync", "opencve-bootstrap", "suggest-subscriptions"):
+        # the detailed subscriptions live in machines.toml (not in git)
+        add_subscriptions(inv, load_machines(a.machines, inv.teams))
+
+    if a.cmd == "suggest-subscriptions":
+        from .subscriptions import suggest
+
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        oc = None
+        if env("OPENCVE_TOKEN"):  # quietly: stdout is the TOML to paste
+            base = env("OPENCVE_API_URL") or env("OPENCVE_URL", "http://localhost")
+            oc = OpenCVE(base, env("OPENCVE_ORG", required=True), env("OPENCVE_TOKEN"))
+        print(suggest(inv, dt, opencve=oc, top=a.top, libraries=a.libraries))
+        return 0
 
     if a.cmd == "sync":
         rep = sync_inventory(

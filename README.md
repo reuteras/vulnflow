@@ -228,6 +228,29 @@ curl -s -o /dev/null -w '%{http_code}\n' -H @- http://localhost/api/v2/vendors/f
   <<<"Authorization: Bearer $OPENCVE_TOKEN"
 ```
 
+`inventory.toml` is in git, and this repository is public. Keep the broad, team-level
+subscriptions there and put the detailed list of what you actually run in `machines.toml`
+(not in git), which `vulnflow sync` adds to each team:
+
+```toml
+[subscriptions.sysadm.products]
+openbsd    = ["openssh"]
+postgresql = ["postgresql"]
+```
+
+To see what's worth following, let the agents' SBOMs answer:
+
+```bash
+python3 -m vulnflow suggest-subscriptions   # --top N, --libraries
+```
+
+It counts every component with a CPE in each team's Dependency-Track projects by NVD
+vendor:product, leaves out what the team already follows and language libraries (DT
+matches those by package URL), checks the names against OpenCVE (syft guesses many CPEs;
+OpenCVE rejects unknown names) and prints commented-out `[subscriptions.<team>]` lines,
+most widespread first. Nothing is changed: uncomment what you want, paste it into
+`machines.toml`, run `sync`.
+
 Then push it, and restart the glue containers so they reload the inventory (it's a
 mounted file, so `glue-up` alone doesn't recreate them):
 

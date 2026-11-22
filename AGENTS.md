@@ -18,7 +18,9 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   `CONFIG_FORMAT` must match `AGENT_CONFIG_FORMAT` in `vulnflow/machines.py`, which renders
   the per-host config (`vulnflow agent-bundle`). Each host has its own DT team
   `agent-<host>` with only `BOM_UPLOAD` + `PROJECT_CREATION_UPLOAD`.
-- The operator's hosts and groups are in `machines.toml` (repo root), which is gitignored and
+- The operator's hosts and groups, and the detailed OpenCVE subscriptions
+  (`[subscriptions.<team>]`, merged into the teams by `sync`/`opencve-bootstrap`/
+  `suggest-subscriptions`), are in `machines.toml` (repo root), which is gitignored and
   dockerignored like `.env`; only `machines.example.toml` with placeholders is committed. Never
   put real host names in tracked files: the repository is public.
 - `upstream/` (clones), `data/` and `.env` are gitignored and only exist at runtime.

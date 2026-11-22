@@ -65,6 +65,7 @@ SCANS = ("system", "brew", "languages", "apps", "containers")
 DEFAULT_SCANS = {"linux": ("system",), "macos": ("brew", "languages", "apps")}
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CPE_PAIR_RE = re.compile(r"^[a-z0-9._-]+:[a-z0-9._-]+$")
+_CPE_PART_RE = re.compile(r"^[a-z0-9][a-z0-9._~+-]*$")  # an OpenCVE/NVD vendor or product
 # settings a [groups.*] entry gives its hosts and a [hosts.*] entry can override
 _MACHINE_KEYS = {"team", "kind", "scans", "language_paths", "containers_team"}
 
@@ -103,6 +104,9 @@ class Machines:
     code: dict[str, CodeTarget] = field(default_factory=dict)
     # "vendor:product" overrides for the CPE of Homebrew formulae/casks and Mac apps
     cpe_map: dict[str, str] = field(default_factory=dict)
+    # extra OpenCVE subscriptions per team: (vendors, {vendor: [products]}); kept here, out of
+    # git, because a detailed list shows the software stack
+    subscriptions: dict[str, tuple[list[str], dict[str, list[str]]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,7 +166,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     if not p.is_file():
         return Machines()
     data: dict[str, Any] = tomllib.loads(p.read_text(encoding="utf-8"))
-    unknown = sorted(set(data) - {"groups", "hosts", "code", "cpe_map"})
+    unknown = sorted(set(data) - {"groups", "hosts", "code", "cpe_map", "subscriptions"})
     if unknown:
         raise SystemExit(f"{path}: unknown sections {unknown}")
 
@@ -222,7 +226,30 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     for k, v in cpe_map.items():
         if not _CPE_PAIR_RE.match(v):
             raise SystemExit(f"[cpe_map] {k!r} in {path}: expected 'vendor:product', got {v!r}")
-    return Machines(hosts=hosts, groups=groups, code=code, cpe_map=cpe_map)
+    subscriptions: dict[str, tuple[list[str], dict[str, list[str]]]] = {}
+    for team, sub in (data.get("subscriptions") or {}).items():
+        where = f"[subscriptions.{team}] in {path}"
+        if team not in teams:
+            raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
+        bad = sorted(set(sub) - {"vendors", "products"})
+        if bad:
+            raise SystemExit(f"{where}: unknown keys {bad}")
+        vendors = [str(v) for v in sub.get("vendors") or []]
+        products = {str(v): [str(p) for p in ps] for v, ps in (sub.get("products") or {}).items()}
+        for name in [*vendors, *products, *(p for ps in products.values() for p in ps)]:
+            if not _CPE_PART_RE.match(name):
+                raise SystemExit(f"{where}: {name!r} is not an NVD vendor/product name")
+        subscriptions[team] = (vendors, products)
+    return Machines(hosts=hosts, groups=groups, code=code, cpe_map=cpe_map, subscriptions=subscriptions)
+
+
+def add_subscriptions(inv: Inventory, machines: Machines) -> None:
+    """Merge machines.toml [subscriptions.<team>] into the teams' OpenCVE subscriptions."""
+    for key, (vendors, products) in machines.subscriptions.items():
+        team = inv.teams[key]
+        team.vendors = sorted({*team.vendors, *vendors})
+        for vendor, ps in products.items():
+            team.products[vendor] = sorted({*team.products.get(vendor, []), *ps})
 
 
 def load_inventory(path: str | Path) -> Inventory:
