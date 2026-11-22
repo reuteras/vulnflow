@@ -17,8 +17,9 @@ package cataloguing; Homebrew and macOS apps are read directly.
 
 Dependency-Track projects, each tagged with its owner (team-<team>) and kind-<kind>:
   host:<host>        the host scans (system, brew, languages, apps) merged into one SBOM
-  container:<image>  one per running container image of docker and root's podman
-                     (containers scan; podman needs its API socket: podman.socket)
+  container:<image>  one per running container image of docker, root's podman (needs its
+                     API socket: podman.socket) and users' rootless podman (exported to an
+                     OCI archive under /var/tmp); Forgejo runner job containers are skipped
   code:<name>        a directory with application code and its installed dependencies
 
 An upload replaces a project's components, so a project is only uploaded when every scan
@@ -51,6 +52,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -83,6 +85,11 @@ SYSTEM_EXCLUDES = (
 # Dependency-Track can't match files, so they are neither catalogued nor uploaded.
 SYFT_ENV = {"SYFT_FILE_METADATA_SELECTION": "none"}
 PODMAN_SOCKET_HINT = "is the podman socket on? (systemctl enable --now podman.socket)"
+# Forgejo/act runner job containers (`<prefix>_WORKFLOW-<sha256>_JOB-<name>`) only live while
+# a workflow runs; they are not part of the host
+RUNNER_JOB_RE = re.compile(r"(^|_)WORKFLOW-[0-9a-f]{64}(_|$)")
+# rootless podman images are exported here for syft; on disk, /tmp is often a tmpfs
+ARCHIVE_DIR = "/var/tmp"  # noqa: S108 - only as mkdtemp() parent (private 700 dir)
 # relative to $HOME; plus `npm root -g` when npm exists
 DEFAULT_LANGUAGE_PATHS = (
     ".local/share/uv/tools",
@@ -401,28 +408,95 @@ def is_podman_shim(docker: str) -> bool:
     return code == 0 and "podman" in out.lower()
 
 
+def rootless_podman_users() -> list[pwd.struct_passwd]:
+    """Users with running rootless podman containers: the non-root owners of conmon
+    processes. Only root can act for them, and only on Linux."""
+    if sys.platform != "linux" or os.geteuid() != 0:
+        return []
+    uids = set()
+    for proc in Path("/proc").iterdir():
+        try:
+            if not proc.name.isdigit() or (proc / "comm").read_text().strip() != "conmon":
+                continue
+            for line in (proc / "status").read_text().splitlines():
+                if line.startswith("Uid:"):
+                    uids.add(int(line.split()[1]))
+        except (OSError, ValueError, IndexError):
+            continue  # the process ended, or isn't ours to read
+    users = []
+    for uid in sorted(uids - {0}):
+        try:
+            users.append(pwd.getpwuid(uid))
+        except KeyError:
+            continue
+    return users
+
+
+def as_user(pw: pwd.struct_passwd) -> dict[str, Any]:
+    """run() keywords for running a tool as pw (rootless podman needs its runtime dir)."""
+    env = {
+        **os.environ,
+        "PATH": search_path(),
+        "HOME": pw.pw_dir,
+        "USER": pw.pw_name,
+        "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}",
+    }
+    return {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": [], "env": env, "cwd": "/"}
+
+
 def running_images() -> tuple[list[tuple[str, str]], list[str]]:
-    """(runtime, image) for every running container of docker and of root's podman, each
-    image once, plus the errors of a runtime that could not be listed."""
-    runtimes = []
+    """(source, image) for every running container of docker, root's podman and each user's
+    rootless podman, each image once (first source wins), runner job containers left out;
+    plus the errors of a source that could not be listed. source is "docker", "podman" or
+    "podman@<user>"."""
+    sources: list[tuple[str, str, dict[str, Any]]] = []
     docker, podman = which("docker"), which("podman")
     if docker and not (podman and is_podman_shim(docker)):
-        runtimes.append(("docker", docker))
+        sources.append(("docker", docker, {}))
     if podman:
-        runtimes.append(("podman", podman))
-    if not runtimes:
+        sources.append(("podman", podman, {}))
+        sources += [(f"podman@{pw.pw_name}", podman, as_user(pw)) for pw in rootless_podman_users()]
+    if not sources:
         raise ScanError("neither docker nor podman is installed")
     images: dict[str, str] = {}
     errors: list[str] = []
-    for runtime, exe in runtimes:
-        code, out, err = run([exe, "ps", "--format", "{{.Image}}"], timeout=120)
+    for source, exe, kw in sources:
+        fmt = "{{.Names}}\t{{.Image}}"
+        code, out, err = run([exe, "ps", "--format", fmt], timeout=120, **kw)
         if code != 0:
-            errors.append(f"{runtime} ps failed ({code}): {err.strip()[:300]}")
+            errors.append(f"{source} ps failed ({code}): {err.strip()[:300]}")
             continue
         for line in out.splitlines():
-            if line.strip():
-                images.setdefault(line.strip(), runtime)
-    return sorted((rt, ref) for ref, rt in images.items()), errors
+            names, _, ref = line.strip().rpartition("\t")
+            if ref and not RUNNER_JOB_RE.search(names):
+                images.setdefault(ref, source)
+    return sorted((src, ref) for ref, src in images.items()), errors
+
+
+def scan_image(source: str, ref: str) -> list[Doc]:
+    """syft reads docker's and root's podman's images through their sockets; a user's
+    rootless image is exported by that user to an OCI archive, which root then scans."""
+    runtime, _, user = source.partition("@")
+    if not user:
+        try:
+            return syft(f"{runtime}:{ref}")
+        except ScanError as e:
+            raise ScanError(f"{e}; {PODMAN_SOCKET_HINT}" if runtime == "podman" else str(e)) from e
+    podman = which("podman")
+    if not podman:
+        raise ScanError("podman not installed")
+    pw = pwd.getpwnam(user)
+    d = Path(tempfile.mkdtemp(prefix="vulnflow-agent-", dir=ARCHIVE_DIR))
+    try:
+        os.chown(d, pw.pw_uid, pw.pw_gid)
+        archive = d / "image.tar"
+        argv = [podman, "image", "save", "--format", "oci-archive", "-o", str(archive), ref]
+        code, _, err = run(argv, timeout=1800, **as_user(pw))
+        if code != 0:
+            raise ScanError(f"podman image save as {user} failed ({code}): {err.strip()[:300]}")
+        return syft(f"oci-archive:{archive}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def git_version(path: str) -> str:
@@ -499,13 +573,12 @@ def collect_containers(cfg: Doc) -> tuple[list[Result], list[str]]:
     results: list[Result] = []
     images, problems = running_images()
     errors = [f"containers on {cfg.get('host')}: {p}" for p in problems]
-    for runtime, ref in images:
+    for source, ref in images:
         name, version = split_image(ref)
         try:
-            docs = syft(f"{runtime}:{ref}")
+            docs = scan_image(source, ref)
         except ScanError as e:
-            hint = f"; {PODMAN_SOCKET_HINT}" if runtime == "podman" else ""
-            errors.append(f"container:{name}: {e}{hint}")
+            errors.append(f"container:{name}: {e}")
             continue
         results.append(
             Result(f"container:{name}", version, merge_boms(docs), spec["tags"], ["containers"])

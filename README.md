@@ -415,7 +415,11 @@ Then Ansible copies, per host:
 The agent is one standard-library-only file and needs nothing else. On Linux it runs as
 root: the system scan reads every package database, and the containers scan needs the
 docker socket or root's podman socket (syft's `podman:` source talks to the API socket, so
-enable `podman.socket`). The system scan skips home directories, caches (`/var/cache`,
+enable `podman.socket`). Rootless podman containers are found through their `conmon`
+processes: the agent lists them as their user and has that user export each image to an
+OCI archive under `/var/tmp` (deleted after the scan; needs room for the largest image),
+which root then scans. Forgejo runner job containers (`…_WORKFLOW-<sha256>_JOB-…`) only
+live while a workflow runs and are skipped. The system scan skips home directories, caches (`/var/cache`,
 `/root/.cache`) and container storage (docker, containerd, podman), and no SBOM carries
 syft's per-file entries (`SYFT_FILE_METADATA_SELECTION=none`): on a Debian server those are
 40,000+ files Dependency-Track can't match. For the Homebrew scan it switches to the user that owns `brew`, because
@@ -433,7 +437,7 @@ Tailscale ACLs: the machines only need to reach the vulnflow server on TCP 8180.
 | Project | From | Owner (tag) | Version |
 | --- | --- | --- | --- |
 | `host:<host>` (`kind-host` / `kind-laptop`, `group-<group>`) | the host scans, merged into one SBOM | the host's `team` (sysadm, users) | probed from the OS, e.g. `debian-13`, `macos-15.1` |
-| `container:<image>` (`kind-container`, `host-<host>`) | the `containers` scan: every image `docker ps` and root's `podman ps` list (once) | `containers_team` (dev) | the image tag |
+| `container:<image>` (`kind-container`, `host-<host>`) | the `containers` scan: every running image of docker, root's podman and users' rootless podman (once; runner jobs skipped) | `containers_team` (dev) | the image tag |
 | `code:<name>` (`kind-app`, `host-<host>`) | `[code.<name>]`: a directory with the code and its installed dependencies | the entry's `team` (dev) | `git describe`, or `version` |
 
 Uploading replaces a project's components, so a project is uploaded only if everything that
@@ -573,7 +577,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
-| Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6; `--dry-run`/`--out` run on a MacBook and as root on a Debian 13 server (2026-11-22), which showed syft's per-file entries (41,925 of 44,988 components), now dropped. **Podman images and an upload to a live DT not yet run** |
+| Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6; `--dry-run`/`--out` run on a MacBook and as root on a Debian 13 server (2026-11-22), which showed syft's per-file entries (41,925 of 44,988 components), now dropped. root's podman image scanned through `podman.socket` on the server. **Rootless podman (and whether the systemd unit's `NoNewPrivileges` lets it run) and an upload to a live DT not yet run** |
 | Homebrew JSON shape (`formulae[].installed[].version`, `casks[].installed`) | Checked against a real `brew info --json=v2 --installed` on 2026-11-21; CPE vendors are still guesses (see "What to expect") |
 | Per-host agent teams (`agent-bundle`/`agent-revoke`), BOM upload permissions and tags | Checked against the DT 5.2.2 tag (TeamResource, DeleteTeamRequest, BomResource); not yet run live |
 | systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) **not yet run** with syft's docker scan |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import pwd
 import secrets
 import threading
 import time
@@ -1063,7 +1064,7 @@ class FakeTools:
         if tool == "syft":
             key = f"syft {argv[2]}"
         elif tool in ("docker", "podman"):
-            key = f"{tool} {argv[1]}"
+            key = f"{tool} {argv[1]}" + (f" as {kw['user']}" if "user" in kw else "")
         if key not in self.answers:
             raise AssertionError(f"unexpected command {argv}")
         return self.answers[key]
@@ -1206,6 +1207,61 @@ def test_agent_drops_files_and_handles_podman(monkeypatch):
     monkeypatch.setattr(a, "which", lambda tool: None)
     with pytest.raises(a.ScanError, match="neither docker nor podman"):
         a.collect_containers({"host": "h1", "containers": {"tags": []}})
+
+
+def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
+    a = load_agent()
+    pw = pwd.struct_passwd(("alice", "x", 1000, 1000, "", "/home/alice", "/bin/bash"))
+    job = "FORGEJO-ACTIONS-TASK-7_WORKFLOW-" + "ab" * 32 + "_JOB-build"
+    saved: list[Path] = []
+
+    class Tools(FakeTools):
+        def __call__(self, argv, timeout=1800, **kw):
+            if argv[1:3] == ["image", "save"]:
+                out = Path(argv[argv.index("-o") + 1])
+                out.write_text("oci", encoding="utf-8")
+                saved.append(out)
+            return super().__call__(argv, timeout, **kw)
+
+    tools = Tools(
+        {
+            "docker --version": (0, "Docker version 29.1.0\n", ""),
+            "docker ps": (0, f"{job}\tnode:22\nweb\tnginx:1.27\n", ""),
+            "podman ps": (0, "", ""),
+            "podman ps as 1000": (0, "grafana\tdocker.io/grafana/grafana:12.3\nweb2\tnginx:1.27\n", ""),
+            "podman image as 1000": (0, "", ""),
+            "syft docker:nginx:1.27": (0, syft_doc(("openssl", "3.0.15")), ""),
+        }
+    )
+    monkeypatch.setattr(a, "run", tools)
+    monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(a, "rootless_podman_users", lambda: [pw])
+    monkeypatch.setattr(a.pwd, "getpwnam", lambda name: pw)
+    monkeypatch.setattr(a.os, "chown", lambda *args: None)
+    monkeypatch.setattr(a, "ARCHIVE_DIR", str(tmp_path))
+    real_syft = a.syft
+
+    def syft(target, extra=()):
+        if target.startswith("oci-archive:"):
+            assert Path(target.split(":", 1)[1]).read_text(encoding="utf-8") == "oci"
+            return a.parse_docs(syft_doc(("grafana", "12.3.0")))
+        return real_syft(target, extra)
+
+    monkeypatch.setattr(a, "syft", syft)
+    results, errors = a.collect_containers({"host": "h1", "containers": {"tags": []}})
+    assert errors == []
+    # the runner's job container is skipped; nginx (docker and alice) is scanned once, from docker
+    got = {r.project: [c["name"] for c in r.sbom["components"]] for r in results}
+    assert got == {"container:nginx": ["openssl"], "container:docker.io/grafana/grafana": ["grafana"]}
+    save = next(c for c in tools.calls if c[1:3] == ["image", "save"])
+    assert save[-1] == "docker.io/grafana/grafana:12.3"
+    as_alice = [
+        (c[1], e) for c, e in zip(tools.calls, tools.envs, strict=True) if e and e.get("USER") == "alice"
+    ]
+    assert [what for what, _ in as_alice] == ["ps", "image"]
+    for _, env in as_alice:
+        assert env["XDG_RUNTIME_DIR"] == "/run/user/1000" and env["HOME"] == "/home/alice"
+    assert saved and not saved[0].parent.exists()  # the archive dir is removed afterwards
 
 
 def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):
