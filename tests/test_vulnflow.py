@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pwd
 import secrets
 import threading
@@ -1228,6 +1229,8 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(a, "os_version", lambda: "debian-13")
     monkeypatch.setattr(a.sys, "platform", "linux")
+    uname = os.uname_result(("Linux", "web1", "6.12.117+deb13-cloud-amd64", "#1", "x86_64"))
+    monkeypatch.setattr(a.os, "uname", lambda: uname)
     opener = FakeUrlopen()
     monkeypatch.setattr(a.urllib.request, "urlopen", opener)
 
@@ -1247,7 +1250,11 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
         )
     # ... but the host, the good image (scanned once) and the code were each uploaded to their owner
     assert got == {
-        "host:web1": ("debian-13", ["team-sysadm", "kind-host", "group-servers"], ["libc6"]),
+        "host:web1": (
+            "debian-13",
+            ["team-sysadm", "kind-host", "group-servers"],
+            ["libc6", "linux_kernel"],  # the running kernel isn't a package in this SBOM
+        ),
         "container:nginx": ("1.27", ["team-dev", "kind-container", "host-web1"], ["openssl"]),
         "container:docker.io/library/redis": (
             "7.4",
@@ -1363,6 +1370,52 @@ def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     for _, env in as_alice:
         assert env["XDG_RUNTIME_DIR"] == "/run/user/1000" and env["HOME"] == "/home/alice"
     assert saved and not saved[0].parent.exists()  # the archive dir is removed afterwards
+
+
+def deb(name: str, version: str, upstream: str = "") -> dict:
+    q = f"&upstream={upstream}" if upstream else ""
+    purl = f"pkg:deb/debian/{name.replace('+', '%2B')}@{version}?arch=amd64&distro=debian-13{q}"
+    return {"type": "library", "name": name, "version": version, "purl": purl}
+
+
+def test_agent_tracks_only_the_running_kernel():
+    a = load_agent()
+    pkgs = [
+        deb("libc6", "2.41-12"),
+        deb("linux-base", "4.12.1"),  # not from the kernel source: kept
+        deb("linux-image-6.12.116+deb13-cloud-amd64", "6.12.116-1", "linux-signed-amd64%406.12.116%2B1"),
+        deb("linux-image-6.12.117+deb13-cloud-amd64", "6.12.117-1", "linux-signed-amd64%406.12.117%2B1"),
+        deb("linux-headers-6.12.117+deb13-cloud-amd64", "6.12.117-1", "linux"),
+        deb("linux-image-cloud-amd64", "6.12.117-1", "linux-signed-amd64%406.12.117%2B1"),
+        deb("linux-libc-dev", "6.12.117-1", "linux"),
+        # syft's entries from /boot/vmlinuz-*: dropped whatever runs
+        {
+            "name": "linux-kernel",
+            "version": "6.12.117+deb13-cloud-amd64",
+            "purl": "pkg:generic/linux-kernel@6.12.117%2Bdeb13-cloud-amd64",
+        },
+        {"name": "linux-kernel", "version": "7.3.5", "purl": "pkg:generic/linux-kernel@7.3.5"},
+    ]
+
+    def names(docs):
+        return [c["name"] for d in docs for c in d["components"]]
+
+    # booted the Debian kernel: only its image and headers stay
+    got = a.running_kernel_only([a.bom(list(pkgs))], "6.12.117+deb13-cloud-amd64")
+    assert names(got) == [
+        "libc6",
+        "linux-base",
+        "linux-image-6.12.117+deb13-cloud-amd64",
+        "linux-headers-6.12.117+deb13-cloud-amd64",
+    ]
+    # booted a self-built kernel: every Debian kernel goes, the running one is added by CPE
+    got = a.running_kernel_only([a.bom(list(pkgs))], "7.3.5-hardened1")
+    assert names(got) == ["libc6", "linux-base", "linux_kernel"]
+    kernel = got[-1]["components"][0]
+    assert kernel["version"] == "7.3.5"
+    assert kernel["cpe"] == "cpe:2.3:o:linux:linux_kernel:7.3.5:*:*:*:*:*:*:*"
+    # a container has no kernel: linux-libc-dev and friends are dropped
+    assert names(a.no_kernel_packages([a.bom(list(pkgs))])) == ["libc6", "linux-base"]
 
 
 def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):

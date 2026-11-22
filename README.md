@@ -466,6 +466,14 @@ Tailscale ACLs: the machines only need to reach the vulnflow server on TCP 8180.
 | `container:<image>` (`kind-container`, `host-<host>`) | the `containers` scan: every running image of docker, root's podman and users' rootless podman (once; runner jobs skipped) | `containers_team` (dev) | the image tag |
 | `code:<name>` (`kind-app`, `host-<host>`) | `[code.<name>]`: a directory with the code and its installed dependencies | the entry's `team` (dev) | `git describe`, or `version` |
 
+Kernels: a host project lists only the kernel that runs (`uname -r`). Kernel packages that
+are installed but not booted (old ones Debian keeps, a new one waiting for a reboot),
+`linux-libc-dev` and syft's `/boot/vmlinuz-*` entries are left out, because every kernel CVE
+matches them. A packaged running kernel is tracked by its package; a self-built one is added
+as `linux_kernel` with the NVD CPE `linux:linux_kernel:<version>`. Container projects carry no
+kernel packages. Findings for the dropped ones close in DefectDojo with the next `dt2dojo`
+re-import (`close_old_findings`).
+
 Uploading replaces a project's components, so a project is uploaded only if everything that
 makes it up worked; otherwise the agent reports `FAIL` and the previous SBOM stays. A failing
 container or code project does not hold back the host project or the others; the exit code

@@ -27,6 +27,11 @@ An upload replaces a project's components, so a project is only uploaded when ev
 that makes it up worked; otherwise the previous SBOM stays. A failing container or code
 project does not hold back the others. Exit code 1 if anything failed.
 
+Kernels: the host SBOM carries only the running kernel (`uname -r`). Kernel packages that
+are installed but not booted, linux-libc-dev and syft's /boot/vmlinuz-* entries are
+dropped (every kernel CVE matches them); a self-built kernel is added as linux_kernel with
+an NVD CPE. Container SBOMs carry no kernel-source packages.
+
 Homebrew and app components are matched by CPE only (no package-URL type, no OSV data).
 NVD vendor names can't be derived from Homebrew metadata: the default guess is vendor =
 product, CPE_VENDORS has a few known exceptions, and `[cpe_map]` in machines.toml (copied
@@ -307,13 +312,85 @@ def apps_bom(plists: list[Doc], cpe_map: dict[str, str]) -> Doc:
 
 
 # ---------------------------------------------------------------------------- the scans
+def is_kernel_package(c: Doc) -> bool:
+    """A Debian/Ubuntu package built from the kernel source (linux, linux-signed-*):
+    linux-image-*, linux-headers-*, linux-modules-*, the linux-image-<flavour> metapackage,
+    linux-libc-dev (userland headers) ... Every kernel CVE matches all of them."""
+    purl = str(c.get("purl", ""))
+    if not purl.startswith("pkg:deb/"):
+        return False
+    m = re.search(r"[?&]upstream=([^&@%]+)", purl)
+    source = m.group(1) if m else str(c.get("name", ""))
+    return source == "linux" or source.startswith("linux-signed")
+
+
+def is_boot_kernel(c: Doc) -> bool:
+    """syft's linux-kernel(-module) entries, read from /boot/vmlinuz-* (one per kernel file,
+    booted or not), with an NVD CPE that carries the distro suffix in the version."""
+    purl = str(c.get("purl", ""))
+    return purl.startswith(("pkg:generic/linux-kernel@", "pkg:generic/linux-kernel-module"))
+
+
+def kernel_version(release: str) -> str:
+    """`uname -r` -> the upstream version: 7.3.5-hardened1 -> 7.3.5, 6.12.117+deb13-... -> 6.12.117."""
+    m = re.match(r"\d+\.\d+(?:\.\d+)?", release)
+    return m.group(0) if m else release
+
+
+def running_kernel_only(docs: list[Doc], release: str) -> list[Doc]:
+    """Keep only the kernel that runs. Installed-but-not-booted kernels (old ones Debian
+    keeps, a newer one waiting for a reboot), linux-libc-dev and syft's /boot entries are
+    dropped. A packaged running kernel is tracked by its package (its CPE would flag fixes
+    the distro backported); one that isn't a package (self-built) is added as linux_kernel
+    with a clean NVD CPE, so Dependency-Track matches it by version."""
+    packaged = False
+    out: list[Doc] = []
+    for d in docs:
+        comps = []
+        for c in d.get("components") or []:
+            if is_boot_kernel(c):
+                continue
+            if is_kernel_package(c):
+                if release not in str(c.get("name", "")):
+                    continue
+                packaged = packaged or str(c.get("name", "")).startswith("linux-image-")
+            comps.append(c)
+        out.append({**d, "components": comps})
+    if not packaged:
+        v = kernel_version(release)
+        kernel = {
+            "type": "operating-system",
+            "name": "linux_kernel",
+            "version": v,
+            "purl": f"pkg:generic/linux@{quote(v)}",
+            "cpe": f"cpe:2.3:o:linux:linux_kernel:{v}:*:*:*:*:*:*:*",
+            "description": f"running kernel {release} (not from a package)",
+        }
+        out.append(bom([kernel]))
+    return out
+
+
+def no_kernel_packages(docs: list[Doc]) -> list[Doc]:
+    """A container has no kernel of its own: drop the kernel-source packages (linux-libc-dev)
+    that would match every kernel CVE."""
+    return [
+        {
+            **d,
+            "components": [
+                c for c in d.get("components") or [] if not (is_kernel_package(c) or is_boot_kernel(c))
+            ],
+        }
+        for d in docs
+    ]
+
+
 def scan_system(cfg: Doc) -> list[Doc]:
     if sys.platform == "darwin":
         raise ScanError("the system scan is for Linux; use brew/apps on macOS")
     excludes: tuple[str, ...] = ()
     for x in SYSTEM_EXCLUDES:
         excludes += ("--exclude", x)
-    return syft("dir:/", excludes)
+    return running_kernel_only(syft("dir:/", excludes), os.uname().release)
 
 
 def scan_languages(cfg: Doc) -> list[Doc]:
@@ -592,7 +669,7 @@ def collect_containers(cfg: Doc) -> tuple[list[Result], list[str]]:
     for source, ref in images:
         name, version = split_image(ref)
         try:
-            docs = scan_image(source, ref)
+            docs = no_kernel_packages(scan_image(source, ref))
         except ScanError as e:
             errors.append(f"container:{name}: {e}")
             continue
