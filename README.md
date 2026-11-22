@@ -409,7 +409,7 @@ Then Ansible copies, per host:
 | --- | --- | --- |
 | agent | `/usr/local/lib/vulnflow-agent/vulnflow-agent.py` | `~/.local/share/vulnflow-agent/vulnflow-agent.py` |
 | bundle | `/etc/vulnflow-agent/config.json` + `key` (root, 600) | `~/.config/vulnflow-agent/config.json` + `key` (600) |
-| timer | [`deploy/agent/vulnflow-agent.service`](deploy/agent/vulnflow-agent.service) + `.timer` to `/etc/systemd/system/`, `systemctl enable --now vulnflow-agent.timer` | [`deploy/agent/local.vulnflow.agent.plist`](deploy/agent/local.vulnflow.agent.plist) (`__HOME__` replaced) to `~/Library/LaunchAgents/`, `launchctl bootstrap gui/$(id -u) …` |
+| timer | [`deploy/agent/vulnflow-agent.service`](deploy/agent/vulnflow-agent.service) + `.timer` to `/etc/systemd/system/`, `systemctl enable --now vulnflow-agent.timer` (e.g. from an Ansible role) | [`deploy/agent/install-macos.sh`](deploy/agent/install-macos.sh) `server:path/to/vulnflow` does all of it: fetches script, plist and bundle in one ssh, installs [`local.vulnflow.agent.plist`](deploy/agent/local.vulnflow.agent.plist) and loads it (`--uninstall` removes it) |
 | tools | syft (pinned), python3; for `containers` docker, or podman with `systemctl enable --now podman.socket` | syft (`brew install syft`); macOS's own `/usr/bin/python3` (3.9) is enough |
 
 The agent is one standard-library-only file and needs nothing else. On Linux it runs as

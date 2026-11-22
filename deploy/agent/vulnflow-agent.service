@@ -14,7 +14,7 @@ After=network-online.target tailscaled.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 -I /usr/local/lib/vulnflow-agent/vulnflow-agent.py --config /etc/vulnflow-agent/config.json
-Environment=SYFT_CHECK_FOR_APP_UPDATE=false
+Environment=SYFT_CHECK_FOR_APP_UPDATE=false PYTHONUNBUFFERED=1
 Nice=10
 IOSchedulingClass=idle
 TimeoutStartSec=2h
