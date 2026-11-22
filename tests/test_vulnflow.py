@@ -1053,11 +1053,17 @@ class FakeTools:
     def __init__(self, answers: dict[str, tuple[int, str, str]]):
         self.answers = answers
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str] | None] = []
 
     def __call__(self, argv, timeout=1800, **kw):
         self.calls.append(list(argv))
+        self.envs.append(kw.get("env"))
         tool = Path(argv[0]).name
-        key = {"syft": f"syft {argv[2]}", "docker": "docker ps", "git": "git"}.get(tool, tool)
+        key = tool
+        if tool == "syft":
+            key = f"syft {argv[2]}"
+        elif tool in ("docker", "podman"):
+            key = f"{tool} {argv[1]}"
         if key not in self.answers:
             raise AssertionError(f"unexpected command {argv}")
         return self.answers[key]
@@ -1105,9 +1111,12 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
     tools = FakeTools(
         {
             "syft dir:/": (0, syft_doc(("libc6", "2.41")), ""),
+            "docker --version": (0, "Docker version 29.1.0, build 1234567\n", ""),
             "docker ps": (0, "nginx:1.27\nbroken:1\nnginx:1.27\n", ""),
+            "podman ps": (0, "docker.io/library/redis:7.4\nnginx:1.27\n", ""),
             "syft docker:nginx:1.27": (0, good, ""),
             "syft docker:broken:1": (1, "", "cannot pull"),
+            "syft podman:docker.io/library/redis:7.4": (0, syft_doc(("redis", "7.4.2")), ""),
             "syft dir:/srv/myapp": (0, syft_doc(("django", "5.1")), ""),
             "git": (0, "v1.4.0\n", ""),
         }
@@ -1137,11 +1146,66 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
     assert got == {
         "host:web1": ("debian-13", ["team-sysadm", "kind-host", "group-servers"], ["libc6"]),
         "container:nginx": ("1.27", ["team-dev", "kind-container", "host-web1"], ["openssl"]),
+        "container:docker.io/library/redis": (
+            "7.4",
+            ["team-dev", "kind-container", "host-web1"],
+            ["redis"],
+        ),
         "code:myapp": ("v1.4.0", ["team-dev", "kind-app", "host-web1"], ["django"]),
     }
-    assert sum(c[:3] == ["/usr/bin/syft", "scan", "docker:nginx:1.27"] for c in tools.calls) == 1
+    # nginx runs under both runtimes: scanned once, from docker
+    assert sum(c[2].endswith("nginx:1.27") for c in tools.calls if c[0].endswith("syft")) == 1
+    calls = zip(tools.calls, tools.envs, strict=True)
+    syft_env = [e for c, e in calls if c[0].endswith("syft")]
+    assert syft_env and all(e and e["SYFT_FILE_METADATA_SELECTION"] == "none" for e in syft_env)
+    system = next(c for c in tools.calls if c[:3] == ["/usr/bin/syft", "scan", "dir:/"])
+    for x in ("./var/lib/containers/**", "./var/cache/**", "./root/.cache/**"):
+        assert x in system
     git = next(c for c in tools.calls if c[0].endswith("git"))
     assert git[1:3] == ["-c", "safe.directory=/srv/myapp"]
+
+
+def test_agent_drops_files_and_handles_podman(monkeypatch):
+    a = load_agent()
+    doc = json.loads(syft_doc(("libc6", "2.41")))
+    doc["components"].append({"type": "file", "name": "/usr/bin/ls", "bom-ref": "f1"})
+    assert [c["name"] for c in a.merge_boms([doc])["components"]] == ["libc6"]
+
+    # podman-docker's `docker` is podman: list podman once, not a docker daemon that isn't there
+    tools = FakeTools(
+        {
+            "docker --version": (0, "podman version 5.4.2\n", ""),
+            "podman ps": (0, "quay.io/x/app:2\n", ""),
+            "syft podman:quay.io/x/app:2": (1, "", "cannot connect to podman socket"),
+        }
+    )
+    monkeypatch.setattr(a, "run", tools)
+    monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
+    results, errors = a.collect_containers({"host": "h1", "containers": {"tags": []}})
+    assert results == []
+    assert errors == [
+        "container:quay.io/x/app: syft podman:quay.io/x/app:2 failed (1): cannot connect to "
+        "podman socket; " + a.PODMAN_SOCKET_HINT
+    ]
+    assert not any(c[:2] == ["/usr/bin/docker", "ps"] for c in tools.calls)
+
+    # one runtime that can't be listed is reported; the other is still scanned
+    tools = FakeTools(
+        {
+            "podman ps": (125, "", "permission denied"),
+            "docker --version": (0, "Docker version 29.1.0\n", ""),
+            "docker ps": (0, "nginx:1.27\n", ""),
+            "syft docker:nginx:1.27": (0, syft_doc(("openssl", "3.0.15")), ""),
+        }
+    )
+    monkeypatch.setattr(a, "run", tools)
+    results, errors = a.collect_containers({"host": "h1", "containers": {"tags": []}})
+    assert [r.project for r in results] == ["container:nginx"]
+    assert errors == ["containers on h1: podman ps failed (125): permission denied"]
+
+    monkeypatch.setattr(a, "which", lambda tool: None)
+    with pytest.raises(a.ScanError, match="neither docker nor podman"):
+        a.collect_containers({"host": "h1", "containers": {"tags": []}})
 
 
 def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):

@@ -4,7 +4,8 @@
 # this file and vulnflow-agent.timer to /etc/systemd/system/, then
 #   systemctl daemon-reload && systemctl enable --now vulnflow-agent.timer
 # Runs as root: the system scan reads every package database, the containers scan needs
-# the docker socket, and the agent drops to the owner of brew for the Homebrew scan.
+# the docker socket or root's podman socket (podman.socket), and the agent drops to the
+# owner of brew for the Homebrew scan.
 [Unit]
 Description=vulnflow agent: push this host's SBOMs to Dependency-Track
 Wants=network-online.target
