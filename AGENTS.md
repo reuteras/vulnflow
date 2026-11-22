@@ -130,6 +130,12 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   URLs (no allow-list; that arrives after v3.1.0), so `stacks/opencve/bootstrap_webhooks.py`
   writes the notification and its alert automation with the ORM. In v3.1.0 notifications
   only fire through an automation's `send_notification` action.
+- Reboots: every long-running container has `restart: unless-stopped` (DT and glue in our
+  compose files, DefectDojo in `stacks/defectdojo/override.yml`, OpenCVE in
+  `stacks/opencve/docker-compose.override.yaml`, which `opencve_overlay` copies next to
+  upstream's compose file where `docker compose` loads it by itself). One-shot jobs
+  (DefectDojo `initializer`, OpenCVE `airflow-init`) keep none. When bumping a stack, check
+  that new long-running services get the policy.
 - Exposure: every published port binds to 127.0.0.1, and the target server is reachable
   only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
   `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.
