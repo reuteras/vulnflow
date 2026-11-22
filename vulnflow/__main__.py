@@ -300,6 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     ss.add_argument("--top", type=int, default=40, help="per team (default 40)")
     ss.add_argument("--libraries", action="store_true", help="include pypi/npm/golang/... libraries")
+    ss.add_argument("--min-cves", type=int, default=1, help="leave out names with fewer CVEs")
+    ss.add_argument(
+        "--list-skipped", action="store_true", help="list the names left out, not just counts"
+    )
     ar = sub.add_parser("agent-revoke", help="delete a host's DT team agent-<host> and its keys")
     ar.add_argument("hosts", nargs="+")
 
@@ -359,7 +363,17 @@ def main(argv: list[str] | None = None) -> int:
         if env("OPENCVE_TOKEN"):  # quietly: stdout is the TOML to paste
             base = env("OPENCVE_API_URL") or env("OPENCVE_URL", "http://localhost")
             oc = OpenCVE(base, env("OPENCVE_ORG", required=True), env("OPENCVE_TOKEN"))
-        print(suggest(inv, dt, opencve=oc, top=a.top, libraries=a.libraries))
+        print(
+            suggest(
+                inv,
+                dt,
+                opencve=oc,
+                top=a.top,
+                min_cves=a.min_cves,
+                libraries=a.libraries,
+                list_skipped=a.list_skipped,
+            )
+        )
         return 0
 
     if a.cmd == "sync":
