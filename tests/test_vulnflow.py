@@ -1160,7 +1160,7 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
     syft_env = [e for c, e in calls if c[0].endswith("syft")]
     assert syft_env and all(e and e["SYFT_FILE_METADATA_SELECTION"] == "none" for e in syft_env)
     system = next(c for c in tools.calls if c[:3] == ["/usr/bin/syft", "scan", "dir:/"])
-    for x in ("./var/lib/containers/**", "./var/cache/**", "./root/.cache/**"):
+    for x in ("./var/lib/containers/**", "./var/cache/**", "./root/.cache/**", "./usr/lib/modules/**"):
         assert x in system
     git = next(c for c in tools.calls if c[0].endswith("git"))
     assert git[1:3] == ["-c", "safe.directory=/srv/myapp"]
@@ -1218,9 +1218,9 @@ def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     class Tools(FakeTools):
         def __call__(self, argv, timeout=1800, **kw):
             if argv[1:3] == ["image", "save"]:
-                out = Path(argv[argv.index("-o") + 1])
-                out.write_text("oci", encoding="utf-8")
-                saved.append(out)
+                assert "-o" not in argv  # podman can't see the unit's private /var/tmp
+                kw["stdout_file"].write(b"oci")
+                saved.append(Path(kw["stdout_file"].name))
             return super().__call__(argv, timeout, **kw)
 
     tools = Tools(
@@ -1237,7 +1237,6 @@ def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(a, "rootless_podman_users", lambda: [pw])
     monkeypatch.setattr(a.pwd, "getpwnam", lambda name: pw)
-    monkeypatch.setattr(a.os, "chown", lambda *args: None)
     monkeypatch.setattr(a, "ARCHIVE_DIR", str(tmp_path))
     real_syft = a.syft
 

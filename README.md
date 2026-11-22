@@ -416,11 +416,14 @@ The agent is one standard-library-only file and needs nothing else. On Linux it 
 root: the system scan reads every package database, and the containers scan needs the
 docker socket or root's podman socket (syft's `podman:` source talks to the API socket, so
 enable `podman.socket`). Rootless podman containers are found through their `conmon`
-processes: the agent lists them as their user and has that user export each image to an
-OCI archive under `/var/tmp` (deleted after the scan; needs room for the largest image),
-which root then scans. Forgejo runner job containers (`…_WORKFLOW-<sha256>_JOB-…`) only
-live while a workflow runs and are skipped. The system scan skips home directories, caches (`/var/cache`,
-`/root/.cache`) and container storage (docker, containerd, podman), and no SBOM carries
+processes: the agent lists them as their user and has that user export each image as an
+OCI archive on stdout into a file under `/var/tmp` (deleted after the scan; needs room for
+the largest image), which root then scans. Podman never gets a path: rootless podman runs in
+the user's mount namespace, which can't see the unit's private `/var/tmp`. Forgejo runner
+job containers (`…_WORKFLOW-<sha256>_JOB-…`) only live while a workflow runs and are
+skipped. The system scan skips home directories, caches (`/var/cache`, `/root/.cache`),
+container storage (docker, containerd, podman) and kernel modules (`ProtectKernelModules`
+hides them from the unit anyway; the kernel itself comes from `/boot` and dpkg), and no SBOM carries
 syft's per-file entries (`SYFT_FILE_METADATA_SELECTION=none`): on a Debian server those are
 40,000+ files Dependency-Track can't match. For the Homebrew scan it switches to the user that owns `brew`, because
 Homebrew refuses to run as root. Try it by hand first:
@@ -577,7 +580,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
 | KEV / EPSS / CIRCL sightings | Run live on 2026-11-19 (see `enrich` output above) |
-| Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6; `--dry-run`/`--out` run on a MacBook and as root on a Debian 13 server (2026-11-22), which showed syft's per-file entries (41,925 of 44,988 components), now dropped. root's podman image scanned through `podman.socket` on the server. **Rootless podman (and whether the systemd unit's `NoNewPrivileges` lets it run) and an upload to a live DT not yet run** |
+| Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6; `--dry-run`/`--out` run on a MacBook and as root on a Debian 13 server (2026-11-22), which showed syft's per-file entries (41,925 of 44,988 components), now dropped. root's podman image scanned through `podman.socket`, and uploads to the live DT from the server, by hand and from the systemd timer. The first timer run found the user's 8 rootless containers (`NoNewPrivileges` does not stop `podman ps` as the user) but `podman image save -o /var/tmp/…` failed (the unit's private `/var/tmp`); now streamed through stdout, **not yet rerun** |
 | Homebrew JSON shape (`formulae[].installed[].version`, `casks[].installed`) | Checked against a real `brew info --json=v2 --installed` on 2026-11-21; CPE vendors are still guesses (see "What to expect") |
 | Per-host agent teams (`agent-bundle`/`agent-revoke`), BOM upload permissions and tags | Checked against the DT 5.2.2 tag (TeamResource, DeleteTeamRequest, BomResource); not yet run live |
 | systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) **not yet run** with syft's docker scan |
