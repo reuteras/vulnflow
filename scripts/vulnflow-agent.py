@@ -17,7 +17,8 @@ package cataloguing; Homebrew and macOS apps are read directly.
 
 Dependency-Track projects, each tagged with its owner (team-<team>) and kind-<kind>:
   host:<host>        the host scans (system, brew, languages, apps) merged into one SBOM
-  container:<image>  one per running container image (containers scan)
+  container:<image>  one per running container image of docker and root's podman
+                     (containers scan; podman needs its API socket: podman.socket)
   code:<name>        a directory with application code and its installed dependencies
 
 An upload replaces a project's components, so a project is only uploaded when every scan
@@ -29,7 +30,9 @@ NVD vendor names can't be derived from Homebrew metadata: the default guess is v
 product, CPE_VENDORS has a few known exceptions, and `[cpe_map]` in machines.toml (copied
 into the config) overrides both.
 
-Upstream behaviour relied on: `syft scan ... -o cyclonedx-json -q` writes the SBOM to stdout;
+Upstream behaviour relied on: `syft scan ... -o cyclonedx-json -q` writes the SBOM to stdout,
+SYFT_FILE_METADATA_SELECTION=none stops the `file` components (syft 1.57.2), and the
+`podman:` source talks to the podman API socket;
 `brew info --json=v2 --installed` (formulae[].installed[].version, casks[].installed) was
 checked against Homebrew on macOS on 2026-11-21; Dependency-Track 5.2.2 PUT /api/v1/bom
 (BOM_UPLOAD, plus PROJECT_CREATION_UPLOAD for autoCreate; projectTags are applied when the
@@ -70,9 +73,16 @@ SYSTEM_EXCLUDES = (
     "./run/**",
     "./home/**",
     "./tmp/**",
-    "./var/lib/docker/**",
+    "./root/.cache/**",  # uv/pip download caches, not installed software
+    "./var/cache/**",  # downloaded .deb files
+    "./var/lib/docker/**",  # images belong to the containers scan
     "./var/lib/containerd/**",
+    "./var/lib/containers/**",  # podman/buildah storage
 )
+# syft lists every file a package owns as a `file` component (40k+ on a Debian server);
+# Dependency-Track can't match files, so they are neither catalogued nor uploaded.
+SYFT_ENV = {"SYFT_FILE_METADATA_SELECTION": "none"}
+PODMAN_SOCKET_HINT = "is the podman socket on? (systemctl enable --now podman.socket)"
 # relative to $HOME; plus `npm root -g` when npm exists
 DEFAULT_LANGUAGE_PATHS = (
     ".local/share/uv/tools",
@@ -139,7 +149,8 @@ def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
     exe = which("syft")
     if not exe:
         raise ScanError("syft not installed")
-    code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json", "-q"])
+    env = {**os.environ, "PATH": search_path(), **SYFT_ENV}
+    code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json", "-q"], env=env)
     if code != 0:
         raise ScanError(f"syft {target} failed ({code}): {err.strip()[:300]}")
     return parse_docs(out)
@@ -170,7 +181,8 @@ def _spec_key(doc: Doc) -> tuple[int, ...]:
 
 
 def merge_boms(docs: list[Doc]) -> Doc:
-    """The union of all components, duplicates dropped, in one CycloneDX document.
+    """The union of all components, duplicates and `file` entries dropped, in one CycloneDX
+    document.
 
     Metadata and the dependency graph are dropped (not needed for matching); specVersion is
     the highest of the inputs so newer syft fields stay valid."""
@@ -179,6 +191,8 @@ def merge_boms(docs: list[Doc]) -> Doc:
     comps: list[Doc] = []
     for n, d in enumerate(docs):
         for c in d.get("components") or []:
+            if c.get("type") == "file":
+                continue
             key = (c.get("purl", ""), c.get("name", ""), c.get("version", ""), c.get("type", ""))
             if key in seen:
                 continue
@@ -381,14 +395,34 @@ def split_image(ref: str) -> tuple[str, str]:
     return name, clean_version(tag or digest[:19] or "latest")
 
 
-def running_images() -> list[str]:
-    docker = which("docker")
-    if not docker:
-        raise ScanError("docker not installed")
-    code, out, err = run([docker, "ps", "--format", "{{.Image}}"], timeout=120)
-    if code != 0:
-        raise ScanError(f"docker ps failed ({code}): {err.strip()[:300]}")
-    return sorted({line.strip() for line in out.splitlines() if line.strip()})
+def is_podman_shim(docker: str) -> bool:
+    """podman-docker installs a `docker` that runs podman; its images are podman's."""
+    code, out, _ = run([docker, "--version"], timeout=30)
+    return code == 0 and "podman" in out.lower()
+
+
+def running_images() -> tuple[list[tuple[str, str]], list[str]]:
+    """(runtime, image) for every running container of docker and of root's podman, each
+    image once, plus the errors of a runtime that could not be listed."""
+    runtimes = []
+    docker, podman = which("docker"), which("podman")
+    if docker and not (podman and is_podman_shim(docker)):
+        runtimes.append(("docker", docker))
+    if podman:
+        runtimes.append(("podman", podman))
+    if not runtimes:
+        raise ScanError("neither docker nor podman is installed")
+    images: dict[str, str] = {}
+    errors: list[str] = []
+    for runtime, exe in runtimes:
+        code, out, err = run([exe, "ps", "--format", "{{.Image}}"], timeout=120)
+        if code != 0:
+            errors.append(f"{runtime} ps failed ({code}): {err.strip()[:300]}")
+            continue
+        for line in out.splitlines():
+            if line.strip():
+                images.setdefault(line.strip(), runtime)
+    return sorted((rt, ref) for ref, rt in images.items()), errors
 
 
 def git_version(path: str) -> str:
@@ -463,13 +497,15 @@ def collect_containers(cfg: Doc) -> tuple[list[Result], list[str]]:
     if not spec:
         return [], []
     results: list[Result] = []
-    errors: list[str] = []
-    for ref in running_images():
+    images, problems = running_images()
+    errors = [f"containers on {cfg.get('host')}: {p}" for p in problems]
+    for runtime, ref in images:
         name, version = split_image(ref)
         try:
-            docs = syft(f"docker:{ref}")
+            docs = syft(f"{runtime}:{ref}")
         except ScanError as e:
-            errors.append(f"container:{name}: {e}")
+            hint = f"; {PODMAN_SOCKET_HINT}" if runtime == "podman" else ""
+            errors.append(f"container:{name}: {e}{hint}")
             continue
         results.append(
             Result(f"container:{name}", version, merge_boms(docs), spec["tags"], ["containers"])
