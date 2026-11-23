@@ -1306,6 +1306,31 @@ def test_agent_pushes_host_containers_and_code(tmp_path, monkeypatch, capsys):
     assert git[1:3] == ["-c", "safe.directory=/srv/myapp"]
 
 
+def test_agent_reports_syft_errors(monkeypatch):
+    a = load_agent()
+    # real stderr of syft 1.57.2 without -q (with -q it is empty)
+    err = (
+        "[0001]  WARN \x1b[33mslow registry\x1b[0m\n"
+        "[0003] ERROR \x1b[31mcould not determine source: unable to load image: "
+        "write /var/tmp/x/layer.tar: no space left on device\x1b[0m\n"
+    )
+    tools = FakeTools({"syft docker:big:1": (1, "", err)})
+    monkeypatch.setattr(a, "run", tools)
+    monkeypatch.setattr(a, "which", lambda tool: f"/usr/bin/{tool}")
+    with pytest.raises(a.ScanError) as exc:
+        a.syft("docker:big:1")
+    assert str(exc.value) == (
+        "syft docker:big:1 failed (1): could not determine source: unable to load image: "
+        "write /var/tmp/x/layer.tar: no space left on device"
+    )
+    assert "-q" not in tools.calls[0]
+
+    assert a.syft_error("") == "no error output"
+    assert a.syft_error("panic: boom\ngoroutine 1\n") == "goroutine 1"
+    long = a.syft_error("[0001] ERROR " + "x" * 500 + " no space left on device")
+    assert len(long) == 400 and long.startswith("…") and long.endswith("no space left on device")
+
+
 def test_agent_drops_files_and_handles_podman(monkeypatch):
     a = load_agent()
     doc = json.loads(syft_doc(("libc6", "2.41")))
