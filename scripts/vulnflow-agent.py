@@ -95,6 +95,9 @@ SYSTEM_EXCLUDES = (
 # syft lists every file a package owns as a `file` component (40k+ on a Debian server);
 # Dependency-Track can't match files, so they are neither catalogued nor uploaded.
 SYFT_ENV = {"SYFT_FILE_METADATA_SELECTION": "none"}
+# syft's log lines on stderr: "[0001] ERROR \x1b[31mcould not ...\x1b[0m"
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+LOG_PREFIX_RE = re.compile(r"^\[\d+\]\s+(?:ERROR|WARN)\s+")
 PODMAN_SOCKET_HINT = "is the podman socket on? (systemctl enable --now podman.socket)"
 # Forgejo/act runner job containers (`<prefix>_WORKFLOW-<sha256>_JOB-<name>`) only live while
 # a workflow runs; they are not part of the host
@@ -178,12 +181,26 @@ def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
     work = tempfile.mkdtemp(prefix="vulnflow-syft-", dir=ARCHIVE_DIR)
     try:
         env = {**os.environ, "PATH": search_path(), **SYFT_ENV, "TMPDIR": work}
-        code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json", "-q"], env=env)
+        # no -q: under -q syft exits 1 without a word on stderr, even for "no space left on
+        # device"; without it a successful scan writes nothing there either
+        code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json"], env=env)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if code != 0:
-        raise ScanError(f"syft {target} failed ({code}): {err.strip()[:300]}")
+        raise ScanError(f"syft {target} failed ({code}): {syft_error(err)}")
     return parse_docs(out)
+
+
+def syft_error(err: str, limit: int = 400) -> str:
+    """The ERROR lines of syft's stderr, else its last line, without colours or log prefix.
+    Go wraps errors outside-in, so the cause is at the end: a long message keeps its tail."""
+    lines = [ANSI_RE.sub("", ln).strip() for ln in err.splitlines()]
+    lines = [ln for ln in lines if ln]
+    errors = [ln for ln in lines if re.match(r"^\[\d+\]\s+ERROR\s", ln)]
+    msg = "; ".join(LOG_PREFIX_RE.sub("", ln) for ln in errors or lines[-1:])
+    if not msg:
+        return "no error output"
+    return msg if len(msg) <= limit else "…" + msg[-(limit - 1) :]
 
 
 # ----------------------------------------------------------------------- CycloneDX bits
