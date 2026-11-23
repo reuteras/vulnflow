@@ -316,7 +316,7 @@ To see what's worth following, let the agents' SBOMs answer:
 ```bash
 python3 -m vulnflow suggest-subscriptions   # --top N, --libraries
 python3 -m vulnflow patches                 # open DT findings with a patched release (--team, --json, --osv)
-python3 -m vulnflow debian                  # Debian tracker: urgency/fixed per finding (--release, --ignorable)
+python3 -m vulnflow debian                  # Debian tracker: urgency, update available or already fixed (--action update|fixed, --release, --ignorable)
 python3 -m vulnflow disputed                 # CVEs marked ** DISPUTED ** or ** REJECT ** (--team, --json)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
 ```
@@ -727,7 +727,10 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) run with syft's docker scan on a Debian 13 Raspberry Pi (2026-11-23): a 2.4 GB image failed in the 1.9 GB tmpfs `/tmp` (exit 1, no message under `-q`) and scanned by hand with `TMPDIR` in `/var/tmp`; the agent now does that, and on a Debian 13 server with a 3.8 GB tmpfs `/tmp` the unit (started by hand, 2026-11-23) scanned and uploaded the host and 19 images, the largest 2.5 GB. The agent no longer passes `-q`, so a syft failure now carries syft's error message |
 | Tailscale access: DefectDojo `DD_CSRF_TRUSTED_ORIGINS`/`DD_SITE_URL`, OpenCVE `ALLOWED_HOSTS = ["*"]` and nginx forwarding `Host` without the port | Checked against DefectDojo 3.5.201 and OpenCVE v3.1.0 source |
 | Tailscale access: `tailscale serve` keeps the `Host` header; DT apiserver allows the cross-origin UI (it already does for `localhost:8181` → `:8180`) | Run on the tailnet 2026-11-22: logins to all three UIs work over `tailscale serve` |
-| `patches` (DT finding/vulnerability fields, `patchedVersions`, component `purl`/`uuid`), `--osv` (osv.dev `v1/query` on deb/other purls), `debian` (tracker JSON layout), `disputed` (finding `vulnerability.description` carrying the `** DISPUTED **`/`** REJECT **` marker), `ignore` (`PUT/GET /api/v1/analysis` body and `isSuppressed`) | **Assumed from memory, not checked against a DT tag or real data.** Offline tests only: check against the exact DT tag and run `ignore` on one finding first |
+| DT finding/vulnerability/record fields used by `patches`, `debian`, `disputed`, `ignore` (component `uuid`/`purl`/`version`/`project`, vulnerability `uuid`/`description`/`source`/`vulnId`, `patchedVersions`) | **Checked against a real DT, 2026-11-23** (keys printed from a live finding and record). `patchedVersions` exists but is `null` for NVD records, so `patches` finds nothing there |
+| `debian` against the real tracker | **Ran live 2026-11-23**: 515 findings matched; `urgency`/`status` values (`unimportant`, `open`) as expected. `fixed_version` semantics, the `update`/`fixed` actions and the `upstream=` source version are not yet seen on real data |
+| `patches --osv` (osv.dev `v1/query` by purl) | **Ran live 2026-11-23**: fixes returned for npm, PyPI and Go packages. Components with version `UNKNOWN` returned meaningless fixes and are now skipped; Debian purls via OSV not seen (`debian` covers those) |
+| `disputed` marker on live descriptions, `ignore` (`PUT/GET /api/v1/analysis` body, `isSuppressed`) | **Assumed from memory, not checked.** Offline tests only: run `ignore` on one finding first |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests

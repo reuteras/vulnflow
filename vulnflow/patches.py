@@ -5,7 +5,13 @@ OSV); NVD entries have none. "No patched version recorded" therefore means *unkn
 "no fix exists".
 
 With an OSV client, findings DT has no fix for are looked up on osv.dev by the component's
-package URL (marked via="osv"). That sends package URLs to an outside service.
+package URL (marked via="osv"). That sends package URLs to an outside service. OSV lists
+the fix of every maintained branch, so `recommended` picks the one for the installed
+version (see versions.recommend).
+
+Components whose version is unknown (the SBOM tool could not resolve it, shown as UNKNOWN)
+are not sent to OSV: with no version every historic CVE of the package matches and the
+"fixes" would mean nothing. They are counted separately.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from typing import Any
 
 from .clients import OSV, DependencyTrack, DTProject
 from .config import Inventory
+from .versions import recommend
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +39,7 @@ class PatchedFinding:
     severity: str
     patched: str
     via: str = "dt"  # where the fix version came from: dt or osv
+    recommended: str = ""  # the fix for the installed version, when it can be worked out
 
 
 def open_findings(
@@ -58,13 +66,18 @@ def open_findings(
                     yield key, p, f
 
 
+UNKNOWN_VERSIONS = ("", "unknown", "(devel)", "devel")
+
+
 def patched_findings(
     inv: Inventory, dt: DependencyTrack, team: str | None = None, osv: OSV | None = None
-) -> tuple[list[PatchedFinding], int, list[str]]:
-    """(findings with a recorded fix, count of open findings without one, errors)."""
+) -> tuple[list[PatchedFinding], int, int, list[str]]:
+    """(findings with a recorded fix, count of open findings without one, count skipped
+    because the component version is unknown, errors)."""
     rows: list[PatchedFinding] = []
     errors: list[str] = []
     unknown = 0
+    unversioned = 0
     cache: dict[tuple[str, str], str] = {}
     osv_cache: dict[str, list[dict[str, Any]] | None] = {}
     for key, proj, f in open_findings(inv, dt, team, errors):
@@ -80,9 +93,14 @@ def patched_findings(
                 rec = {}
             cache[(src, vid)] = str(rec.get("patchedVersions") or "").strip()
         patched = cache[(src, vid)]
+        recommended = ""
         via = "dt"
         c = f.get("component") or {}
         purl = str(c.get("purl") or "")
+        version = str(c.get("version") or "")
+        if not patched and version.strip().lower() in UNKNOWN_VERSIONS:
+            unversioned += 1
+            continue
         if not patched and osv and purl:
             if purl not in osv_cache:
                 try:
@@ -93,6 +111,7 @@ def patched_findings(
             fixed = OSV.fixed_in(osv_cache[purl] or [], vid, str(c.get("name", "")))
             if fixed:
                 patched, via = ", ".join(fixed), "osv"
+                recommended = recommend(version, fixed)
         if not patched:
             unknown += 1
             continue
@@ -107,8 +126,9 @@ def patched_findings(
                 severity=v.get("severity", ""),
                 patched=patched,
                 via=via,
+                recommended=recommended,
             )
         )
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     rows.sort(key=lambda r: (order.get(r.severity, 9), r.team, r.project, r.component, r.vuln_id))
-    return rows, unknown, errors
+    return rows, unknown, unversioned, errors

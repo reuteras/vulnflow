@@ -12,6 +12,20 @@ against a download in this repo):
      undetermined", "urgency": "unimportant|low|medium|high|end-of-life|not yet assigned",
      "fixed_version": "..."}}}}}
 
+Each match also gets an `action`, by comparing the installed version with the tracker's
+`fixed_version` (Debian version order, vulnflow/debver.py):
+
+    update   installed is older than the fix: an update is available
+    fixed    installed is the fix or newer: Debian already fixed it here (NVD's upstream range
+             ignores backports), a candidate for `vulnflow ignore`. fixed_version "0" means
+             Debian says this release was never affected.
+    no-fix   open or undetermined in Debian, no fix yet
+    unknown  cannot compare safely (resolved without a version, or only one side has an epoch)
+
+The installed version is the *source* version from the purl's `upstream=` when present (the
+tracker works on source packages), else the component version. fixed_version semantics and
+the epoch handling are ASSUMED, not checked against real tracker data.
+
 The tracker is keyed by *source* package. A finding is matched on its CVE id plus the
 component's own deb name or the `upstream=` source name in its purl (syft writes it), and the
 release comes from the purl's `distro=debian-13` (or --release). No match means no answer,
@@ -28,6 +42,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote
 
+from . import debver
 from .clients import DependencyTrack
 from .config import Inventory
 from .net import Http, Transport
@@ -67,6 +82,8 @@ class DebianFinding:
     project_uuid: str = ""
     component_uuid: str = ""
     vuln_uuid: str = ""
+    installed: str = ""  # the version that was compared with `fixed`
+    action: str = "unknown"  # update | fixed | no-fix | unknown
 
 
 class DebianTracker:
@@ -137,6 +154,26 @@ def parse_deb_purl(purl: str) -> tuple[set[str], str] | None:
     return names, release
 
 
+ACTIONS = ("update", "fixed", "no-fix", "unknown")
+
+
+def installed_version(purl: str, component_version: str) -> str:
+    """Source version from the purl's upstream=name@version if there is one, else the
+    component's own version."""
+    upstream = (parse_qs(purl.partition("?")[2]).get("upstream") or [""])[0]
+    _, at, ver = unquote(upstream).partition("@")
+    return ver if at and ver else component_version
+
+
+def fix_action(installed: str, status: str, fixed: str) -> str:
+    """One of ACTIONS; see the module docstring."""
+    if fixed:
+        if not installed or debver.has_epoch(installed) != debver.has_epoch(fixed):
+            return "unknown"  # a missing epoch would make every comparison wrong
+        return "update" if debver.compare(installed, fixed) < 0 else "fixed"
+    return "no-fix" if status in ("open", "undetermined") else "unknown"
+
+
 def debian_findings(
     inv: Inventory,
     dt: DependencyTrack,
@@ -168,6 +205,7 @@ def debian_findings(
             continue
         if ignorable_only and info.urgency not in IGNORABLE:
             continue
+        installed = installed_version(str(c.get("purl") or ""), str(c.get("version") or ""))
         rows.append(
             DebianFinding(
                 team=key,
@@ -184,6 +222,8 @@ def debian_findings(
                 project_uuid=proj.uuid,
                 component_uuid=str(c.get("uuid") or ""),
                 vuln_uuid=str(v.get("uuid") or ""),
+                installed=installed,
+                action=fix_action(installed, info.status, info.fixed),
             )
         )
     rank = {u: i for i, u in enumerate(_URGENCY_ORDER)}
