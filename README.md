@@ -729,7 +729,8 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | Tailscale access: `tailscale serve` keeps the `Host` header; DT apiserver allows the cross-origin UI (it already does for `localhost:8181` → `:8180`) | Run on the tailnet 2026-11-22: logins to all three UIs work over `tailscale serve` |
 | DT finding/vulnerability/record fields used by `patches`, `debian`, `disputed`, `ignore` (component `uuid`/`purl`/`version`/`project`, vulnerability `uuid`/`description`/`source`/`vulnId`, `patchedVersions`) | **Checked against a real DT, 2026-11-23** (keys printed from a live finding and record). `patchedVersions` exists but is `null` for NVD records, so `patches` finds nothing there |
 | `debian` against the real tracker | **Ran live 2026-11-23**: 515 findings matched; `urgency`/`status` values (`unimportant`, `open`) as expected. `fixed_version` semantics, the `update`/`fixed` actions and the `upstream=` source version are not yet seen on real data |
-| `patches --osv` (osv.dev `v1/query` on deb/other purls), `disputed` marker on live descriptions, `ignore` (`PUT/GET /api/v1/analysis` body, `isSuppressed`) | **Assumed from memory, not checked.** Offline tests only: run `ignore` on one finding first |
+| `patches --osv` (osv.dev `v1/query` by purl) | **Ran live 2026-11-23**: fixes returned for npm, PyPI and Go packages. Components with version `UNKNOWN` returned meaningless fixes and are now skipped; Debian purls via OSV not seen (`debian` covers those) |
+| `disputed` marker on live descriptions, `ignore` (`PUT/GET /api/v1/analysis` body, `isSuppressed`) | **Assumed from memory, not checked.** Offline tests only: run `ignore` on one finding first |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests
