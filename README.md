@@ -315,7 +315,7 @@ To see what's worth following, let the agents' SBOMs answer:
 
 ```bash
 python3 -m vulnflow suggest-subscriptions   # --top N, --libraries
-python3 -m vulnflow patches                 # open DT findings with a patched release (--team, --json)
+python3 -m vulnflow patches                 # open DT findings with a patched release (--team, --json, --osv)
 ```
 
 It turns every component in each team's Dependency-Track projects into NVD vendor:product

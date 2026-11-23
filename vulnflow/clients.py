@@ -25,6 +25,8 @@ Dependency-Track
        severity}, analysis{isSuppressed}. ASSUMED field names: not yet checked against a tag.
   GET  /api/v1/vulnerability/source/{source}/vuln/{vulnId}  patchedVersions (free text, only
        set by some sources, e.g. GITHUB/OSV; NVD has none). ASSUMED: check against the tag.
+OSV (opt-in, see class OSV)
+  POST https://api.osv.dev/v1/query                                     documented
 DefectDojo
   GET/POST /api/v2/product_types/                                       documented
   POST /api/v2/reimport-scan/  scan_type "Dependency Track Finding
@@ -229,6 +231,58 @@ class DependencyTrack:
 
     def export_fpf(self, project_uuid: str) -> bytes:
         return self.http.get(f"api/v1/finding/project/{project_uuid}/export").body
+
+
+# ------------------------------------------------------------------------------- OSV
+class OSV:
+    """osv.dev query API (public, no key). Sends package URLs to an outside service, so it
+    is only used when the operator asks for it (`patches --osv`).
+
+    POST /v1/query {"package": {"purl": "pkg:...@version"}} -> {"vulns": [...],
+    "next_page_token": "..."}; each vuln has id, aliases and affected[].ranges[].events[]
+    with {"fixed": "<version>"}. Documented; the purl-with-version form is used because the
+    version field must not be combined with a purl that already has one. ASSUMED: that
+    OSV resolves deb/other purls the way DT's own ecosystems do (not checked)."""
+
+    def __init__(self, base_url: str = "https://api.osv.dev", transport: Transport | None = None):
+        self.http = Http(base_url, transport=transport, timeout=30)
+
+    @staticmethod
+    def clean_purl(purl: str) -> str:
+        """Drop qualifiers/subpath (?distro=..., #...); keep name and @version."""
+        return purl.split("?", 1)[0].split("#", 1)[0]
+
+    def vulns_for(self, purl: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        body: dict[str, Any] = {"package": {"purl": self.clean_purl(purl)}}
+        while True:
+            data = self.http.post("v1/query", json_body=body).json() or {}
+            out.extend(data.get("vulns") or [])
+            token = data.get("next_page_token")
+            if not token:
+                return out
+            body = {**body, "page_token": token}
+
+    @staticmethod
+    def fixed_in(vulns: list[dict[str, Any]], vuln_id: str, name: str) -> list[str]:
+        """Fixed versions OSV lists for vuln_id (matched on id or alias). Entries for the
+        component's own package name win; otherwise all entries of the matching vuln."""
+        by_name: list[str] = []
+        anywhere: list[str] = []
+        for v in vulns:
+            if vuln_id != v.get("id") and vuln_id not in (v.get("aliases") or []):
+                continue
+            for aff in v.get("affected") or []:
+                fixed = [
+                    str(ev["fixed"])
+                    for rng in aff.get("ranges") or []
+                    for ev in rng.get("events") or []
+                    if ev.get("fixed")
+                ]
+                anywhere.extend(fixed)
+                if str((aff.get("package") or {}).get("name", "")).lower() == name.lower():
+                    by_name.extend(fixed)
+        return list(dict.fromkeys(by_name or anywhere))
 
 
 # ------------------------------------------------------------------------ DefectDojo
