@@ -963,6 +963,71 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
     assert json.loads(body) == {"package": {"purl": "pkg:pypi/requests@2.0.0"}}  # qualifiers dropped
 
 
+def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path):
+    from vulnflow.debian import DebianTracker, debian_findings, parse_deb_purl
+
+    assert parse_deb_purl("pkg:pypi/requests@1") is None
+    assert parse_deb_purl("pkg:deb/ubuntu/curl@1") is None
+    assert parse_deb_purl(
+        "pkg:deb/debian/libssl3t64@3.5.4?arch=amd64&upstream=openssl%403.5.4&distro=debian-13"
+    ) == ({"libssl3t64", "openssl"}, "trixie")
+    assert parse_deb_purl("pkg:deb/debian/acl@2.3") == ({"acl"}, "")
+
+    def finding(name, purl, cve):
+        return {
+            "component": {"name": name, "version": "1", "purl": purl},
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH"},
+            "analysis": {},
+        }
+
+    ssl = "pkg:deb/debian/libssl3t64@3.5.4?upstream=openssl%403.5.4&distro=debian-13"
+    findings = [
+        finding("libssl3t64", ssl, "CVE-2024-1"),  # tracker: unimportant
+        finding("libssl3t64", ssl, "CVE-2024-2"),  # tracker: open/high
+        finding("libssl3t64", ssl, "CVE-2024-3"),  # not in tracker
+        finding("acl", "pkg:deb/debian/acl@2.3", "CVE-2024-1"),  # no distro: release unknown
+        finding("requests", "pkg:pypi/requests@2", "CVE-2024-1"),  # not Debian: ignored
+    ]
+    tracker_doc = {
+        "openssl": {
+            "CVE-2024-1": {"releases": {"trixie": {"status": "open", "urgency": "unimportant"}}},
+            "CVE-2024-2": {
+                "releases": {
+                    "trixie": {"status": "resolved", "urgency": "high", "fixed_version": "3.5.5-1"},
+                    "bookworm": {"status": "open", "urgency": "low"},
+                }
+            },
+        }
+    }
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    tt = FakeTransport({"GET /tracker/data/json": tracker_doc})
+    tracker = DebianTracker(tmp_path, transport=tt)
+
+    rows, unmatched, errors = debian_findings(inv, dt, tracker)
+    assert errors == []
+    assert [(r.vuln_id, r.urgency, r.status, r.fixed, r.package, r.release) for r in rows] == [
+        ("CVE-2024-2", "high", "resolved", "3.5.5-1", "openssl", "trixie"),
+        ("CVE-2024-1", "unimportant", "open", "", "openssl", "trixie"),
+    ]
+    assert unmatched == 2  # CVE-2024-3 (not listed) and the acl finding (release unknown)
+    assert [c[1] for c in tt.calls] == ["https://security-tracker.debian.org/tracker/data/json"]
+
+    only, _, _ = debian_findings(inv, dt, tracker, ignorable_only=True)
+    assert [r.vuln_id for r in only] == ["CVE-2024-1"]
+    forced, _, _ = debian_findings(inv, dt, tracker, release="bookworm")
+    assert [(r.vuln_id, r.urgency) for r in forced] == [("CVE-2024-2", "low")]
+    assert len(tt.calls) == 1  # one download, then the in-memory index
+
+
 def test_suggest_subscriptions_from_dt_components():
     from vulnflow.clients import DependencyTrack
     from vulnflow.subscriptions import suggest

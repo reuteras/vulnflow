@@ -1,4 +1,4 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,upload-sbom,machines,agent-bundle,
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,upload-sbom,machines,agent-bundle,
 agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -284,6 +284,20 @@ def main(argv: list[str] | None = None) -> int:
         help="also ask osv.dev (sends package URLs of findings DT has no fix for to api.osv.dev)",
     )
 
+    db = sub.add_parser(
+        "debian",
+        help="what the Debian security tracker says (urgency, status, fixed version) about "
+        "open findings on Debian components",
+    )
+    db.add_argument("--team", default=None, help="only this team (default: all)")
+    db.add_argument("--json", action="store_true")
+    db.add_argument("--release", default=None, help="codename (default: from each purl's distro=)")
+    db.add_argument(
+        "--ignorable",
+        action="store_true",
+        help="only entries Debian rates unimportant or end-of-life",
+    )
+
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
     u.add_argument("--team", required=True)
     u.add_argument("--name", required=True)
@@ -431,6 +445,41 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  {len(rows)} finding(s) with a patched release; {unknown} without a recorded fix "
             "(unknown, not 'no fix')",
+            file=sys.stderr,
+        )
+        for msg in errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if errors else 0
+
+    if a.cmd == "debian":
+        from .debian import DebianTracker, debian_findings
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        drows, unmatched, errors = debian_findings(
+            inv,
+            dt,
+            DebianTracker(data_dir),
+            a.team,
+            release=a.release,
+            ignorable_only=a.ignorable,
+        )
+        if a.json:
+            print(json.dumps([asdict(r) for r in drows], indent=2))
+        else:
+            for drow in drows:
+                print(
+                    f"{drow.urgency or '-':16} {drow.status or '-':12} {drow.team}/{drow.project}: "
+                    f"{drow.component} {drow.version} {drow.vuln_id} "
+                    f"({drow.package}, {drow.release}) fixed: {drow.fixed or '-'}"
+                )
+        print(
+            f"  {len(drows)} finding(s) with a Debian tracker entry; {unmatched} CVE finding(s) "
+            "on Debian components without one (no match, or release unknown: try --release)",
             file=sys.stderr,
         )
         for msg in errors:
