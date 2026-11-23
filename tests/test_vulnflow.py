@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import urllib.request
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -1097,6 +1098,88 @@ def test_ignore_writes_reviewed_findings_to_dt_once(tmp_path):
     f.write_text('{"not": "a list"}', encoding="utf-8")
     with pytest.raises(ReviewFileError):
         load_review(f)
+
+
+def test_disputed_marker_must_lead_the_description():
+    from vulnflow.disputed import disputed_marker
+
+    assert disputed_marker("** DISPUTED ** A flaw in foo. Vendor says no.") == (
+        "DISPUTED",
+        "A flaw in foo. Vendor says no.",
+    )
+    assert disputed_marker("  ** reject ** DO NOT USE THIS CANDIDATE NUMBER.")[0] == "REJECT"
+    assert disputed_marker("** REJECTED ** withdrawn")[0] == "REJECT"
+    assert disputed_marker("A flaw in foo. ** DISPUTED ** appears later") is None
+    assert disputed_marker("") is None and disputed_marker("plain description") is None
+
+
+def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.disputed import disputed_findings
+    from vulnflow.net import Http
+    from vulnflow.triage import apply_ignores, load_review
+
+    def finding(vid, desc, comp="foo"):
+        return {
+            "component": {"name": comp, "version": "1", "uuid": f"c-{comp}"},
+            "vulnerability": {
+                "source": "NVD",
+                "vulnId": vid,
+                "severity": "HIGH",
+                "uuid": f"v-{vid}",
+                "description": desc,
+            },
+            "analysis": {},
+        }
+
+    findings = [
+        finding("CVE-2020-1", "** DISPUTED ** Foo allows X. " + "pad " * 80),
+        finding("CVE-2020-2", "** REJECT ** DO NOT USE THIS CANDIDATE NUMBER."),
+        finding("CVE-2020-3", "A normal vulnerability in foo."),
+        finding("CVE-2020-4", ""),  # no description on the finding: looked up on the record
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/p1" in url:
+            return Response(200, json.dumps(findings).encode(), {})
+        assert url.endswith("/vulnerability/source/NVD/vuln/CVE-2020-4")
+        return Response(200, json.dumps({"description": "** DISPUTED ** from the record"}).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    rows, checked, errors = disputed_findings(inv, dt)
+    assert errors == [] and checked == 4
+    assert [(r.vuln_id, r.marker) for r in rows] == [
+        ("CVE-2020-2", "REJECT"),  # withdrawn first
+        ("CVE-2020-1", "DISPUTED"),
+        ("CVE-2020-4", "DISPUTED"),
+    ]
+    assert rows[1].reason.startswith('CVE-2020-1 is marked DISPUTED in its CVE record: "Foo allows X.')
+    assert rows[1].reason.endswith('…"') and len(rows[1].reason) < 260
+    assert (rows[1].project_uuid, rows[1].component_uuid, rows[1].vuln_uuid) == (
+        "p1",
+        "c-foo",
+        "v-CVE-2020-1",
+    )
+
+    # the same JSON `disputed --json` prints is what `ignore` reads
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps([asdict(r) for r in rows[:1]]), encoding="utf-8")
+    items = load_review(review, today=date(2026, 11, 23))
+    assert items[0].comment == (
+        "CVE-2020-2 is marked REJECT in its CVE record: "
+        '"DO NOT USE THIS CANDIDATE NUMBER."; reviewed 2026-11-23 via vulnflow'
+    )
+    t = FakeTransport({"GET /api/v1/analysis": Response(404, b"{}", {}), "PUT /api/v1/analysis": {}})
+    written, _, errs = apply_ignores(Http("http://dt", transport=t), items, "NOT_AFFECTED")
+    assert errs == [] and len(written) == 1
+    put = next(c for c in t.calls if c[0] == "PUT")
+    assert json.loads(put[3])["comment"] == items[0].comment
 
 
 def test_suggest_subscriptions_from_dt_components():

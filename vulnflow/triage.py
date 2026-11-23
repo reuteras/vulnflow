@@ -1,10 +1,10 @@
 """Write a reviewed "this can be ignored" decision back to Dependency-Track.
 
-Input is the JSON that `vulnflow debian --json` prints, which the operator has edited down to
-the findings they agree with. Nothing is decided here: every row in the file is applied, as a
-Dependency-Track analysis (`NOT_AFFECTED` or `FALSE_POSITIVE`, suppressed) on that project's
-component, with a comment saying where the call came from. DefectDojo follows through the
-normal `dt2dojo` re-import.
+Input is the JSON that `vulnflow debian --json` or `vulnflow disputed --json` prints, which
+the operator has edited down to the findings they agree with. Nothing is decided here: every
+row in the file is applied, as a Dependency-Track analysis (`NOT_AFFECTED` or
+`FALSE_POSITIVE`, suppressed) on that project's component, with a comment saying where the
+call came from. DefectDojo follows through the normal `dt2dojo` re-import.
 
 Needs an admin login (DT_ADMIN_PASSWORD, like `agent-bundle`), not the vulnflow team key:
 that key is what the unattended glue runs with and stays read-only.
@@ -38,10 +38,9 @@ REQUIRED = (
     "component_uuid",
     "vuln_id",
     "vuln_uuid",
-    "urgency",
-    "release",
-    "package",
 )
+# plus either a `reason` (disputed) or the Debian tracker fields:
+DEBIAN_FIELDS = ("urgency", "release", "package")
 
 
 class ReviewFileError(ValueError):
@@ -75,18 +74,23 @@ def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
     for i, row in enumerate(rows):
         if not isinstance(row, dict):
             raise ReviewFileError(f"{path}: row {i} is not an object")
-        missing = [k for k in REQUIRED if not str(row.get(k) or "").strip()]
+        need = REQUIRED if str(row.get("reason") or "").strip() else REQUIRED + DEBIAN_FIELDS
+        missing = [k for k in need if not str(row.get(k) or "").strip()]
         if missing:
             raise ReviewFileError(
                 f"{path}: row {i} ({row.get('vuln_id', '?')}) lacks {', '.join(missing)}; "
-                "use output of `vulnflow debian --json` from a Dependency-Track that returns UUIDs"
+                "use output of `vulnflow debian --json` or `disputed --json` from a Dependency-Track "
+                "that returns UUIDs"
             )
-        status = str(row.get("status") or "")
-        comment = (
-            f"Debian tracker: {row['urgency']}"
-            f"{f' ({status})' if status else ''} in {row['release']}, source package "
-            f"{row['package']}; reviewed {day} via vulnflow"
-        )
+        if str(row.get("reason") or "").strip():
+            comment = f"{str(row['reason']).strip()}; reviewed {day} via vulnflow"
+        else:
+            status = str(row.get("status") or "")
+            comment = (
+                f"Debian tracker: {row['urgency']}"
+                f"{f' ({status})' if status else ''} in {row['release']}, source package "
+                f"{row['package']}; reviewed {day} via vulnflow"
+            )
         item = IgnoreItem(
             team=str(row["team"]),
             project=str(row["project"]),

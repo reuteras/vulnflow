@@ -1,5 +1,5 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,ignore,upload-sbom,
-machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,disputed,ignore,
+upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
 opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -330,10 +330,17 @@ def main(argv: list[str] | None = None) -> int:
         help="only entries Debian rates unimportant or end-of-life",
     )
 
+    dp = sub.add_parser(
+        "disputed",
+        help="open findings whose CVE record starts with ** DISPUTED ** or ** REJECT **",
+    )
+    dp.add_argument("--team", default=None, help="only this team (default: all)")
+    dp.add_argument("--json", action="store_true")
+
     ig = sub.add_parser(
         "ignore",
-        help="mark reviewed findings (a file edited down from `debian --json`) as not affected "
-        "in Dependency-Track; dry run unless --apply",
+        help="mark reviewed findings (a file edited down from `debian --json` or "
+        "`disputed --json`) as not affected in Dependency-Track; dry run unless --apply",
     )
     ig.add_argument("--from", dest="review", required=True, type=Path, metavar="FILE")
     ig.add_argument("--apply", action="store_true", help="write to Dependency-Track")
@@ -495,6 +502,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "ignore":
         return _ignore(a)
+
+    if a.cmd == "disputed":
+        from .disputed import disputed_findings
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        disp, checked, errors = disputed_findings(inv, dt, a.team)
+        if a.json:
+            print(json.dumps([asdict(x) for x in disp], indent=2))
+        else:
+            for x in disp:
+                print(f"{x.marker:8} {x.team}/{x.project}: {x.component} {x.version} {x.reason}")
+        print(
+            f"  {len(disp)} of {checked} open finding(s) are marked disputed or rejected "
+            "(a marker is a reason to review, not a verdict)",
+            file=sys.stderr,
+        )
+        for msg in errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if errors else 0
 
     if a.cmd == "debian":
         from .debian import DebianTracker, debian_findings
