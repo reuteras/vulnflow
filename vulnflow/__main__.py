@@ -11,7 +11,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .clients import DefectDojo, DependencyTrack, OpenCVE
+from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE
 from .config import (
     Inventory,
     add_subscriptions,
@@ -278,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     pt.add_argument("--team", default=None, help="only this team (default: all)")
     pt.add_argument("--json", action="store_true")
+    pt.add_argument(
+        "--osv",
+        action="store_true",
+        help="also ask osv.dev (sends package URLs of findings DT has no fix for to api.osv.dev)",
+    )
 
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
     u.add_argument("--team", required=True)
@@ -414,14 +419,14 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        rows, unknown, errors = patched_findings(inv, dt, a.team)
+        rows, unknown, errors = patched_findings(inv, dt, a.team, osv=OSV() if a.osv else None)
         if a.json:
             print(json.dumps([asdict(r) for r in rows], indent=2))
         else:
             for r in rows:
                 print(
                     f"{r.severity or '-':8} {r.team}/{r.project}: {r.component} {r.version} "
-                    f"{r.vuln_id} -> {r.patched}"
+                    f"{r.vuln_id} -> {r.patched}{' (osv)' if r.via == 'osv' else ''}"
                 )
         print(
             f"  {len(rows)} finding(s) with a patched release; {unknown} without a recorded fix "

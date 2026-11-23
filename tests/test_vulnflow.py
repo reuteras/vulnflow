@@ -911,6 +911,58 @@ def test_patched_findings_lists_only_recorded_fixes(inv):
     assert not any("GHSA-supp" in u for u in urls)
 
 
+def test_patched_findings_osv_fallback_is_opt_in(inv):
+    from vulnflow.clients import OSV
+    from vulnflow.patches import patched_findings
+
+    purl = "pkg:pypi/requests@2.0.0?distro=x"
+    finding = {
+        "component": {"name": "requests", "version": "2.0.0", "purl": purl},
+        "vulnerability": {"source": "NVD", "vulnId": "CVE-2024-1", "severity": "HIGH"},
+        "analysis": {},
+    }
+    osv_vulns = [
+        {"id": "GHSA-other", "aliases": ["CVE-2099-9"], "affected": []},
+        {
+            "id": "GHSA-xxxx",
+            "aliases": ["CVE-2024-1"],
+            "affected": [
+                {
+                    "package": {"name": "other", "ecosystem": "PyPI"},
+                    "ranges": [{"events": [{"introduced": "0"}, {"fixed": "9.9"}]}],
+                },
+                {
+                    "package": {"name": "requests", "ecosystem": "PyPI"},
+                    "ranges": [{"events": [{"introduced": "0"}, {"fixed": "2.31.0"}]}],
+                },
+            ],
+        },
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/p1" in url:
+            return Response(200, json.dumps([finding]).encode(), {})
+        return Response(200, json.dumps({"patchedVersions": ""}).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+
+    rows, unknown, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
+    assert rows == [] and unknown == 1
+
+    osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
+    rows, unknown, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
+    assert errors == [] and unknown == 0
+    assert [(r.vuln_id, r.patched, r.via) for r in rows] == [("CVE-2024-1", "2.31.0", "osv")]
+    method, url, _, body = osv_t.calls[0]
+    assert (method, url) == ("POST", "https://osv.test/v1/query")
+    assert json.loads(body) == {"package": {"purl": "pkg:pypi/requests@2.0.0"}}  # qualifiers dropped
+
+
 def test_suggest_subscriptions_from_dt_components():
     from vulnflow.clients import DependencyTrack
     from vulnflow.subscriptions import suggest

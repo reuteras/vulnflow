@@ -3,6 +3,9 @@
 DT only knows a fix version when the vulnerability source supplied one (GitHub advisories,
 OSV); NVD entries have none. "No patched version recorded" therefore means *unknown*, not
 "no fix exists".
+
+With an OSV client, findings DT has no fix for are looked up on osv.dev by the component's
+package URL (marked via="osv"). That sends package URLs to an outside service.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .clients import DependencyTrack
+from .clients import OSV, DependencyTrack
 from .config import Inventory
 
 log = logging.getLogger(__name__)
@@ -27,16 +30,18 @@ class PatchedFinding:
     vuln_id: str
     severity: str
     patched: str
+    via: str = "dt"  # where the fix version came from: dt or osv
 
 
 def patched_findings(
-    inv: Inventory, dt: DependencyTrack, team: str | None = None
+    inv: Inventory, dt: DependencyTrack, team: str | None = None, osv: OSV | None = None
 ) -> tuple[list[PatchedFinding], int, list[str]]:
     """(findings with a recorded fix, count of open findings without one, errors)."""
     rows: list[PatchedFinding] = []
     errors: list[str] = []
     unknown = 0
     cache: dict[tuple[str, str], str] = {}
+    osv_cache: dict[str, list[dict[str, Any]] | None] = {}
     for key, t in sorted(inv.teams.items()):
         if team and key != team:
             continue
@@ -66,10 +71,22 @@ def patched_findings(
                         rec = {}
                     cache[(src, vid)] = str(rec.get("patchedVersions") or "").strip()
                 patched = cache[(src, vid)]
+                via = "dt"
+                c = f.get("component") or {}
+                purl = str(c.get("purl") or "")
+                if not patched and osv and purl:
+                    if purl not in osv_cache:
+                        try:
+                            osv_cache[purl] = osv.vulns_for(purl)
+                        except Exception as e:
+                            errors.append(f"OSV {purl}: {e}")
+                            osv_cache[purl] = None
+                    fixed = OSV.fixed_in(osv_cache[purl] or [], vid, str(c.get("name", "")))
+                    if fixed:
+                        patched, via = ", ".join(fixed), "osv"
                 if not patched:
                     unknown += 1
                     continue
-                c = f.get("component") or {}
                 rows.append(
                     PatchedFinding(
                         team=key,
@@ -80,6 +97,7 @@ def patched_findings(
                         vuln_id=vid,
                         severity=v.get("severity", ""),
                         patched=patched,
+                        via=via,
                     )
                 )
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
