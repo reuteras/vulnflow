@@ -42,13 +42,13 @@ def patched_findings(
             continue
         try:
             projects = [p for p in dt.projects_by_tag(t.dtrack_tag) if p.active]
-        except Exception as e:  # noqa: BLE001 - report and carry on with the other teams
+        except Exception as e:
             errors.append(f"list DT projects for '{t.dtrack_tag}': {e}")
             continue
         for p in projects:
             try:
                 findings = dt.findings(p.uuid)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 errors.append(f"findings of {p.name}: {e}")
                 continue
             for f in findings:
@@ -61,7 +61,7 @@ def patched_findings(
                 if (src, vid) not in cache:
                     try:
                         rec = dt.vulnerability(src, vid) or {}
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         errors.append(f"{src}/{vid}: {e}")
                         rec = {}
                     cache[(src, vid)] = str(rec.get("patchedVersions") or "").strip()
