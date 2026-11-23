@@ -1401,6 +1401,10 @@ def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     for _, env in as_alice:
         assert env["XDG_RUNTIME_DIR"] == "/run/user/1000" and env["HOME"] == "/home/alice"
     assert saved and not saved[0].parent.exists()  # the archive dir is removed afterwards
+    # syft unpacks images under ARCHIVE_DIR (on disk), not a tmpfs /tmp, and cleans up
+    calls = zip(tools.calls, tools.envs, strict=True)
+    syft_tmp = [Path(e["TMPDIR"]) for c, e in calls if c[0].endswith("syft")]
+    assert syft_tmp and all(d.parent == tmp_path and not d.exists() for d in syft_tmp)
 
 
 def deb(name: str, version: str, upstream: str = "") -> dict:

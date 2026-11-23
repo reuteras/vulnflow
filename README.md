@@ -444,7 +444,9 @@ docker socket or root's podman socket (syft's `podman:` source talks to the API 
 enable `podman.socket`). Rootless podman containers are found through their `conmon`
 processes: the agent lists them as their user and has that user export each image as an
 OCI archive on stdout into a file under `/var/tmp` (deleted after the scan; needs room for
-the largest image), which root then scans. Podman never gets a path: rootless podman runs in
+the largest image), which root then scans. syft itself unpacks every image under a private
+directory in `/var/tmp` (its `TMPDIR`), not `/tmp`, which is often a tmpfs smaller than a
+large image (Debian 13: half the RAM). Podman never gets a path: rootless podman runs in
 the user's mount namespace, which can't see the unit's private `/var/tmp`. Forgejo runner
 job containers (`…_WORKFLOW-<sha256>_JOB-…`) only live while a workflow runs and are
 skipped. The system scan skips home directories, caches (`/var/cache`, `/root/.cache`),
@@ -617,7 +619,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | Agent (`scripts/vulnflow-agent.py`): scans, merge, per-project upload | Offline tests with fake tools and a fake DT (exact path, header, body); `brew` + `apps` scans run for real on macOS with its Python 3.9.6; `--dry-run`/`--out` run on a MacBook and as root on a Debian 13 server (2026-11-22), which showed syft's per-file entries (41,925 of 44,988 components), now dropped. root's podman image scanned through `podman.socket`, and uploads to the live DT from the server, by hand and from the systemd timer. The first timer run found the user's 8 rootless containers (`NoNewPrivileges` does not stop `podman ps` as the user) but `podman image save -o /var/tmp/…` failed (the unit's private `/var/tmp`); now streamed through stdout, **not yet rerun** |
 | Homebrew JSON shape (`formulae[].installed[].version`, `casks[].installed`) | Checked against a real `brew info --json=v2 --installed` on 2026-11-21; CPE vendors are still guesses (see "What to expect") |
 | Per-host agent teams (`agent-bundle`/`agent-revoke`), BOM upload permissions and tags | Checked against the DT 5.2.2 tag (TeamResource, DeleteTeamRequest, BomResource); not yet run live |
-| systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) **not yet run** with syft's docker scan |
+| systemd unit / launchd plist (`deploy/agent/`) | plist passes `plutil -lint`; the systemd hardening (ProtectSystem=full, PrivateTmp) run with syft's docker scan on a Debian 13 Raspberry Pi (2026-11-23): a 2.4 GB image failed in the 1.9 GB tmpfs `/tmp` (exit 1, no message under `-q`) and scanned by hand with `TMPDIR` in `/var/tmp`; the agent now does that, **timer run pending** |
 | Tailscale access: DefectDojo `DD_CSRF_TRUSTED_ORIGINS`/`DD_SITE_URL`, OpenCVE `ALLOWED_HOSTS = ["*"]` and nginx forwarding `Host` without the port | Checked against DefectDojo 3.5.201 and OpenCVE v3.1.0 source |
 | Tailscale access: `tailscale serve` keeps the `Host` header; DT apiserver allows the cross-origin UI (it already does for `localhost:8181` → `:8180`) | Run on the tailnet 2026-11-22: logins to all three UIs work over `tailscale serve` |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
