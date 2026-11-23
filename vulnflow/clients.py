@@ -21,6 +21,10 @@ Dependency-Track
   GET  /api/v1/finding/project/{uuid}/export  (FPF)                    documented
   GET  /api/v1/component/project/{uuid}  paginated, VIEW_PORTFOLIO; cpe, purl, classifier
        (ComponentResource/Component.java in the 5.2.2 tag)
+  GET  /api/v1/finding/project/{uuid}  paginated; component, vulnerability{source,vulnId,
+       severity}, analysis{isSuppressed}. ASSUMED field names: not yet checked against a tag.
+  GET  /api/v1/vulnerability/source/{source}/vuln/{vulnId}  patchedVersions (free text, only
+       set by some sources, e.g. GITHUB/OSV; NVD has none). ASSUMED: check against the tag.
 DefectDojo
   GET/POST /api/v2/product_types/                                       documented
   POST /api/v2/reimport-scan/  scan_type "Dependency Track Finding
@@ -182,6 +186,35 @@ class DependencyTrack:
             if len(items) < self.PAGE or len(out) >= total:
                 return out
             page += 1
+
+    def findings(self, project_uuid: str) -> list[dict[str, Any]]:
+        """Findings of a project (component, vulnerability, analysis), paginated."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = self.http.get(
+                f"api/v1/finding/project/{project_uuid}?pageSize={self.PAGE}&pageNumber={page}"
+            )
+            items: list[dict[str, Any]] = r.json() or []
+            out.extend(items)
+            total = int(r.headers.get("X-Total-Count", len(out)) or len(out))
+            if len(items) < self.PAGE or len(out) >= total:
+                return out
+            page += 1
+
+    def vulnerability(self, source: str, vuln_id: str) -> dict[str, Any] | None:
+        """Full vulnerability record (has vulnerableVersions/patchedVersions); None if unknown."""
+        r = self.http.get(
+            f"api/v1/vulnerability/source/{quote(source, safe='')}/vuln/{quote(vuln_id, safe='')}",
+            expect_ok=False,
+        )
+        if r.status == 404:
+            return None
+        if not r.ok:
+            self.http.get(
+                f"api/v1/vulnerability/source/{quote(source, safe='')}/vuln/{quote(vuln_id, safe='')}"
+            )  # raise with details
+        return r.json() or None
 
     def upload_bom(self, name: str, version: str, bom: bytes, tags: list[str]) -> str:
         body = {

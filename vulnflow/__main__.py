@@ -1,4 +1,4 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,upload-sbom,machines,agent-bundle,
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,upload-sbom,machines,agent-bundle,
 agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -273,6 +273,12 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--cvss", type=float, default=None)
     e.add_argument("--json", action="store_true")
 
+    pt = sub.add_parser(
+        "patches", help="open Dependency-Track findings whose vulnerability has a patched release"
+    )
+    pt.add_argument("--team", default=None, help="only this team (default: all)")
+    pt.add_argument("--json", action="store_true")
+
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
     u.add_argument("--team", required=True)
     u.add_argument("--name", required=True)
@@ -398,6 +404,33 @@ def main(argv: list[str] | None = None) -> int:
             if not a.loop:
                 return 1 if rep.errors else 0
             time.sleep(a.loop)
+
+    if a.cmd == "patches":
+        from .patches import patched_findings
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        rows, unknown, errors = patched_findings(inv, dt, a.team)
+        if a.json:
+            print(json.dumps([asdict(r) for r in rows], indent=2))
+        else:
+            for r in rows:
+                print(
+                    f"{r.severity or '-':8} {r.team}/{r.project}: {r.component} {r.version} "
+                    f"{r.vuln_id} -> {r.patched}"
+                )
+        print(
+            f"  {len(rows)} finding(s) with a patched release; {unknown} without a recorded fix "
+            "(unknown, not 'no fix')",
+            file=sys.stderr,
+        )
+        for e in errors:
+            print(f"  error {e}", file=sys.stderr)
+        return 1 if errors else 0
 
     if a.cmd == "serve":
         from .receiver import Pipeline, serve

@@ -864,6 +864,53 @@ linux = ["linux_kernel"]
             load_machines(tmp_path / "m.toml", inv.teams)
 
 
+def test_patched_findings_lists_only_recorded_fixes(inv):
+    from vulnflow.patches import patched_findings
+
+    def finding(vid, src="GITHUB", suppressed=False):
+        return {
+            "component": {"name": "requests", "version": "2.0.0"},
+            "vulnerability": {"source": src, "vulnId": vid, "severity": "HIGH"},
+            "analysis": {"isSuppressed": suppressed},
+        }
+
+    vulns = {
+        "GHSA-fixed": {"patchedVersions": "2.31.0"},
+        "CVE-2024-1": {"patchedVersions": ""},
+        "GHSA-supp": {"patchedVersions": "9.9"},
+    }
+
+    def route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            return Response(
+                200, json.dumps([{"uuid": "p1", "name": "app", "active": True}]).encode(), {}
+            )
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/p1" in url:
+            body = [
+                finding("GHSA-fixed"),
+                finding("CVE-2024-1", "NVD"),
+                finding("GHSA-supp", suppressed=True),
+            ]
+            return Response(200, json.dumps(body).encode(), {})
+        vid = url.split("/vuln/")[1]
+        return Response(200, json.dumps(vulns[vid]).encode(), {})
+
+    t = FakeTransport({"GET /api/v1/": route})
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    rows, unknown, errors = patched_findings(inv, dt)
+    assert errors == []
+    assert [(r.team, r.project, r.vuln_id, r.patched) for r in rows] == [
+        ("dev", "app", "GHSA-fixed", "2.31.0")
+    ]
+    assert unknown == 1  # the NVD one; the suppressed finding is skipped entirely
+    urls = [c[1] for c in t.calls]
+    assert "http://dt/api/v1/finding/project/p1?pageSize=100&pageNumber=1" in urls
+    assert "http://dt/api/v1/vulnerability/source/GITHUB/vuln/GHSA-fixed" in urls
+    assert not any("GHSA-supp" in u for u in urls)
+
+
 def test_suggest_subscriptions_from_dt_components():
     from vulnflow.clients import DependencyTrack
     from vulnflow.subscriptions import suggest
