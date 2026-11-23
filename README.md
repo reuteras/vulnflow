@@ -1,27 +1,96 @@
 # vulnflow PoC — CVE tracking for the sysadmin, users and dev teams
 
-A proof of concept for three-layer vulnerability tracking:
+A proof of concept for three-layer vulnerability tracking, all self-hosted:
 
-| Layer | Tool | What it answers | Port |
+| Layer | Tool | What it answers | Local port |
 | --- | --- | --- | --- |
 | Watch | **OpenCVE** (self-hosted Community, BSL licence) | "A CVE changed for a vendor/product we use" — per-team projects, tags, status, assignee | 80 (web), 8080 (Airflow) |
 | Match | **OWASP Dependency-Track 5.x** (Apache-2.0) | "Which of *our* apps/hosts contain the affected component?" — from SBOMs | 8181 (UI), 8180 (API) |
 | Work | **DefectDojo** (BSD-3) | "Who owns this finding, what's its status, is the risk accepted until when?" | 8280 |
 | Glue | **vulnflow** (this repo, stdlib Python) | Inventory sync, KEV/EPSS/CIRCL enrichment, priority tiers, routing to teams | 8380 |
 
-```text
-            inventory.toml (later: generated from CMDB)
-                 │ python -m vulnflow sync
-     ┌───────────┼─────────────────────────────┐
-     ▼           ▼                             ▼
-  OpenCVE     DefectDojo (product types)   Dependency-Track (team tags)
-  projects ◄──── triage write-back            ▲  SBOMs from CI + hosts
-  per team    │ webhook                        │  (scripts/ci-sbom-upload.sh,
-     │        │                                │   scripts/host-sbom.sh)
-     ▼        │                                │
-  vulnflow receiver ── KEV + EPSS + CIRCL ──► tier P1..P4 ──► chat (team mention) + alerts.jsonl
-                                               │
-  Dependency-Track ── FPF export ── vulnflow dt2dojo (every 30 min) ──► DefectDojo findings
+## Contents
+
+- [How it fits together](#how-it-fits-together)
+- [Quick start](#quick-start)
+- [After setup: first steps](#after-setup-first-steps)
+  - [1. Reach the UIs](#1-reach-the-uis)
+  - [2. OSV in Dependency-Track](#2-osv-in-dependency-track)
+  - [3. Describe what you run](#3-describe-what-you-run)
+  - [4. Install syft](#4-install-syft)
+  - [5. SBOM of a server](#5-sbom-of-a-server)
+  - [6. SBOM of an app](#6-sbom-of-an-app)
+  - [7. See the results](#7-see-the-results)
+  - [8. Smoke-test the alert path](#8-smoke-test-the-alert-path)
+  - [9. Day to day](#9-day-to-day)
+- [Own machines (push agents)](#own-machines-push-agents)
+  - [Your hosts: `machines.toml`](#your-hosts-machinestoml)
+  - [Rolling out the agents](#rolling-out-the-agents)
+  - [What the agents upload](#what-the-agents-upload)
+  - [What to expect](#what-to-expect)
+- [How the teams work](#how-the-teams-work)
+- [Priority tiers](#priority-tiers)
+- [Where status and comments live](#where-status-and-comments-live)
+- [Security and OPSEC notes](#security-and-opsec-notes)
+- [Verified vs assumed](#verified-vs-assumed)
+- [Tests](#tests)
+- [Licences to be aware of](#licences-to-be-aware-of)
+
+## How it fits together
+
+Two paths run side by side. **Watching** starts from the products you say you use
+(`inventory.toml`, plus the private `machines.toml`): OpenCVE reports every CVE change for
+them, and the vulnflow receiver ranks it and tells the owning team. **Matching** starts
+from what is actually installed: SBOMs from the push agents and CI go to Dependency-Track,
+whose findings `dt2dojo` copies into DefectDojo for triage.
+
+```mermaid
+flowchart LR
+  inv["inventory.toml<br/>+ machines.toml"]
+  agents["Push agents<br/>servers and laptops"]
+  ci["CI pipelines<br/>ci-sbom-upload.sh"]
+
+  subgraph server["vulnflow server: 127.0.0.1, reached over Tailscale"]
+    ocve["OpenCVE<br/>watch"]
+    recv["vulnflow receiver<br/>enrich + tier"]
+    dt["Dependency-Track<br/>match"]
+    d2d["vulnflow dt2dojo<br/>every 30 min"]
+    dd["DefectDojo<br/>work"]
+  end
+
+  ext["CISA KEV · FIRST EPSS<br/>CIRCL sightings"]
+  chat["Chat<br/>team mention"]
+  siem["alerts.jsonl<br/>to the SIEM"]
+
+  inv -- "vulnflow sync:<br/>projects + subscriptions" --> ocve
+  inv -- "vulnflow sync:<br/>product types" --> dd
+  agents -- "SBOMs, HTTPS :8180" --> dt
+  ci -- "SBOM per release" --> dt
+  ocve -- "webhook on CVE change" --> recv
+  ext -. "CVE IDs out, scores back" .-> recv
+  recv -- "P1/P2" --> chat
+  recv --> siem
+  recv -- "P1/P2: to_evaluate<br/>if nobody triaged it" --> ocve
+  dt -- "FPF export" --> d2d --> dd
+```
+
+One OpenCVE change on its way through the receiver (details in
+[Priority tiers](#priority-tiers)):
+
+```mermaid
+sequenceDiagram
+  participant O as OpenCVE
+  participant R as vulnflow receiver
+  participant E as KEV / EPSS / CIRCL
+  participant C as Chat
+  O->>R: webhook: project, CVE, events (X-Vulnflow-Token)
+  R->>E: CVE ID
+  E-->>R: in KEV? EPSS score, sightings
+  R->>R: tier P1..P4, append to alerts.jsonl
+  alt P1 or P2
+    R->>C: alert mentioning the team (if VULNFLOW_CHAT_WEBHOOK is set)
+    R->>O: status to_evaluate, only if still untriaged
+  end
 ```
 
 ## Quick start
@@ -185,7 +254,9 @@ ssh -L 8000:127.0.0.1:80 -L 8181:127.0.0.1:8181 -L 8280:127.0.0.1:8280 user@vuln
 Then open OpenCVE on <http://localhost:8000>, Dependency-Track on <http://localhost:8181>
 and DefectDojo on <http://localhost:8280>.
 
-### 2. OSV in Dependency-Track (done by setup; needed for Debian and PyPI)
+### 2. OSV in Dependency-Track
+
+Done by `setup`; needed for Debian packages and PyPI.
 
 Dependency-Track 5.2.2 ships with only the NVD source enabled. NVD matches by CPE, which
 fits Debian packages and Python libraries poorly. The OSV source matches by package URL and
@@ -199,7 +270,9 @@ instead, enable OSV by hand in the DT UI under Administration. The first OSV mir
 while; findings show up after it finishes. Optional: an NVD API key (faster NVD mirroring)
 and the GitHub Advisories source (needs a GitHub token).
 
-### 3. Describe what you run in `inventory/inventory.toml`
+### 3. Describe what you run
+
+In `inventory/inventory.toml` (in git) and `machines.toml` (not in git).
 
 OpenCVE watches **vendors/products** (CVE level, also for things you have no SBOM for);
 Dependency-Track matches **exact package versions** from SBOMs. For this estate:
@@ -264,7 +337,9 @@ python3 -m vulnflow sync --create-projects
 docker restart vulnflow-glue-receiver-1 vulnflow-glue-dt2dojo-1
 ```
 
-### 4. Install syft (SBOM generator)
+### 4. Install syft
+
+syft generates the SBOMs.
 
 On the vulnflow host and on every server you want to inventory. Pinned version, checksum
 verified (use `linux_arm64` on ARM):
@@ -278,9 +353,11 @@ sha256sum --ignore-missing -c "syft_${V}_checksums.txt"
 sudo apt install "./syft_${V}_linux_amd64.deb"
 ```
 
-### 5. SBOM of the server (sysadmin team)
+### 5. SBOM of a server
 
-On the vulnflow host itself:
+Owned by the sysadmin team. For your own machines the [push agent](#own-machines-push-agents)
+does this daily; the commands below are the one-off, by-hand way. On the vulnflow host
+itself:
 
 ```bash
 sudo ./scripts/host-sbom.sh sysadm
@@ -304,7 +381,9 @@ nginx and the system `python3` are Debian packages, so they show up here as
 `pkg:deb/debian/...` components and are matched against Debian's advisories, including
 fixes Debian backported without changing the upstream version.
 
-### 6. SBOM of the app (dev team)
+### 6. SBOM of an app
+
+Owned by the dev team.
 
 Scan the deployed app directory *with its venv*, so the SBOM lists the exact installed
 versions:
@@ -374,13 +453,33 @@ Homebrew and the app bundles and uploads them to Dependency-Track over the tailn
 split three ways: **sysadm** gets the servers, **users** the MacBooks, **dev** the code and
 containers.
 
-```text
- server1..3  ─┐  vulnflow-agent.py (timer)   ┌─► Dependency-Track ──► dt2dojo ──► DefectDojo
- laptop1..2  ─┼── HTTPS over the tailnet ────┤   (tailscale serve :8180, one API key per host)
- code dirs   ─┘  syft / brew / app bundles   └─► vulnflow machines: who stopped pushing?
+```mermaid
+flowchart LR
+  subgraph setup["Once per change to machines.toml"]
+    toml["machines.toml"] -- "vulnflow agent-bundle" --> bundle["config.json + key<br/>per host"]
+  end
+
+  subgraph hosts["Own machines, once a day"]
+    srv["Linux server: systemd timer<br/>system · containers · brew · code"]
+    mac["MacBook: launchd<br/>brew · languages · apps"]
+  end
+
+  subgraph server["vulnflow server"]
+    dt["Dependency-Track"]
+    d2d["dt2dojo"]
+    dd["DefectDojo"]
+    mach["vulnflow machines<br/>STALE: stopped pushing"]
+  end
+
+  bundle -- "Ansible / install-macos.sh" --> srv
+  bundle --> mac
+  srv -- "SBOMs, HTTPS :8180 over the tailnet<br/>upload-only key, one DT team per host" --> dt
+  mac --> dt
+  dt --> d2d --> dd
+  dt -. "last upload per host" .-> mach
 ```
 
-### Your hosts: `machines.toml` (not in git)
+### Your hosts: `machines.toml`
 
 Host names and what runs where are targeting data, and this repository is public. They live
 in `machines.toml` next to `.env`, which is gitignored and dockerignored in the same way;
@@ -413,7 +512,7 @@ shows each host's last upload and marks hosts as `STALE` when they haven't pushe
 `--stale-days` (default 2) or never did; the exit code is 1 then. With push, a machine that
 has gone quiet is the failure you would otherwise not notice. `./poc.sh status` runs it.
 
-### Rolling out the agents (Ansible)
+### Rolling out the agents
 
 On the server, after a change to `machines.toml`:
 
@@ -542,7 +641,9 @@ own alert and its own status in OpenCVE. A machine's `team` owns its `host:` pro
 containers running on it belong to `containers_team` (default `dev`) and `[code.*]` entries
 to their own `team` (default `dev`).
 
-## Priority tiers (vulnflow receiver)
+## Priority tiers
+
+The vulnflow receiver ranks every CVE change OpenCVE sends it:
 
 | Tier | Rule (defaults, tune in `[priority]`) | Action |
 | --- | --- | --- |
