@@ -428,8 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             "(unknown, not 'no fix')",
             file=sys.stderr,
         )
-        for e in errors:
-            print(f"  error {e}", file=sys.stderr)
+        for msg in errors:
+            print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
 
     if a.cmd == "serve":
