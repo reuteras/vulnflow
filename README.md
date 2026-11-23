@@ -317,6 +317,7 @@ To see what's worth following, let the agents' SBOMs answer:
 python3 -m vulnflow suggest-subscriptions   # --top N, --libraries
 python3 -m vulnflow patches                 # open DT findings with a patched release (--team, --json, --osv)
 python3 -m vulnflow debian                  # Debian tracker: urgency, update available or already fixed (--action update|fixed, --release, --ignorable)
+python3 -m vulnflow vendor --ubuntu --redhat  # Ubuntu / Red Hat verdicts; asks ubuntu.com / access.redhat.com per CVE id (--action update|fixed|wontfix, --json)
 python3 -m vulnflow disputed                 # CVEs marked ** DISPUTED ** or ** REJECT ** (--team, --json)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
 ```
@@ -730,6 +731,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | DT finding/vulnerability/record fields used by `patches`, `debian`, `disputed`, `ignore` (component `uuid`/`purl`/`version`/`project`, vulnerability `uuid`/`description`/`source`/`vulnId`, `patchedVersions`) | **Checked against a real DT, 2026-11-23** (keys printed from a live finding and record). `patchedVersions` exists but is `null` for NVD records, so `patches` finds nothing there |
 | `debian` against the real tracker | **Ran live 2026-11-23**: 515 findings matched; `urgency`/`status` values (`unimportant`, `open`) as expected. `fixed_version` semantics, the `update`/`fixed` actions and the `upstream=` source version are not yet seen on real data |
 | `patches --osv` (osv.dev `v1/query` by purl) | **Ran live 2026-11-23**: fixes returned for npm, PyPI and Go packages. Components with version `UNKNOWN` returned meaningless fixes and are now skipped; Debian purls via OSV not seen (`debian` covers those) |
+| `vendor` (Ubuntu `ubuntu.com/security/cves/<id>.json`, Red Hat `hydra/rest/securitydata/cve/<id>.json`) | Record shapes **checked against real responses for CVE-2023-31486 on 2026-11-23** (Ubuntu `packages[].statuses[]` with `ignored`/`needed`; Red Hat `package_state`, `affected_release`). **Assumed, not seen:** Ubuntu `released` (description = fixed version), `not-affected`, `DNE`; the RPM purl form syft writes (`pkg:rpm/redhat/...`, `distro=rhel-8.8`, `epoch`); not yet run on real findings (you may have no Ubuntu or RPM components: the summary line says how many it found) |
 | `disputed` marker on live descriptions, `ignore` (`PUT/GET /api/v1/analysis` body, `isSuppressed`) | **Assumed from memory, not checked.** Offline tests only: run `ignore` on one finding first |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 

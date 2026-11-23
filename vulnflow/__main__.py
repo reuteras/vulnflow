@@ -1,5 +1,5 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,disputed,ignore,
-upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,vendor,disputed,
+ignore,upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
 opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -337,6 +337,23 @@ def main(argv: list[str] | None = None) -> int:
         "version: backport, candidates for `ignore`), no-fix or unknown",
     )
 
+    vd = sub.add_parser(
+        "vendor",
+        help="what Ubuntu / Red Hat say about open findings on their packages (asks "
+        "ubuntu.com / access.redhat.com per CVE id; needs --ubuntu and/or --redhat)",
+    )
+    vd.add_argument("--ubuntu", action="store_true", help="ask ubuntu.com about Ubuntu packages")
+    vd.add_argument("--redhat", action="store_true", help="ask access.redhat.com about RPMs")
+    vd.add_argument("--team", default=None, help="only this team (default: all)")
+    vd.add_argument("--json", action="store_true")
+    vd.add_argument(
+        "--action",
+        choices=("update", "fixed", "not-affected", "wontfix", "no-fix", "unknown"),
+        default=None,
+        help="only this verdict: update (a newer package fixes it), fixed (already fixed in "
+        "the installed version), not-affected, wontfix (vendor will not fix it), no-fix, unknown",
+    )
+
     dp = sub.add_parser(
         "disputed",
         help="open findings whose CVE record starts with ** DISPUTED ** or ** REJECT **",
@@ -517,6 +534,62 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "ignore":
         return _ignore(a)
+
+    if a.cmd == "vendor":
+        from .vendors import ACTIONS as VENDOR_ACTIONS
+        from .vendors import VENDOR_NAMES, vendor_findings
+
+        if not (a.ubuntu or a.redhat):
+            print(
+                "  error choose --ubuntu and/or --redhat. This asks ubuntu.com / "
+                "access.redhat.com about each CVE id found on their packages (nothing else is "
+                "sent, but the list shows which CVEs affect you), so it is not done by default",
+                file=sys.stderr,
+            )
+            return 2
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+
+        def _notify(vendor: str, n: int) -> None:
+            print(
+                f"  asking {VENDOR_NAMES[vendor]} about {n} CVE id(s) (cached for 24 h)", file=sys.stderr
+            )
+
+        vres = vendor_findings(
+            inv, dt, data_dir, ubuntu=a.ubuntu, redhat=a.redhat, team=a.team, notify=_notify
+        )
+        vshown = [x for x in vres.rows if not a.action or x.action == a.action]
+        if a.json:
+            print(json.dumps([asdict(x) for x in vshown], indent=2))
+        else:
+            for vrow in vshown:
+                extra = (
+                    f" [{vrow.pocket}]"
+                    if vrow.pocket not in ("", "security", "updates", "release")
+                    else ""
+                )
+                note = f" ({vrow.note})" if vrow.note and vrow.action == "wontfix" else ""
+                print(
+                    f"{vrow.vendor_severity or '-':10} {vrow.action:12} {vrow.team}/{vrow.project}: "
+                    f"{vrow.component} {vrow.version} {vrow.vuln_id} "
+                    f"({VENDOR_NAMES[vrow.vendor]} {vrow.package}, {vrow.release}) "
+                    f"fix: {vrow.fixed or '-'}{extra}{note}"
+                )
+        counts = ", ".join(f"{sum(1 for x in vres.rows if x.action == k)} {k}" for k in VENDOR_ACTIONS)
+        seen = ", ".join(f"{n} {VENDOR_NAMES[k]}" for k, n in vres.considered.items()) or "none"
+        print(
+            f"  findings on vendor packages: {seen}. {len(vres.rows)} with a vendor entry"
+            f"{f', {len(vshown)} shown' if a.action else ''}: {counts}; {vres.unmatched} without "
+            "a usable entry (unknown release, other package name or no record)",
+            file=sys.stderr,
+        )
+        for msg in vres.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if vres.errors else 0
 
     if a.cmd == "disputed":
         from .disputed import disputed_findings

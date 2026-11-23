@@ -1359,6 +1359,269 @@ def test_patches_skips_osv_for_unknown_component_versions(inv):
     assert [json.loads(c[3])["package"]["purl"] for c in osv_t.calls] == ["pkg:golang/minimatch@9.0.3"]
 
 
+def test_rpm_version_order_matches_rpmvercmp():
+    from vulnflow.rpmver import compare, parse_nevr, vercmp
+
+    older_first = [
+        ("1.0", "1.1"),
+        ("1.0", "1.0.1"),
+        ("1.9", "1.10"),
+        ("1.0a", "1.0b"),
+        ("1.0~rc1", "1.0"),
+        ("1.0~rc1", "1.0~rc2"),
+        ("1.0", "1.0^git1"),
+        ("1.0^git1", "1.0.1"),
+        ("a", "1"),
+        ("1.0", "1.0a"),
+        ("0.074-2.el8", "0.074-10.el8"),
+        ("2.el8", "2.el8_6.1"),
+        ("2.el8_6.1", "2.el8_6.2"),
+    ]
+    for a, b in older_first:
+        assert vercmp(a, b) == -1 and vercmp(b, a) == 1, (a, b)
+    assert vercmp("1.01", "1.1") == 0 and vercmp("1_0", "1.0") == 0
+    assert compare((0, "9.0", "1"), (1, "0.1", "1")) == -1  # epoch first
+    assert parse_nevr("perl-HTTP-Tiny-0:0.074-2.el8") == ("perl-HTTP-Tiny", 0, "0.074", "2.el8")
+    assert parse_nevr("not a nevr") is None
+
+
+def test_vendor_purls():
+    from vulnflow.vendors import parse_vendor_purl
+
+    u = parse_vendor_purl(
+        "pkg:deb/ubuntu/libperl5.34@5.34.0-3?upstream=perl%405.34.0-3ubuntu1.3&distro=ubuntu-22.04",
+        "5.34.0-3",
+    )
+    assert u and (u.vendor, u.names, u.release, u.installed) == (
+        "ubuntu",
+        {"libperl5.34", "perl"},
+        "jammy",
+        "5.34.0-3ubuntu1.3",
+    )
+    j = parse_vendor_purl("pkg:deb/ubuntu/perl@5.34.0-3?distro=ubuntu-jammy", "")
+    assert j and j.release == "jammy"
+    r = parse_vendor_purl(
+        "pkg:rpm/redhat/perl-HTTP-Tiny@0.074-2.el8?epoch=1&arch=noarch&distro=rhel-8.8", ""
+    )
+    assert r and (r.vendor, r.names, r.release, r.installed, r.epoch) == (
+        "redhat",
+        {"perl-http-tiny"},
+        "8",
+        "0.074-2.el8",
+        1,
+    )
+    assert parse_vendor_purl("pkg:deb/debian/perl@5.36", "") is None
+    assert parse_vendor_purl("pkg:rpm/fedora/bash@5", "") is None
+    assert parse_vendor_purl("pkg:pypi/requests@2", "") is None
+    nod = parse_vendor_purl("pkg:rpm/redhat/bash@5.1-1.el9", "")
+    assert nod and nod.release == ""  # no distro qualifier: release unknown
+
+
+def test_vendor_lookup_ubuntu_and_redhat(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.triage import load_review
+    from vulnflow.vendors import VendorApi, VendorInfo, _reason, vendor_findings
+
+    def st(codename, status, description="", pocket="security"):
+        return {
+            "release_codename": codename,
+            "status": status,
+            "description": description,
+            "pocket": pocket,
+            "component": None,
+        }
+
+    ubuntu_rec = {
+        "id": "CVE-2024-10001",
+        "priority": "medium",
+        "packages": [
+            {
+                "name": "perl",
+                "statuses": [
+                    st("jammy", "released", "5.34.0-3ubuntu1.2"),
+                    st("noble", "ignored", "see notes"),
+                    st("focal", "DNE"),
+                    st("bionic", "needed"),
+                    st("upstream", "needed"),
+                ],
+            },
+            {"name": "other", "statuses": [st("jammy", "released", "9.9")]},
+        ],
+    }
+    cpe8, cpe9, cpe7 = (
+        "cpe:/o:redhat:enterprise_linux:8",
+        "cpe:/o:redhat:enterprise_linux:9",
+        "cpe:/o:redhat:rhel_els:7",
+    )
+    redhat_rec = {
+        "threat_severity": "Moderate",
+        "affected_release": [
+            {"cpe": cpe8, "advisory": "RHSA-2023:7174", "package": "perl-HTTP-Tiny-0:0.074-2.el8"},
+            {
+                "cpe": "cpe:/o:redhat:rhel_eus:8.6",
+                "advisory": "RHSA-2024:0422",
+                "package": "perl-HTTP-Tiny-0:0.074-1.el8_6.1",
+            },
+        ],
+        "package_state": [
+            {"cpe": cpe7, "fix_state": "Out of support scope", "package_name": "perl-HTTP-Tiny"},
+            {"cpe": cpe9, "fix_state": "Will not fix", "package_name": "perl-HTTP-Tiny"},
+            {"cpe": cpe8, "fix_state": "Affected", "package_name": "perl:5.30/perl-HTTP-Tiny"},
+        ],
+    }
+    module_rec = {
+        "threat_severity": "Low",
+        "package_state": [
+            {"cpe": cpe8, "fix_state": "Affected", "package_name": "perl:5.30/perl-HTTP-Tiny"}
+        ],
+    }
+
+    def finding(name, purl, cve):
+        version = purl.split("@", 1)[1].split("?", 1)[0] if "@" in purl else ""  # as in real DT data
+        return {
+            "component": {
+                "name": name,
+                "version": version,
+                "purl": purl,
+                "uuid": f"c-{name}-{purl[-8:]}",
+            },
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH", "uuid": f"v-{cve}"},
+            "analysis": {},
+        }
+
+    ub = "pkg:deb/ubuntu/perl@%s?distro=ubuntu-%s"
+    rh = "pkg:rpm/redhat/perl-HTTP-Tiny@%s?epoch=0&distro=rhel-%s"
+    findings = [
+        finding("perl", ub % ("5.34.0-3ubuntu1.1", "22.04"), "CVE-2024-10001"),  # jammy: older -> update
+        finding(
+            "libperl",
+            "pkg:deb/ubuntu/libperl@5.34?upstream=perl%405.34.0-3ubuntu1.3&distro=ubuntu-22.04",
+            "CVE-2024-10001",
+        ),  # fixed
+        finding("perl", ub % ("5.38.2-3", "24.04"), "CVE-2024-10001"),  # noble: ignored -> wontfix
+        finding("perl", ub % ("5.30.0-9", "20.04"), "CVE-2024-10001"),  # focal: DNE -> not-affected
+        finding("perl", ub % ("5.26.1-6", "18.04"), "CVE-2024-10001"),  # bionic: needed -> no-fix
+        finding("perl", ub % ("5.40.0-1", "26.04"), "CVE-2024-10001"),  # release not mapped -> unmatched
+        finding("perl-HTTP-Tiny", rh % ("0.074-1.el8", "8.8"), "CVE-2024-10002"),  # update
+        finding("perl-HTTP-Tiny", rh % ("0.074-2.el8_6.1", "8.6"), "CVE-2024-10002"),  # fixed
+        finding("perl-HTTP-Tiny", rh % ("0.076-1.el9", "9.4"), "CVE-2024-10002"),  # will not fix
+        finding("perl-HTTP-Tiny", rh % ("0.070-1.el7", "7.9"), "CVE-2024-10002"),  # out of support scope
+        finding(
+            "perl-HTTP-Tiny", rh % ("0.074-1.el8", "8.8"), "CVE-2024-10003"
+        ),  # module stream only: no-fix
+        finding(
+            "bash", "pkg:rpm/redhat/bash@5.1-1.el9?distro=rhel-9.4", "CVE-2024-10004"
+        ),  # no record: unmatched
+        finding(
+            "perl", "pkg:deb/debian/perl@5.36?distro=debian-12", "CVE-2024-10001"
+        ),  # not a vendor purl
+        finding(
+            "requests", "pkg:pypi/requests@2", "GHSA-xxxx-yyyy-zzzz"
+        ),  # not a CVE, not a vendor purl
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            return Response(
+                200, json.dumps([{"uuid": "p1", "name": "app", "active": True}]).encode(), {}
+            )
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    t = FakeTransport(
+        {
+            "GET /security/cves/CVE-2024-10001.json": ubuntu_rec,
+            "GET /securitydata/cve/CVE-2024-10002.json": redhat_rec,
+            "GET /securitydata/cve/CVE-2024-10003.json": module_rec,
+        }  # CVE-2024-10004: the fake answers 404
+    )
+    told: list[tuple[str, int]] = []
+    res = vendor_findings(
+        inv, dt, tmp_path, ubuntu=True, redhat=True, transport=t, notify=lambda v, n: told.append((v, n))
+    )
+    assert res.errors == []
+    by = {(r.vendor, r.version, r.vuln_id): r for r in res.rows}
+    got = {k: (r.action, r.release, r.fixed) for k, r in by.items()}
+    assert got == {
+        ("ubuntu", "5.34.0-3ubuntu1.1", "CVE-2024-10001"): ("update", "jammy", "5.34.0-3ubuntu1.2"),
+        ("ubuntu", "5.34.0-3ubuntu1.3", "CVE-2024-10001"): ("fixed", "jammy", "5.34.0-3ubuntu1.2"),
+        ("ubuntu", "5.38.2-3", "CVE-2024-10001"): ("wontfix", "noble", ""),
+        ("ubuntu", "5.30.0-9", "CVE-2024-10001"): ("not-affected", "focal", ""),
+        ("ubuntu", "5.26.1-6", "CVE-2024-10001"): ("no-fix", "bionic", ""),
+        ("redhat", "0.074-1.el8", "CVE-2024-10002"): ("update", "rhel8", "0.074-2.el8"),
+        ("redhat", "0.074-2.el8_6.1", "CVE-2024-10002"): ("fixed", "rhel8", "0.074-2.el8"),
+        ("redhat", "0.076-1.el9", "CVE-2024-10002"): ("wontfix", "rhel9", ""),
+        ("redhat", "0.070-1.el7", "CVE-2024-10002"): ("wontfix", "rhel7", ""),
+        ("redhat", "0.074-1.el8", "CVE-2024-10003"): ("no-fix", "rhel8", ""),  # module stream only
+    }
+    assert by[("redhat", "0.074-1.el8", "CVE-2024-10002")].note == "RHSA-2023:7174"
+    assert res.unmatched == 2  # Ubuntu 26.04 (release not mapped) and bash (no record)
+    assert res.considered == {"ubuntu": 6, "redhat": 6}
+    assert res.contacted == {"ubuntu": 1, "redhat": 3}
+    assert sorted(told) == [("redhat", 3), ("ubuntu", 1)]
+    urls = sorted(c[1] for c in t.calls)
+    assert urls == [
+        "https://access.redhat.com/hydra/rest/securitydata/cve/CVE-2024-10002.json",
+        "https://access.redhat.com/hydra/rest/securitydata/cve/CVE-2024-10003.json",
+        "https://access.redhat.com/hydra/rest/securitydata/cve/CVE-2024-10004.json",
+        "https://ubuntu.com/security/cves/CVE-2024-10001.json",
+    ]
+
+    # a second run answers from the cache (404s too): nothing is requested or announced
+    t2 = FakeTransport({})
+    again = vendor_findings(
+        inv,
+        dt,
+        tmp_path,
+        ubuntu=True,
+        redhat=True,
+        transport=t2,
+        notify=lambda v, n: told.append((v, n)),
+    )
+    assert (
+        t2.calls == []
+        and again.contacted == {"ubuntu": 0, "redhat": 0}
+        and len(again.rows) == len(res.rows)
+    )
+
+    # a vendor that was not asked for is not contacted at all
+    t3 = FakeTransport({"GET /securitydata/cve/": redhat_rec})
+    only = vendor_findings(inv, dt, tmp_path / "fresh", redhat=True, transport=t3)
+    assert only.considered == {"redhat": 6} and all("ubuntu.com" not in c[1] for c in t3.calls)
+
+    # the reason text is what `ignore` writes, and a row goes through load_review unchanged
+    fixed_row = by[("ubuntu", "5.34.0-3ubuntu1.3", "CVE-2024-10001")]
+    assert (
+        fixed_row.reason
+        == "Ubuntu: fixed in 5.34.0-3ubuntu1.2 (jammy), installed 5.34.0-3ubuntu1.3 is not older"
+    )
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps([asdict(fixed_row)]), encoding="utf-8")
+    assert (
+        load_review(review, today=date(2026, 11, 23))[0].comment
+        == fixed_row.reason + "; reviewed 2026-11-23 via vulnflow"
+    )
+    wontfix = by[("ubuntu", "5.38.2-3", "CVE-2024-10001")]
+    assert wontfix.reason == "Ubuntu: ignored in noble: see notes"
+    esm = VendorInfo(
+        "ubuntu", "perl", "jammy", "released", "", "5.34.0-3ubuntu1.9", "", "esm-infra", "fixed"
+    )
+    assert (
+        _reason("ubuntu", esm, "5.34.0-3ubuntu1.9")
+        == "Ubuntu: fixed in 5.34.0-3ubuntu1.9 (jammy, esm-infra), installed 5.34.0-3ubuntu1.9 "
+        "is not older"
+    )
+
+    # ids go into a URL, so anything that is not a CVE id is refused
+    with pytest.raises(ValueError):
+        VendorApi("ubuntu", "https://ubuntu.com", "security/cves/{cve}.json", tmp_path).record(
+            "../../etc/passwd"
+        )
+
+
 def test_suggest_subscriptions_from_dt_components():
     from vulnflow.clients import DependencyTrack
     from vulnflow.subscriptions import suggest
