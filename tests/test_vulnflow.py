@@ -954,11 +954,11 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
     rows, unknown, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
     assert rows == [] and unknown == 1
 
-    ot = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=ot))
+    osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
+    rows, unknown, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
     assert errors == [] and unknown == 0
     assert [(r.vuln_id, r.patched, r.via) for r in rows] == [("CVE-2024-1", "2.31.0", "osv")]
-    method, url, _, body = ot.calls[0]
+    method, url, _, body = osv_t.calls[0]
     assert (method, url) == ("POST", "https://osv.test/v1/query")
     assert json.loads(body) == {"package": {"purl": "pkg:pypi/requests@2.0.0"}}  # qualifiers dropped
 
