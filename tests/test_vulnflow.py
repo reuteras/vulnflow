@@ -1403,7 +1403,7 @@ def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     assert saved and not saved[0].parent.exists()  # the archive dir is removed afterwards
     # syft unpacks images under ARCHIVE_DIR (on disk), not a tmpfs /tmp, and cleans up
     calls = zip(tools.calls, tools.envs, strict=True)
-    syft_tmp = [Path(e["TMPDIR"]) for c, e in calls if c[0].endswith("syft")]
+    syft_tmp = [Path(e["TMPDIR"]) for c, e in calls if c[0].endswith("syft") and e]
     assert syft_tmp and all(d.parent == tmp_path and not d.exists() for d in syft_tmp)
 
 
