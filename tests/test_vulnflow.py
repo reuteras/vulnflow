@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import urllib.request
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -961,6 +962,227 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
     method, url, _, body = osv_t.calls[0]
     assert (method, url) == ("POST", "https://osv.test/v1/query")
     assert json.loads(body) == {"package": {"purl": "pkg:pypi/requests@2.0.0"}}  # qualifiers dropped
+
+
+def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path):
+    from vulnflow.debian import DebianTracker, debian_findings, parse_deb_purl
+
+    assert parse_deb_purl("pkg:pypi/requests@1") is None
+    assert parse_deb_purl("pkg:deb/ubuntu/curl@1") is None
+    assert parse_deb_purl(
+        "pkg:deb/debian/libssl3t64@3.5.4?arch=amd64&upstream=openssl%403.5.4&distro=debian-13"
+    ) == ({"libssl3t64", "openssl"}, "trixie")
+    assert parse_deb_purl("pkg:deb/debian/acl@2.3") == ({"acl"}, "")
+
+    def finding(name, purl, cve):
+        return {
+            "component": {"name": name, "version": "1", "purl": purl, "uuid": f"c-{name}"},
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH", "uuid": f"v-{cve}"},
+            "analysis": {},
+        }
+
+    ssl = "pkg:deb/debian/libssl3t64@3.5.4?upstream=openssl%403.5.4&distro=debian-13"
+    findings = [
+        finding("libssl3t64", ssl, "CVE-2024-1"),  # tracker: unimportant
+        finding("libssl3t64", ssl, "CVE-2024-2"),  # tracker: open/high
+        finding("libssl3t64", ssl, "CVE-2024-3"),  # not in tracker
+        finding("acl", "pkg:deb/debian/acl@2.3", "CVE-2024-1"),  # no distro: release unknown
+        finding("requests", "pkg:pypi/requests@2", "CVE-2024-1"),  # not Debian: ignored
+    ]
+    tracker_doc = {
+        "openssl": {
+            "CVE-2024-1": {"releases": {"trixie": {"status": "open", "urgency": "unimportant"}}},
+            "CVE-2024-2": {
+                "releases": {
+                    "trixie": {"status": "resolved", "urgency": "high", "fixed_version": "3.5.5-1"},
+                    "bookworm": {"status": "open", "urgency": "low"},
+                }
+            },
+        }
+    }
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    tt = FakeTransport({"GET /tracker/data/json": tracker_doc})
+    tracker = DebianTracker(tmp_path, transport=tt)
+
+    rows, unmatched, errors = debian_findings(inv, dt, tracker)
+    assert errors == []
+    assert [(r.vuln_id, r.urgency, r.status, r.fixed, r.package, r.release) for r in rows] == [
+        ("CVE-2024-2", "high", "resolved", "3.5.5-1", "openssl", "trixie"),
+        ("CVE-2024-1", "unimportant", "open", "", "openssl", "trixie"),
+    ]
+    assert (rows[0].project_uuid, rows[0].component_uuid, rows[0].vuln_uuid) == (
+        "p1",
+        "c-libssl3t64",
+        "v-CVE-2024-2",
+    )
+    assert unmatched == 2  # CVE-2024-3 (not listed) and the acl finding (release unknown)
+    assert [c[1] for c in tt.calls] == ["https://security-tracker.debian.org/tracker/data/json"]
+
+    only, _, _ = debian_findings(inv, dt, tracker, ignorable_only=True)
+    assert [r.vuln_id for r in only] == ["CVE-2024-1"]
+    forced, _, _ = debian_findings(inv, dt, tracker, release="bookworm")
+    assert [(r.vuln_id, r.urgency) for r in forced] == [("CVE-2024-2", "low")]
+    assert len(tt.calls) == 1  # one download, then the in-memory index
+
+
+def test_ignore_writes_reviewed_findings_to_dt_once(tmp_path):
+    from datetime import date
+
+    from vulnflow.net import Http
+    from vulnflow.triage import ReviewFileError, apply_ignores, load_review
+
+    row = {
+        "team": "dev",
+        "project": "app",
+        "project_uuid": "P1",
+        "component": "libssl3t64",
+        "version": "3.5.4",
+        "component_uuid": "C1",
+        "vuln_id": "CVE-2024-1",
+        "vuln_uuid": "V1",
+        "urgency": "unimportant",
+        "status": "open",
+        "release": "trixie",
+        "package": "openssl",
+    }
+    other = {**row, "component_uuid": "C2", "component": "libcrypto3", "vuln_uuid": "V2"}
+    f = tmp_path / "review.json"
+    f.write_text(json.dumps([row, row, other]), encoding="utf-8")  # row twice: deduplicated
+
+    items = load_review(f, today=date(2026, 11, 23))
+    assert [(i.component_uuid, i.vuln_uuid) for i in items] == [("C1", "V1"), ("C2", "V2")]
+    assert items[0].comment == (
+        "Debian tracker: unimportant (open) in trixie, source package openssl; "
+        "reviewed 2026-11-23 via vulnflow"
+    )
+
+    state = {"C2": {"analysisState": "NOT_AFFECTED", "isSuppressed": True}}  # already done
+
+    def get_route(m, url, h, b):
+        for comp, cur in state.items():
+            if f"component={comp}&" in url:
+                return Response(200, json.dumps(cur).encode(), {})
+        return Response(404, b'{"detail":"none"}', {})
+
+    t = FakeTransport({"GET /api/v1/analysis": get_route, "PUT /api/v1/analysis": {}})
+    http = Http("http://dt", transport=t)
+    written, skipped, errors = apply_ignores(http, items, "NOT_AFFECTED", "REQUIRES_ENVIRONMENT")
+    assert errors == []
+    assert [i.component_uuid for i in written] == ["C1"]
+    assert [i.component_uuid for i in skipped] == ["C2"]
+    puts = [c for c in t.calls if c[0] == "PUT"]
+    assert len(puts) == 1 and puts[0][1] == "http://dt/api/v1/analysis"
+    assert json.loads(puts[0][3]) == {
+        "project": "P1",
+        "component": "C1",
+        "vulnerability": "V1",
+        "analysisState": "NOT_AFFECTED",
+        "comment": items[0].comment,
+        "isSuppressed": True,
+        "analysisJustification": "REQUIRES_ENVIRONMENT",
+    }
+
+    # a bad row rejects the whole file, nothing is half-applied
+    f.write_text(json.dumps([row, {**row, "vuln_uuid": ""}]), encoding="utf-8")
+    with pytest.raises(ReviewFileError, match=r"row 1.*vuln_uuid"):
+        load_review(f)
+    f.write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(ReviewFileError):
+        load_review(f)
+
+
+def test_disputed_marker_must_lead_the_description():
+    from vulnflow.disputed import disputed_marker
+
+    assert disputed_marker("** DISPUTED ** A flaw in foo. Vendor says no.") == (
+        "DISPUTED",
+        "A flaw in foo. Vendor says no.",
+    )
+    assert disputed_marker("  ** reject ** DO NOT USE THIS CANDIDATE NUMBER.") == (
+        "REJECT",
+        "DO NOT USE THIS CANDIDATE NUMBER.",
+    )
+    assert disputed_marker("** REJECTED ** withdrawn") == ("REJECT", "withdrawn")
+    assert disputed_marker("A flaw in foo. ** DISPUTED ** appears later") is None
+    assert disputed_marker("") is None and disputed_marker("plain description") is None
+
+
+def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.disputed import disputed_findings
+    from vulnflow.net import Http
+    from vulnflow.triage import apply_ignores, load_review
+
+    def finding(vid, desc, comp="foo"):
+        return {
+            "component": {"name": comp, "version": "1", "uuid": f"c-{comp}"},
+            "vulnerability": {
+                "source": "NVD",
+                "vulnId": vid,
+                "severity": "HIGH",
+                "uuid": f"v-{vid}",
+                "description": desc,
+            },
+            "analysis": {},
+        }
+
+    findings = [
+        finding("CVE-2020-1", "** DISPUTED ** Foo allows X. " + "pad " * 80),
+        finding("CVE-2020-2", "** REJECT ** DO NOT USE THIS CANDIDATE NUMBER."),
+        finding("CVE-2020-3", "A normal vulnerability in foo."),
+        finding("CVE-2020-4", ""),  # no description on the finding: looked up on the record
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/p1" in url:
+            return Response(200, json.dumps(findings).encode(), {})
+        assert url.endswith("/vulnerability/source/NVD/vuln/CVE-2020-4")
+        return Response(200, json.dumps({"description": "** DISPUTED ** from the record"}).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    rows, checked, errors = disputed_findings(inv, dt)
+    assert errors == [] and checked == 4
+    assert [(r.vuln_id, r.marker) for r in rows] == [
+        ("CVE-2020-2", "REJECT"),  # withdrawn first
+        ("CVE-2020-1", "DISPUTED"),
+        ("CVE-2020-4", "DISPUTED"),
+    ]
+    assert rows[1].reason.startswith('CVE-2020-1 is marked DISPUTED in its CVE record: "Foo allows X.')
+    assert rows[1].reason.endswith('…"') and len(rows[1].reason) < 260
+    assert (rows[1].project_uuid, rows[1].component_uuid, rows[1].vuln_uuid) == (
+        "p1",
+        "c-foo",
+        "v-CVE-2020-1",
+    )
+
+    # the same JSON `disputed --json` prints is what `ignore` reads
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps([asdict(r) for r in rows[:1]]), encoding="utf-8")
+    items = load_review(review, today=date(2026, 11, 23))
+    assert items[0].comment == (
+        "CVE-2020-2 is marked REJECT in its CVE record: "
+        '"DO NOT USE THIS CANDIDATE NUMBER."; reviewed 2026-11-23 via vulnflow'
+    )
+    t = FakeTransport({"GET /api/v1/analysis": Response(404, b"{}", {}), "PUT /api/v1/analysis": {}})
+    written, _, errs = apply_ignores(Http("http://dt", transport=t), items, "NOT_AFFECTED")
+    assert errs == [] and len(written) == 1
+    put = next(c for c in t.calls if c[0] == "PUT")
+    assert json.loads(put[3])["comment"] == items[0].comment
 
 
 def test_suggest_subscriptions_from_dt_components():
