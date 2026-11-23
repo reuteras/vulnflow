@@ -320,6 +320,7 @@ python3 -m vulnflow debian                  # Debian tracker: urgency, update av
 python3 -m vulnflow vendor --ubuntu --redhat  # Ubuntu / Red Hat verdicts; asks ubuntu.com / access.redhat.com per CVE id (--action update|fixed|wontfix, --json)
 python3 -m vulnflow disputed                 # CVEs marked ** DISPUTED ** or ** REJECT ** (--team, --json)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
+python3 -m vulnflow unignore                    # undo `ignore` from the ledger (data/ignored.jsonl); dry run, --apply writes; --from review.json for older ones
 ```
 
 It turns every component in each team's Dependency-Track projects into NVD vendor:product
@@ -732,7 +733,9 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | `debian` against the real tracker | **Ran live 2026-11-23**: 515 findings matched; verdicts 103 `update`, 391 `fixed`, 21 `no-fix`, 0 `unknown`. `fixed_version` with and without an epoch (`1:1.913-2`), `~deb13uN` revisions and the version order were checked by hand on sample rows (ntfs-3g, openssl, gnupg); not cross-checked against the Debian tracker website. Still unseen: `fixed_version` `0` (never affected) and the `upstream=` source version on rows that have one |
 | `patches --osv` (osv.dev `v1/query` by purl) | **Ran live 2026-11-23**: fixes returned for npm, PyPI and Go packages. Components with version `UNKNOWN` returned meaningless fixes and are now skipped; Debian purls via OSV not seen (`debian` covers those) |
 | `vendor` (Ubuntu `ubuntu.com/security/cves/<id>.json`, Red Hat `hydra/rest/securitydata/cve/<id>.json`) | Record shapes **checked against real responses for CVE-2023-31486 on 2026-11-23** (Ubuntu `packages[].statuses[]` with `ignored`/`needed`; Red Hat `package_state`, `affected_release`). **Assumed, not seen:** Ubuntu `released` (description = fixed version), `not-affected`, `DNE`; the RPM purl form syft writes (`pkg:rpm/redhat/...`, `distro=rhel-8.8`, `epoch`); not yet run on real findings (you may have no Ubuntu or RPM components: the summary line says how many it found) |
-| `disputed` marker on live descriptions, `ignore` (`PUT/GET /api/v1/analysis` body, `isSuppressed`) | **Assumed from memory, not checked.** Offline tests only: run `ignore` on one finding first |
+| `disputed` marker on live descriptions | **Assumed from memory, not checked.** Offline tests only |
+| `ignore` (`PUT /api/v1/analysis`) | **Ran live 2026-11-23 on one finding** (ntfs-3g `CVE-2007-5159`): the dry run printed the plan and `--apply` reported `1 written`, so DT accepted the request. Not yet confirmed: that the UI shows Not Affected + suppressed, that `GET /api/v1/analysis` reads it back (the second-run `already ... suppressed` path), and that DefectDojo closes it |
+| `unignore`, the ledger, and `ignore` leaving triaged findings alone | **Assumed, not run.** Offline tests with a stateful fake of the analysis API. ASSUMED: `PUT` accepts `analysisState` `NOT_SET` with `isSuppressed` false, and `GET` returns `analysisComments[]`. Try it on the one finding already ignored before bulk use |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests

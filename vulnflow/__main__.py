@@ -1,5 +1,5 @@
 """CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,vendor,disputed,
-ignore,upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
+ignore,unignore,upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
 opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
@@ -193,8 +193,72 @@ def _ignore(a: argparse.Namespace) -> int:
     except BootstrapError as e:
         print(f"  error {e}", file=sys.stderr)
         return 1
-    written, skipped, errors = apply_ignores(admin, items, a.state, a.justification)
+    written, skipped, kept, errors = apply_ignores(
+        admin,
+        items,
+        a.state,
+        a.justification,
+        overwrite=a.overwrite,
+        ledger=Path(a.data_dir) / "ignored.jsonl",
+    )
     print(f"  {len(written)} written, {len(skipped)} already {a.state} and suppressed")
+    for k in kept:
+        print(
+            f"  kept  {k.item.team}/{k.item.project}: {k.item.component} {k.item.vuln_id} "
+            f"already triaged as {k.state}; --overwrite to replace it"
+        )
+    if written:
+        print(f"  logged in {Path(a.data_dir) / 'ignored.jsonl'}; `vulnflow unignore` reverts")
+    for msg in errors:
+        print(f"  error {msg}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+def _unignore(a: argparse.Namespace) -> int:
+    from .bootstrap import BootstrapError, dt_admin_http
+    from .triage import ReviewFileError, apply_reverts, load_review, plan_reverts
+
+    ledger = Path(a.data_dir) / "ignored.jsonl"
+    try:
+        rows = load_review(a.review) if a.review else None
+        todo = plan_reverts(ledger, rows, a.state)
+    except ReviewFileError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 2
+    if not todo:
+        print(
+            f"  nothing to undo: no outstanding entries in {ledger}"
+            + (
+                ""
+                if a.review
+                else "; for findings ignored before the ledger existed, pass --from review.json"
+            )
+        )
+        return 0
+    for it in todo:
+        back = it.previous_state + (" (suppressed)" if it.previous_suppressed else "")
+        src = "ledger" if it.from_ledger else "review file, previous state unknown"
+        print(
+            f"  {it.team}/{it.project}: {it.component} {it.vuln_id}: "
+            f"{it.expected_state} -> {back} [{src}]"
+        )
+    if not a.apply:
+        print(
+            f"  dry run: {len(todo)} finding(s) would be reverted, each only if it is still as "
+            "vulnflow left it; add --apply"
+        )
+        return 0
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    reverted, skipped, errors = apply_reverts(admin, todo, ledger)
+    print(f"  {len(reverted)} reverted, {len(skipped)} left alone")
+    for it, why in skipped:
+        print(f"  left  {it.team}/{it.project}: {it.component} {it.vuln_id}: {why}")
     for msg in errors:
         print(f"  error {msg}", file=sys.stderr)
     return 1 if errors else 0
@@ -370,6 +434,33 @@ def main(argv: list[str] | None = None) -> int:
     ig.add_argument("--apply", action="store_true", help="write to Dependency-Track")
     ig.add_argument("--state", choices=("NOT_AFFECTED", "FALSE_POSITIVE"), default="NOT_AFFECTED")
     ig.add_argument("--justification", default=None, help="DT analysisJustification, optional")
+    ig.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="also replace a finding somebody already triaged (default: leave those alone)",
+    )
+
+    ui = sub.add_parser(
+        "unignore",
+        help="undo `ignore`: put back the analysis it replaced, only where a finding is still "
+        "as vulnflow left it; dry run unless --apply",
+    )
+    ui.add_argument(
+        "--from",
+        dest="review",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="only the findings in this review file (default: everything in the ledger "
+        "that was not reverted; needed for findings ignored before the ledger existed)",
+    )
+    ui.add_argument("--apply", action="store_true", help="write to Dependency-Track")
+    ui.add_argument(
+        "--state",
+        choices=("NOT_AFFECTED", "FALSE_POSITIVE"),
+        default="NOT_AFFECTED",
+        help="with --from and no ledger entry: the state `ignore` set",
+    )
 
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
     u.add_argument("--team", required=True)
@@ -534,6 +625,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "ignore":
         return _ignore(a)
+
+    if a.cmd == "unignore":
+        return _unignore(a)
 
     if a.cmd == "vendor":
         from .vendors import ACTIONS as VENDOR_ACTIONS

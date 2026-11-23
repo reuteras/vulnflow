@@ -1075,7 +1075,7 @@ def test_ignore_writes_reviewed_findings_to_dt_once(tmp_path):
 
     t = FakeTransport({"GET /api/v1/analysis": get_route, "PUT /api/v1/analysis": {}})
     http = Http("http://dt", transport=t)
-    written, skipped, errors = apply_ignores(http, items, "NOT_AFFECTED", "REQUIRES_ENVIRONMENT")
+    written, skipped, _, errors = apply_ignores(http, items, "NOT_AFFECTED", "REQUIRES_ENVIRONMENT")
     assert errors == []
     assert [i.component_uuid for i in written] == ["C1"]
     assert [i.component_uuid for i in skipped] == ["C2"]
@@ -1179,7 +1179,7 @@ def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
         '"DO NOT USE THIS CANDIDATE NUMBER."; reviewed 2026-11-23 via vulnflow'
     )
     t = FakeTransport({"GET /api/v1/analysis": Response(404, b"{}", {}), "PUT /api/v1/analysis": {}})
-    written, _, errs = apply_ignores(Http("http://dt", transport=t), items, "NOT_AFFECTED")
+    written, _, _, errs = apply_ignores(Http("http://dt", transport=t), items, "NOT_AFFECTED")
     assert errs == [] and len(written) == 1
     put = next(c for c in t.calls if c[0] == "PUT")
     assert json.loads(put[3])["comment"] == items[0].comment
@@ -1620,6 +1620,173 @@ def test_vendor_lookup_ubuntu_and_redhat(inv, tmp_path):
         VendorApi("ubuntu", "https://ubuntu.com", "security/cves/{cve}.json", tmp_path).record(
             "../../etc/passwd"
         )
+
+
+class FakeAnalysisApi:
+    """DT's /api/v1/analysis as a stateful fake: PUT replaces the analysis (and adds the comment),
+    GET returns it, 404 if none. `analyses` is keyed by component uuid."""
+
+    def __init__(self, analyses: dict[str, dict] | None = None, comments: bool = True):
+        self.analyses = analyses or {}
+        self.comments = comments
+        self.puts: list[dict] = []
+
+    def get(self, m, url, h, b):
+        comp = url.split("component=")[1].split("&")[0]
+        if comp not in self.analyses:
+            return Response(404, b'{"detail":"none"}', {})
+        return Response(200, json.dumps(self.analyses[comp]).encode(), {})
+
+    def put(self, m, url, h, b):
+        body = json.loads(b)
+        self.puts.append(body)
+        a = {"analysisState": body["analysisState"], "isSuppressed": body["isSuppressed"]}
+        if self.comments:
+            a["analysisComments"] = [{"comment": body["comment"]}]
+        self.analyses[body["component"]] = a
+        return Response(200, b"{}", {})
+
+    def http(self):
+        from vulnflow.net import Http
+
+        routes: dict[str, object] = {"GET /api/v1/analysis": self.get, "PUT /api/v1/analysis": self.put}
+        return Http("http://dt", transport=FakeTransport(routes))
+
+
+def _review(tmp_path, comps):
+    """A review file with one row per component uuid; returns the loaded items."""
+    from vulnflow.triage import load_review
+
+    rows = [
+        {
+            "team": "dev",
+            "project": "app",
+            "project_uuid": "P1",
+            "component": f"pkg-{c}",
+            "component_uuid": c,
+            "vuln_id": "CVE-2024-10001",
+            "vuln_uuid": "V1",
+            "reason": "Debian tracker: fixed in 1.0",
+        }
+        for c in comps
+    ]
+    f = tmp_path / "review.json"
+    f.write_text(json.dumps(rows), encoding="utf-8")
+    return load_review(f)
+
+
+def test_ignore_leaves_triaged_findings_alone_and_logs_what_it_replaced(tmp_path):
+    from vulnflow.triage import apply_ignores, outstanding
+
+    api = FakeAnalysisApi(
+        {
+            "C1": {"analysisState": "EXPLOITABLE", "isSuppressed": False},  # a human decided
+            "C3": {"analysisState": "IN_TRIAGE", "isSuppressed": False},
+        }
+    )
+    ledger = tmp_path / "data" / "ignored.jsonl"
+    items = _review(tmp_path, ["C1", "C2", "C3"])
+
+    written, _, kept, errors = apply_ignores(api.http(), items, "NOT_AFFECTED", ledger=ledger)
+    assert errors == []
+    assert [i.component_uuid for i in written] == ["C2"]  # nothing there before
+    assert [(k.item.component_uuid, k.state) for k in kept] == [
+        ("C1", "EXPLOITABLE"),
+        ("C3", "IN_TRIAGE"),
+    ]
+    assert [p["component"] for p in api.puts] == ["C2"]  # the triaged ones were never written
+    assert api.analyses["C1"]["analysisState"] == "EXPLOITABLE"
+
+    # --overwrite replaces them, and the ledger remembers what was there
+    written, _, kept, _ = apply_ignores(api.http(), items, "NOT_AFFECTED", overwrite=True, ledger=ledger)
+    assert [i.component_uuid for i in written] == ["C1", "C3"] and kept == []  # C2 is already done
+    prev = {r.component_uuid: (r.previous_state, r.previous_suppressed) for r in outstanding(ledger)}
+    assert prev == {"C2": ("NOT_SET", False), "C1": ("EXPLOITABLE", False), "C3": ("IN_TRIAGE", False)}
+
+
+def test_unignore_restores_the_previous_analysis_only_if_unchanged(tmp_path):
+    from vulnflow.triage import apply_ignores, apply_reverts, outstanding, plan_reverts
+
+    api = FakeAnalysisApi({"C1": {"analysisState": "IN_TRIAGE", "isSuppressed": True}})
+    ledger = tmp_path / "ignored.jsonl"
+    items = _review(tmp_path, ["C1", "C2", "C3"])
+    apply_ignores(api.http(), items, "NOT_AFFECTED", overwrite=True, ledger=ledger)
+    assert all(a["analysisState"] == "NOT_AFFECTED" and a["isSuppressed"] for a in api.analyses.values())
+
+    # between ignore and undo, somebody changes C3 on their own
+    api.analyses["C3"] = {"analysisState": "FALSE_POSITIVE", "isSuppressed": True}
+    api.puts.clear()
+
+    todo = plan_reverts(ledger)
+    assert [(t.component_uuid, t.previous_state, t.previous_suppressed) for t in todo] == [
+        ("C1", "IN_TRIAGE", True),
+        ("C2", "NOT_SET", False),
+        ("C3", "NOT_SET", False),
+    ]
+    reverted, skipped, errors = apply_reverts(api.http(), todo, ledger)
+    assert errors == []
+    assert [r.component_uuid for r in reverted] == ["C1", "C2"]
+    assert [(i.component_uuid, why) for i, why in skipped] == [
+        ("C3", "now FALSE_POSITIVE, suppressed: not as vulnflow left it (NOT_AFFECTED)")
+    ]
+    by_comp = {p["component"]: p for p in api.puts}
+    assert by_comp["C1"] == {
+        "project": "P1",
+        "component": "C1",
+        "vulnerability": "V1",
+        "analysisState": "IN_TRIAGE",
+        "comment": "Reverted via vulnflow: back to IN_TRIAGE (suppressed)",
+        "isSuppressed": True,
+    }
+    assert (by_comp["C2"]["analysisState"], by_comp["C2"]["isSuppressed"]) == ("NOT_SET", False)
+    assert "C3" not in by_comp and api.analyses["C3"]["analysisState"] == "FALSE_POSITIVE"
+    assert [o.component_uuid for o in outstanding(ledger)] == ["C3"]  # only the untouched one is left
+
+    # ignoring again after a revert counts once, with the latest previous state
+    apply_ignores(api.http(), items[:1], "NOT_AFFECTED", overwrite=True, ledger=ledger)
+    again = {o.component_uuid: o.previous_state for o in outstanding(ledger)}
+    assert again == {"C3": "NOT_SET", "C1": "IN_TRIAGE"}
+
+
+def test_unignore_from_a_review_file_checks_the_vulnflow_comment(tmp_path):
+    from vulnflow.triage import apply_ignores, apply_reverts, plan_reverts
+
+    ledger = tmp_path / "none.jsonl"  # no ledger: these were ignored before it existed
+    items = _review(tmp_path, ["C1", "C2"])
+    api = FakeAnalysisApi()
+    apply_ignores(
+        api.http(), items[:1], "NOT_AFFECTED"
+    )  # C1 written by vulnflow (comment has the marker)
+    api.analyses["C2"] = {  # C2 set to the same state by a person
+        "analysisState": "NOT_AFFECTED",
+        "isSuppressed": True,
+        "analysisComments": [{"comment": "not exposed, checked by hand"}],
+    }
+    api.puts.clear()
+    todo = plan_reverts(ledger, items)
+    assert [t.from_ledger for t in todo] == [False, False]
+    reverted, skipped, _ = apply_reverts(api.http(), todo)
+    assert [r.component_uuid for r in reverted] == ["C1"]
+    assert [(i.component_uuid, why) for i, why in skipped] == [
+        ("C2", "no comment ending 'via vulnflow': not written by vulnflow")
+    ]
+
+    # if DT returns no comment list at all the marker cannot be checked, so the state decides
+    quiet = FakeAnalysisApi(
+        {"C1": {"analysisState": "NOT_AFFECTED", "isSuppressed": True}}, comments=False
+    )
+    reverted, _, _ = apply_reverts(quiet.http(), plan_reverts(ledger, items[:1]))
+    assert [r.component_uuid for r in reverted] == ["C1"]
+
+
+def test_ledger_rejects_a_corrupt_line(tmp_path):
+    from vulnflow.triage import ReviewFileError, outstanding
+
+    ledger = tmp_path / "ignored.jsonl"
+    ledger.write_text('{"op": "ignore", "project_uuid": "P1"}\n', encoding="utf-8")
+    with pytest.raises(ReviewFileError, match="line 1"):
+        outstanding(ledger)
+    assert outstanding(tmp_path / "missing.jsonl") == []
 
 
 def test_suggest_subscriptions_from_dt_components():

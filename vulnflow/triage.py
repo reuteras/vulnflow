@@ -9,9 +9,15 @@ call came from. DefectDojo follows through the normal `dt2dojo` re-import.
 Needs an admin login (DT_ADMIN_PASSWORD, like `agent-bundle`), not the vulnflow team key:
 that key is what the unattended glue runs with and stays read-only.
 
-Dependency-Track API (ASSUMED from memory of the 5.x source, not checked against a tag):
+Every write is logged to a ledger (data/ignored.jsonl) with the analysis it replaced, so
+`vulnflow unignore` can put it back. `ignore` does not override a finding somebody has
+already triaged (any state other than unset) unless asked to; `unignore` only reverts a
+finding that is still exactly as vulnflow left it.
+
+Dependency-Track API (ASSUMED from memory of the 5.x source; `PUT` and the `GET` fields
+`analysisState`/`isSuppressed` have been run against a real instance, the rest has not):
   GET /api/v1/analysis?project=&component=&vulnerability=   current analysis (404 or empty
-      if none)
+      if none); analysisComments[] {comment} is ASSUMED
   PUT /api/v1/analysis  {"project","component","vulnerability" (UUIDs), "analysisState",
       "analysisJustification" (optional), "comment", "isSuppressed"}
 """
@@ -20,8 +26,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +36,8 @@ from .net import Http
 log = logging.getLogger(__name__)
 
 STATES = ("NOT_AFFECTED", "FALSE_POSITIVE")
+UNSET = ("", "NOT_SET")
+MARKER = "via vulnflow"  # ends every comment `ignore` writes
 REQUIRED = (
     "team",
     "project",
@@ -116,11 +124,8 @@ def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
     return list(items.values())
 
 
-def current_analysis(http: Http, item: IgnoreItem) -> dict[str, Any]:
-    path = (
-        f"api/v1/analysis?project={item.project_uuid}"
-        f"&component={item.component_uuid}&vulnerability={item.vuln_uuid}"
-    )
+def current_analysis(http: Http, project: str, component: str, vulnerability: str) -> dict[str, Any]:
+    path = f"api/v1/analysis?project={project}&component={component}&vulnerability={vulnerability}"
     r = http.get(path, expect_ok=False)
     if r.status == 404:
         return {}
@@ -129,34 +134,199 @@ def current_analysis(http: Http, item: IgnoreItem) -> dict[str, Any]:
     return r.json() or {}
 
 
+@dataclass
+class Kept:
+    item: IgnoreItem
+    state: str  # what somebody had already set
+
+
+def _put_body(it: IgnoreItem | RevertItem, state: str, comment: str, suppressed: bool) -> dict[str, Any]:
+    return {
+        "project": it.project_uuid,
+        "component": it.component_uuid,
+        "vulnerability": it.vuln_uuid,
+        "analysisState": state,
+        "comment": comment,
+        "isSuppressed": suppressed,
+    }
+
+
 def apply_ignores(
-    http: Http, items: list[IgnoreItem], state: str, justification: str | None = None
-) -> tuple[list[IgnoreItem], list[IgnoreItem], list[str]]:
-    """(written, already in that state, errors). Rewriting an identical analysis would only
-    add a duplicate comment, so those are left alone."""
+    http: Http,
+    items: list[IgnoreItem],
+    state: str,
+    justification: str | None = None,
+    *,
+    overwrite: bool = False,
+    ledger: Path | None = None,
+) -> tuple[list[IgnoreItem], list[IgnoreItem], list[Kept], list[str]]:
+    """(written, already in that state, kept because somebody already triaged them, errors).
+    Rewriting an identical analysis would only add a duplicate comment, so those are left
+    alone; a different existing analysis is left alone too unless `overwrite`. Each write
+    goes to the ledger together with the analysis it replaced."""
     if state not in STATES:
         raise ValueError(f"state must be one of {STATES}")
     written: list[IgnoreItem] = []
     skipped: list[IgnoreItem] = []
+    kept: list[Kept] = []
     errors: list[str] = []
     for it in items:
         try:
-            cur = current_analysis(http, it)
-            if cur.get("analysisState") == state and cur.get("isSuppressed"):
+            cur = current_analysis(http, it.project_uuid, it.component_uuid, it.vuln_uuid)
+            cur_state = str(cur.get("analysisState") or "")
+            if cur_state == state and cur.get("isSuppressed"):
                 skipped.append(it)
                 continue
-            body: dict[str, Any] = {
-                "project": it.project_uuid,
-                "component": it.component_uuid,
-                "vulnerability": it.vuln_uuid,
-                "analysisState": state,
-                "comment": it.comment,
-                "isSuppressed": True,
-            }
+            if cur_state not in (*UNSET, state) and not overwrite:
+                kept.append(Kept(it, cur_state))
+                continue
+            body = _put_body(it, state, it.comment, True)
             if justification:
                 body["analysisJustification"] = justification
             http.put("api/v1/analysis", json_body=body)
             written.append(it)
+            if ledger is not None:
+                _append(
+                    ledger,
+                    {
+                        "op": "ignore",
+                        **asdict(it),
+                        "state": state,
+                        "previous_state": cur_state or "NOT_SET",
+                        "previous_suppressed": bool(cur.get("isSuppressed")),
+                    },
+                )
         except Exception as e:
             errors.append(f"{it.team}/{it.project}: {it.component} {it.vuln_id}: {e}")
-    return written, skipped, errors
+    return written, skipped, kept, errors
+
+
+# ------------------------------------------------------------------------------- undo
+@dataclass
+class RevertItem:
+    team: str
+    project: str
+    project_uuid: str
+    component: str
+    component_uuid: str
+    vuln_id: str
+    vuln_uuid: str
+    expected_state: str  # what vulnflow set, and so what must still be there
+    previous_state: str = "NOT_SET"  # what to put back
+    previous_suppressed: bool = False
+    from_ledger: bool = False
+
+
+def _append(ledger: Path, entry: dict[str, Any]) -> None:
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    entry["at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    with ledger.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _key(e: dict[str, Any]) -> tuple[str, str, str]:
+    return str(e["project_uuid"]), str(e["component_uuid"]), str(e["vuln_uuid"])
+
+
+def outstanding(ledger: Path) -> list[RevertItem]:
+    """Ledger entries that were written and not reverted since, oldest first. A finding that
+    was ignored twice (after a revert) counts once, with its latest previous state."""
+    live: dict[tuple[str, str, str], RevertItem] = {}
+    if not ledger.is_file():
+        return []
+    for n, line in enumerate(ledger.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+            k = _key(e)
+        except (json.JSONDecodeError, KeyError, TypeError) as err:
+            raise ReviewFileError(f"{ledger}: line {n} is not a ledger entry ({err})") from err
+        if e.get("op") == "revert":
+            live.pop(k, None)
+        elif e.get("op") == "ignore":
+            live[k] = RevertItem(
+                team=str(e.get("team", "")),
+                project=str(e.get("project", "")),
+                project_uuid=k[0],
+                component=str(e.get("component", "")),
+                component_uuid=k[1],
+                vuln_id=str(e.get("vuln_id", "")),
+                vuln_uuid=k[2],
+                expected_state=str(e.get("state", "")),
+                previous_state=str(e.get("previous_state") or "NOT_SET"),
+                previous_suppressed=bool(e.get("previous_suppressed")),
+                from_ledger=True,
+            )
+    return list(live.values())
+
+
+def plan_reverts(
+    ledger: Path, rows: list[IgnoreItem] | None = None, state: str = "NOT_AFFECTED"
+) -> list[RevertItem]:
+    """What to undo: every outstanding ledger entry, or, with a review file, just those rows
+    (a row that is not in the ledger, e.g. ignored before it existed, goes back to unset)."""
+    logged = {(r.project_uuid, r.component_uuid, r.vuln_uuid): r for r in outstanding(ledger)}
+    if rows is None:
+        return list(logged.values())
+    out: list[RevertItem] = []
+    for it in rows:
+        k = (it.project_uuid, it.component_uuid, it.vuln_uuid)
+        out.append(
+            logged.get(k)
+            or RevertItem(
+                it.team,
+                it.project,
+                it.project_uuid,
+                it.component,
+                it.component_uuid,
+                it.vuln_id,
+                it.vuln_uuid,
+                expected_state=state,
+            )
+        )
+    return out
+
+
+def apply_reverts(
+    http: Http, items: list[RevertItem], ledger: Path | None = None
+) -> tuple[list[RevertItem], list[tuple[RevertItem, str]], list[str]]:
+    """(reverted, skipped with the reason, errors). Only a finding that is still suppressed
+    and in the state vulnflow set is touched, so a later human decision is never undone."""
+    reverted: list[RevertItem] = []
+    skipped: list[tuple[RevertItem, str]] = []
+    errors: list[str] = []
+    for it in items:
+        try:
+            cur = current_analysis(http, it.project_uuid, it.component_uuid, it.vuln_uuid)
+            cur_state = str(cur.get("analysisState") or "")
+            if not (cur.get("isSuppressed") and cur_state == it.expected_state):
+                now = (cur_state or "NOT_SET") + (", suppressed" if cur.get("isSuppressed") else "")
+                skipped.append((it, f"now {now}: not as vulnflow left it ({it.expected_state})"))
+                continue
+            comments = cur.get("analysisComments")
+            if not it.from_ledger and isinstance(comments, list):
+                texts = [str(c.get("comment", "")) for c in comments if isinstance(c, dict)]
+                if not any(MARKER in t for t in texts):
+                    skipped.append((it, f"no comment ending '{MARKER}': not written by vulnflow"))
+                    continue
+            back = it.previous_state
+            note = "Reverted via vulnflow: back to " + back
+            if it.previous_suppressed:
+                note += " (suppressed)"
+            http.put("api/v1/analysis", json_body=_put_body(it, back, note, it.previous_suppressed))
+            reverted.append(it)
+            if ledger is not None:
+                _append(
+                    ledger,
+                    {
+                        "op": "revert",
+                        "project_uuid": it.project_uuid,
+                        "component_uuid": it.component_uuid,
+                        "vuln_uuid": it.vuln_uuid,
+                        "restored_state": back,
+                    },
+                )
+        except Exception as e:
+            errors.append(f"{it.team}/{it.project}: {it.component} {it.vuln_id}: {e}")
+    return reverted, skipped, errors
