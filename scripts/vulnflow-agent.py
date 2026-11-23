@@ -99,7 +99,8 @@ PODMAN_SOCKET_HINT = "is the podman socket on? (systemctl enable --now podman.so
 # Forgejo/act runner job containers (`<prefix>_WORKFLOW-<sha256>_JOB-<name>`) only live while
 # a workflow runs; they are not part of the host
 RUNNER_JOB_RE = re.compile(r"(^|_)WORKFLOW-[0-9a-f]{64}(_|$)")
-# rootless podman images are exported here for syft; on disk, /tmp is often a tmpfs
+# syft's TMPDIR (it unpacks a docker/podman image there) and rootless podman's image
+# archives; on disk, because /tmp is often a tmpfs smaller than a large image (Debian 13)
 ARCHIVE_DIR = "/var/tmp"  # noqa: S108 - only as mkdtemp() parent (private 700 dir)
 # relative to $HOME; plus `npm root -g` when npm exists
 DEFAULT_LANGUAGE_PATHS = (
@@ -174,8 +175,12 @@ def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
     exe = which("syft")
     if not exe:
         raise ScanError("syft not installed")
-    env = {**os.environ, "PATH": search_path(), **SYFT_ENV}
-    code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json", "-q"], env=env)
+    work = tempfile.mkdtemp(prefix="vulnflow-syft-", dir=ARCHIVE_DIR)
+    try:
+        env = {**os.environ, "PATH": search_path(), **SYFT_ENV, "TMPDIR": work}
+        code, out, err = run([exe, "scan", target, *extra, "-o", "cyclonedx-json", "-q"], env=env)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     if code != 0:
         raise ScanError(f"syft {target} failed ({code}): {err.strip()[:300]}")
     return parse_docs(out)
