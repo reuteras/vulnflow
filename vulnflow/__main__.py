@@ -489,18 +489,26 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        rows, unknown, errors = patched_findings(inv, dt, a.team, osv=OSV() if a.osv else None)
+        rows, unknown, unversioned, errors = patched_findings(
+            inv, dt, a.team, osv=OSV() if a.osv else None
+        )
         if a.json:
             print(json.dumps([asdict(r) for r in rows], indent=2))
         else:
             for r in rows:
                 print(
                     f"{r.severity or '-':8} {r.team}/{r.project}: {r.component} {r.version} "
-                    f"{r.vuln_id} -> {r.patched}{' (osv)' if r.via == 'osv' else ''}"
+                    f"{r.vuln_id} -> {r.recommended or r.patched}{' (osv)' if r.via == 'osv' else ''}"
                 )
         print(
             f"  {len(rows)} finding(s) with a patched release; {unknown} without a recorded fix "
-            "(unknown, not 'no fix')",
+            "(unknown, not 'no fix')"
+            + (
+                f"; {unversioned} skipped: component version unknown (the SBOM tool could not "
+                "resolve it, so every CVE of the package matches; fix the SBOM, not the package)"
+                if unversioned
+                else ""
+            ),
             file=sys.stderr,
         )
         for msg in errors:

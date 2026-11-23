@@ -900,7 +900,7 @@ def test_patched_findings_lists_only_recorded_fixes(inv):
 
     t = FakeTransport({"GET /api/v1/": route})
     dt = DependencyTrack("http://dt", "k", transport=t)
-    rows, unknown, errors = patched_findings(inv, dt)
+    rows, unknown, _, errors = patched_findings(inv, dt)
     assert errors == []
     assert [(r.team, r.project, r.vuln_id, r.patched) for r in rows] == [
         ("dev", "app", "GHSA-fixed", "2.31.0")
@@ -952,11 +952,11 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
 
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
 
-    rows, unknown, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
+    rows, unknown, _, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
     assert rows == [] and unknown == 1
 
     osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
+    rows, unknown, _, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
     assert errors == [] and unknown == 0
     assert [(r.vuln_id, r.patched, r.via) for r in rows] == [("CVE-2024-1", "2.31.0", "osv")]
     method, url, _, body = osv_t.calls[0]
@@ -1288,6 +1288,75 @@ def test_debian_fix_actions_and_ignore_comment(inv, tmp_path):
         "Debian tracker: fixed in 5.36.0-7+deb12u2, installed 5.36.0-7+deb12u4 is not older in "
         "bookworm, source package perl; reviewed 2026-11-23 via vulnflow"
     )
+
+
+def test_recommend_picks_the_fix_for_the_installed_branch():
+    from vulnflow.versions import recommend
+
+    minimatch = ["10.2.1", "9.0.6", "8.0.5", "7.4.7", "6.2.1", "5.1.7", "4.2.4", "3.1.3"]
+    assert recommend("9.0.3", minimatch) == "9.0.6"
+    assert recommend("3.1.2", minimatch) == "3.1.3"
+    assert recommend("go1.23.3", ["1.23.12", "1.24.6"]) == "1.23.12"
+    assert recommend("go1.24.4", ["1.25.12", "1.26.5", "1.27.0-rc.2"]) == "1.25.12"  # branch gone
+    assert recommend("8.3.2", ["11.1.1", "12.0.1", "13.0.1"]) == "11.1.1"  # no fix on 8.x
+    assert recommend("v0.31.0", ["0.45.0", "0.52.0"]) == "0.45.0"
+    assert recommend("1.0.0-rc1", ["1.0.0"]) == "1.0.0"  # pre-release is older than the release
+    assert recommend("2.3.0", ["2.6.0", "2.8.0"]) == "2.6.0"
+    assert recommend("2.7.0", ["2.6.0"]) == ""  # nothing newer
+    assert recommend("UNKNOWN", ["1.0"]) == "" and recommend("1.0", ["abc"]) == ""
+
+
+def test_patches_skips_osv_for_unknown_component_versions(inv):
+    from vulnflow.clients import OSV
+    from vulnflow.patches import patched_findings
+
+    def finding(name, version, cve):
+        return {
+            "component": {"name": name, "version": version, "purl": f"pkg:golang/{name}@{version}"},
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "MEDIUM"},
+            "analysis": {},
+        }
+
+    findings = [
+        finding("github.com/grafana/grafana", "UNKNOWN", "CVE-2018-1"),
+        finding("github.com/grafana/grafana", "UNKNOWN", "CVE-2018-2"),
+        finding("minimatch", "9.0.3", "CVE-2026-1"),
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "app", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/p1" in url:
+            return Response(200, json.dumps(findings).encode(), {})
+        return Response(200, json.dumps({"patchedVersions": ""}).encode(), {})
+
+    osv_vulns = [
+        {
+            "id": "GHSA-m",
+            "aliases": ["CVE-2026-1"],
+            "affected": [
+                {
+                    "package": {"name": "minimatch"},
+                    "ranges": [
+                        {"events": [{"fixed": "10.2.1"}, {"fixed": "9.0.6"}, {"fixed": "3.1.3"}]}
+                    ],
+                }
+            ],
+        }
+    ]
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
+    rows, unknown, unversioned, errors = patched_findings(
+        inv, dt, osv=OSV("https://osv.test", transport=osv_t)
+    )
+    assert errors == [] and unknown == 0 and unversioned == 2
+    assert [(r.vuln_id, r.recommended, r.patched) for r in rows] == [
+        ("CVE-2026-1", "9.0.6", "10.2.1, 9.0.6, 3.1.3")
+    ]
+    assert [json.loads(c[3])["package"]["purl"] for c in osv_t.calls] == ["pkg:golang/minimatch@9.0.3"]
 
 
 def test_suggest_subscriptions_from_dt_components():
