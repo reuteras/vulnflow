@@ -1107,8 +1107,11 @@ def test_disputed_marker_must_lead_the_description():
         "DISPUTED",
         "A flaw in foo. Vendor says no.",
     )
-    assert disputed_marker("  ** reject ** DO NOT USE THIS CANDIDATE NUMBER.")[0] == "REJECT"
-    assert disputed_marker("** REJECTED ** withdrawn")[0] == "REJECT"
+    assert disputed_marker("  ** reject ** DO NOT USE THIS CANDIDATE NUMBER.") == (
+        "REJECT",
+        "DO NOT USE THIS CANDIDATE NUMBER.",
+    )
+    assert disputed_marker("** REJECTED ** withdrawn") == ("REJECT", "withdrawn")
     assert disputed_marker("A flaw in foo. ** DISPUTED ** appears later") is None
     assert disputed_marker("") is None and disputed_marker("plain description") is None
 
