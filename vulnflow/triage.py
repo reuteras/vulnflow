@@ -84,6 +84,16 @@ def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
             )
         if str(row.get("reason") or "").strip():
             comment = f"{str(row['reason']).strip()}; reviewed {day} via vulnflow"
+        elif row.get("action") == "fixed" and row.get("fixed") and row.get("installed"):
+            # installed version is the fix or newer: NVD's upstream range ignores backports
+            if str(row["fixed"]) == "0":
+                what = "not affected (Debian fixed_version 0)"
+            else:
+                what = f"fixed in {row['fixed']}, installed {row['installed']} is not older"
+            comment = (
+                f"Debian tracker: {what} in {row['release']}, source package "
+                f"{row['package']}; reviewed {day} via vulnflow"
+            )
         else:
             status = str(row.get("status") or "")
             comment = (

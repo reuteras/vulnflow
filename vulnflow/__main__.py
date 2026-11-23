@@ -329,6 +329,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="only entries Debian rates unimportant or end-of-life",
     )
+    db.add_argument(
+        "--action",
+        choices=("update", "fixed", "no-fix", "unknown"),
+        default=None,
+        help="only update (a newer package fixes it), fixed (already fixed in the installed "
+        "version: backport, candidates for `ignore`), no-fix or unknown",
+    )
 
     dp = sub.add_parser(
         "disputed",
@@ -528,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if errors else 0
 
     if a.cmd == "debian":
-        from .debian import DebianTracker, debian_findings
+        from .debian import ACTIONS, DebianTracker, debian_findings
 
         if a.team and a.team not in inv.teams:
             print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
@@ -544,18 +551,23 @@ def main(argv: list[str] | None = None) -> int:
             release=a.release,
             ignorable_only=a.ignorable,
         )
+        shown = [r for r in drows if not a.action or r.action == a.action]
         if a.json:
-            print(json.dumps([asdict(r) for r in drows], indent=2))
+            print(json.dumps([asdict(r) for r in shown], indent=2))
         else:
-            for drow in drows:
+            for drow in shown:
                 print(
-                    f"{drow.urgency or '-':16} {drow.status or '-':12} {drow.team}/{drow.project}: "
-                    f"{drow.component} {drow.version} {drow.vuln_id} "
-                    f"({drow.package}, {drow.release}) fixed: {drow.fixed or '-'}"
+                    f"{drow.urgency or '-':16} {drow.action:8} {drow.team}/{drow.project}: "
+                    f"{drow.component} {drow.installed or drow.version} {drow.vuln_id} "
+                    f"({drow.package}, {drow.release}) fix: {drow.fixed or '-'}"
                 )
+        by_action = {k: sum(1 for r in drows if r.action == k) for k in ACTIONS}
         print(
-            f"  {len(drows)} finding(s) with a Debian tracker entry; {unmatched} CVE finding(s) "
-            "on Debian components without one (no match, or release unknown: try --release)",
+            f"  {len(drows)} finding(s) with a Debian tracker entry"
+            f"{f', {len(shown)} shown' if a.action else ''}: "
+            + ", ".join(f"{n} {k}" for k, n in by_action.items())
+            + f"; {unmatched} CVE finding(s) on Debian components without an entry "
+            "(no match, or release unknown: try --release)",
             file=sys.stderr,
         )
         for msg in errors:

@@ -1185,6 +1185,111 @@ def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
     assert json.loads(put[3])["comment"] == items[0].comment
 
 
+def test_debian_version_order_matches_dpkg():
+    from vulnflow.debver import compare
+
+    older_first = [
+        ("1.0~~", "1.0~"),
+        ("1.0~", "1.0"),
+        ("1.0~rc1", "1.0"),
+        ("1.0", "1.0+b1"),
+        ("1.0", "1.0a"),
+        ("1.9", "1.10"),
+        ("1.0", "1.0-1"),
+        ("1.0-1~bpo12+1", "1.0-1"),
+        ("1.0-1", "1.0-1+b1"),
+        ("5.36.0-7+deb12u4", "5.36.0-7+deb12u5"),
+        ("5.36.0-7+deb12u4", "5.36.0-7+deb12u10"),
+        ("2.0", "1:1.0"),
+    ]
+    for a, b in older_first:
+        assert compare(a, b) == -1 and compare(b, a) == 1, (a, b)
+    assert compare("1.00", "1.0") == 0 and compare("0:1.0", "1.0") == 0
+
+
+def test_debian_fix_actions_and_ignore_comment(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.debian import DebianTracker, debian_findings, fix_action, installed_version
+    from vulnflow.triage import load_review
+
+    assert (
+        installed_version("pkg:deb/debian/libssl3t64@3.5.4-1?upstream=openssl%403.5.4-2", "3.5.4-1")
+        == "3.5.4-2"
+    )
+    assert installed_version("pkg:deb/debian/acl@2.3", "2.3") == "2.3"
+    assert fix_action("1.0-1", "resolved", "1.0-2") == "update"
+    assert fix_action("1.0-2", "resolved", "1.0-2") == "fixed"
+    assert fix_action("1.0-3", "resolved", "1.0-2") == "fixed"
+    assert fix_action("1.0-1", "resolved", "0") == "fixed"  # never affected
+    assert fix_action("1.0-1", "open", "") == "no-fix"
+    assert fix_action("1.0-1", "resolved", "") == "unknown"
+    assert fix_action("2.0-1", "resolved", "1:1.0-1") == "unknown"  # epoch on one side only
+    assert fix_action("", "resolved", "1.0") == "unknown"
+
+    def finding(cve, ver):
+        purl = f"pkg:deb/debian/perl@{ver}?distro=debian-12"
+        return {
+            "component": {"name": "perl", "version": ver, "purl": purl, "uuid": "c-perl"},
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH", "uuid": f"v-{cve}"},
+            "analysis": {},
+        }
+
+    doc = {
+        "perl": {
+            "CVE-2024-1": {
+                "releases": {
+                    "bookworm": {
+                        "status": "resolved",
+                        "urgency": "medium",
+                        "fixed_version": "5.36.0-7+deb12u5",
+                    }
+                }
+            },
+            "CVE-2024-2": {
+                "releases": {
+                    "bookworm": {
+                        "status": "resolved",
+                        "urgency": "low",
+                        "fixed_version": "5.36.0-7+deb12u2",
+                    }
+                }
+            },
+            "CVE-2024-3": {"releases": {"bookworm": {"status": "open", "urgency": "unimportant"}}},
+        }
+    }
+    findings = [finding(c, "5.36.0-7+deb12u4") for c in ("CVE-2024-1", "CVE-2024-2", "CVE-2024-3")]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            return Response(
+                200, json.dumps([{"uuid": "p1", "name": "app", "active": True}]).encode(), {}
+            )
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    tracker = DebianTracker(tmp_path, transport=FakeTransport({"GET /tracker/data/json": doc}))
+    rows, _, errors = debian_findings(inv, dt, tracker)
+    assert errors == []
+    assert {r.vuln_id: (r.action, r.installed, r.fixed) for r in rows} == {
+        "CVE-2024-1": ("update", "5.36.0-7+deb12u4", "5.36.0-7+deb12u5"),
+        "CVE-2024-2": ("fixed", "5.36.0-7+deb12u4", "5.36.0-7+deb12u2"),
+        "CVE-2024-3": ("no-fix", "5.36.0-7+deb12u4", ""),
+    }
+
+    # a row that is already fixed gets a comment that says why NVD is wrong here
+    fixed_row = next(r for r in rows if r.action == "fixed")
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps([asdict(fixed_row)]), encoding="utf-8")
+    comment = load_review(review, today=date(2026, 11, 23))[0].comment
+    assert comment == (
+        "Debian tracker: fixed in 5.36.0-7+deb12u2, installed 5.36.0-7+deb12u4 is not older in "
+        "bookworm, source package perl; reviewed 2026-11-23 via vulnflow"
+    )
+
+
 def test_suggest_subscriptions_from_dt_components():
     from vulnflow.clients import DependencyTrack
     from vulnflow.subscriptions import suggest
