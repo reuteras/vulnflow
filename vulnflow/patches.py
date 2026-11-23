@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from .clients import OSV, DependencyTrack
+from .clients import OSV, DependencyTrack, DTProject
 from .config import Inventory
 
 log = logging.getLogger(__name__)
@@ -36,8 +36,8 @@ class PatchedFinding:
 
 def open_findings(
     inv: Inventory, dt: DependencyTrack, team: str | None, errors: list[str]
-) -> Iterator[tuple[str, str, dict[str, Any]]]:
-    """(team key, project name, finding) for every unsuppressed finding of the teams'
+) -> Iterator[tuple[str, DTProject, dict[str, Any]]]:
+    """(team key, project, finding) for every unsuppressed finding of the teams'
     active projects. Per-project failures go to `errors` and the walk carries on."""
     for key, t in sorted(inv.teams.items()):
         if team and key != team:
@@ -55,7 +55,7 @@ def open_findings(
                 continue
             for f in findings:
                 if not (f.get("analysis") or {}).get("isSuppressed"):
-                    yield key, p.name, f
+                    yield key, p, f
 
 
 def patched_findings(
@@ -67,7 +67,7 @@ def patched_findings(
     unknown = 0
     cache: dict[tuple[str, str], str] = {}
     osv_cache: dict[str, list[dict[str, Any]] | None] = {}
-    for key, project, f in open_findings(inv, dt, team, errors):
+    for key, proj, f in open_findings(inv, dt, team, errors):
         v: dict[str, Any] = f.get("vulnerability") or {}
         src, vid = v.get("source", ""), v.get("vulnId", "")
         if not src or not vid:
@@ -99,7 +99,7 @@ def patched_findings(
         rows.append(
             PatchedFinding(
                 team=key,
-                project=project,
+                project=proj.name,
                 component=c.get("name", ""),
                 version=c.get("version", ""),
                 source=src,

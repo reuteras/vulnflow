@@ -975,8 +975,8 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
 
     def finding(name, purl, cve):
         return {
-            "component": {"name": name, "version": "1", "purl": purl},
-            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH"},
+            "component": {"name": name, "version": "1", "purl": purl, "uuid": f"c-{name}"},
+            "vulnerability": {"source": "NVD", "vulnId": cve, "severity": "HIGH", "uuid": f"v-{cve}"},
             "analysis": {},
         }
 
@@ -1018,6 +1018,11 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
         ("CVE-2024-2", "high", "resolved", "3.5.5-1", "openssl", "trixie"),
         ("CVE-2024-1", "unimportant", "open", "", "openssl", "trixie"),
     ]
+    assert (rows[0].project_uuid, rows[0].component_uuid, rows[0].vuln_uuid) == (
+        "p1",
+        "c-libssl3t64",
+        "v-CVE-2024-2",
+    )
     assert unmatched == 2  # CVE-2024-3 (not listed) and the acl finding (release unknown)
     assert [c[1] for c in tt.calls] == ["https://security-tracker.debian.org/tracker/data/json"]
 
@@ -1026,6 +1031,72 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
     forced, _, _ = debian_findings(inv, dt, tracker, release="bookworm")
     assert [(r.vuln_id, r.urgency) for r in forced] == [("CVE-2024-2", "low")]
     assert len(tt.calls) == 1  # one download, then the in-memory index
+
+
+def test_ignore_writes_reviewed_findings_to_dt_once(tmp_path):
+    from datetime import date
+
+    from vulnflow.net import Http
+    from vulnflow.triage import ReviewFileError, apply_ignores, load_review
+
+    row = {
+        "team": "dev",
+        "project": "app",
+        "project_uuid": "P1",
+        "component": "libssl3t64",
+        "version": "3.5.4",
+        "component_uuid": "C1",
+        "vuln_id": "CVE-2024-1",
+        "vuln_uuid": "V1",
+        "urgency": "unimportant",
+        "status": "open",
+        "release": "trixie",
+        "package": "openssl",
+    }
+    other = {**row, "component_uuid": "C2", "component": "libcrypto3", "vuln_uuid": "V2"}
+    f = tmp_path / "review.json"
+    f.write_text(json.dumps([row, row, other]), encoding="utf-8")  # row twice: deduplicated
+
+    items = load_review(f, today=date(2026, 11, 23))
+    assert [(i.component_uuid, i.vuln_uuid) for i in items] == [("C1", "V1"), ("C2", "V2")]
+    assert items[0].comment == (
+        "Debian tracker: unimportant (open) in trixie, source package openssl; "
+        "reviewed 2026-11-23 via vulnflow"
+    )
+
+    state = {"C2": {"analysisState": "NOT_AFFECTED", "isSuppressed": True}}  # already done
+
+    def get_route(m, url, h, b):
+        for comp, cur in state.items():
+            if f"component={comp}&" in url:
+                return Response(200, json.dumps(cur).encode(), {})
+        return Response(404, b'{"detail":"none"}', {})
+
+    t = FakeTransport({"GET /api/v1/analysis": get_route, "PUT /api/v1/analysis": {}})
+    http = Http("http://dt", transport=t)
+    written, skipped, errors = apply_ignores(http, items, "NOT_AFFECTED", "REQUIRES_ENVIRONMENT")
+    assert errors == []
+    assert [i.component_uuid for i in written] == ["C1"]
+    assert [i.component_uuid for i in skipped] == ["C2"]
+    puts = [c for c in t.calls if c[0] == "PUT"]
+    assert len(puts) == 1 and puts[0][1] == "http://dt/api/v1/analysis"
+    assert json.loads(puts[0][3]) == {
+        "project": "P1",
+        "component": "C1",
+        "vulnerability": "V1",
+        "analysisState": "NOT_AFFECTED",
+        "comment": items[0].comment,
+        "isSuppressed": True,
+        "analysisJustification": "REQUIRES_ENVIRONMENT",
+    }
+
+    # a bad row rejects the whole file, nothing is half-applied
+    f.write_text(json.dumps([row, {**row, "vuln_uuid": ""}]), encoding="utf-8")
+    with pytest.raises(ReviewFileError, match=r"row 1.*vuln_uuid"):
+        load_review(f)
+    f.write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(ReviewFileError):
+        load_review(f)
 
 
 def test_suggest_subscriptions_from_dt_components():

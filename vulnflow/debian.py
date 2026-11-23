@@ -63,6 +63,10 @@ class DebianFinding:
     status: str
     urgency: str
     fixed: str
+    # what `ignore` needs to write an analysis back to Dependency-Track
+    project_uuid: str = ""
+    component_uuid: str = ""
+    vuln_uuid: str = ""
 
 
 class DebianTracker:
@@ -150,7 +154,7 @@ def debian_findings(
         tracker.index()
     except Exception as e:
         return [], 0, [f"Debian tracker: {e}"]
-    for key, project, f in open_findings(inv, dt, team, errors):
+    for key, proj, f in open_findings(inv, dt, team, errors):
         v: dict[str, Any] = f.get("vulnerability") or {}
         vid = str(v.get("vulnId") or "")
         c: dict[str, Any] = f.get("component") or {}
@@ -167,7 +171,7 @@ def debian_findings(
         rows.append(
             DebianFinding(
                 team=key,
-                project=project,
+                project=proj.name,
                 component=c.get("name", ""),
                 version=c.get("version", ""),
                 vuln_id=vid,
@@ -177,6 +181,9 @@ def debian_findings(
                 status=info.status,
                 urgency=info.urgency,
                 fixed=info.fixed,
+                project_uuid=proj.uuid,
+                component_uuid=str(c.get("uuid") or ""),
+                vuln_uuid=str(v.get("uuid") or ""),
             )
         )
     rank = {u: i for i, u in enumerate(_URGENCY_ORDER)}

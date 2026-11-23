@@ -1,5 +1,6 @@
-"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,upload-sbom,machines,agent-bundle,
-agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,opencve-webhook-input,env-set}"""
+"""CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,ignore,upload-sbom,
+machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
+opencve-webhook-input,env-set}"""
 
 from __future__ import annotations
 
@@ -168,6 +169,37 @@ def _env_set(env_file: str) -> int:
     return 0
 
 
+def _ignore(a: argparse.Namespace) -> int:
+    from .bootstrap import BootstrapError, dt_admin_http
+    from .triage import ReviewFileError, apply_ignores, load_review
+
+    try:
+        items = load_review(a.review)
+    except ReviewFileError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 2
+    for it in items:
+        print(f"  {it.team}/{it.project}: {it.component} {it.version} {it.vuln_id} -> {a.state}")
+        print(f"      comment: {it.comment}")
+    if not a.apply:
+        print(
+            f"  dry run: {len(items)} finding(s) would be set to {a.state} and suppressed; add --apply"
+        )
+        return 0
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    written, skipped, errors = apply_ignores(admin, items, a.state, a.justification)
+    print(f"  {len(written)} written, {len(skipped)} already {a.state} and suppressed")
+    for msg in errors:
+        print(f"  error {msg}", file=sys.stderr)
+    return 1 if errors else 0
+
+
 def _agent_dt_url() -> str:
     url = env("VULNFLOW_AGENT_DT_URL") or env("DT_PUBLIC_API_URL") or env("DT_URL")
     if "localhost" in url or "127.0.0.1" in url:
@@ -297,6 +329,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="only entries Debian rates unimportant or end-of-life",
     )
+
+    ig = sub.add_parser(
+        "ignore",
+        help="mark reviewed findings (a file edited down from `debian --json`) as not affected "
+        "in Dependency-Track; dry run unless --apply",
+    )
+    ig.add_argument("--from", dest="review", required=True, type=Path, metavar="FILE")
+    ig.add_argument("--apply", action="store_true", help="write to Dependency-Track")
+    ig.add_argument("--state", choices=("NOT_AFFECTED", "FALSE_POSITIVE"), default="NOT_AFFECTED")
+    ig.add_argument("--justification", default=None, help="DT analysisJustification, optional")
 
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
     u.add_argument("--team", required=True)
@@ -450,6 +492,9 @@ def main(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
+
+    if a.cmd == "ignore":
+        return _ignore(a)
 
     if a.cmd == "debian":
         from .debian import DebianTracker, debian_findings
