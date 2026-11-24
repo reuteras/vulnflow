@@ -7,11 +7,16 @@ and the old version's findings stayed open for ever. `prune` fixes both, for the
 the agents create (tagged `kind-*`), grouped by name and host (`host-*` tag; `host:<name>`
 projects are one group each):
 
-- carry forward: a NOT_AFFECTED or FALSE_POSITIVE, suppressed analysis on one version is
-  copied to the other active versions of the group, for the same component (identical
-  package URL, i.e. the same build) and the same vulnerability, where nobody has triaged
-  the finding yet. The newest decision wins. The comment says where it came from and ends
-  "via vulnflow", so `unignore --from` can revert a copy (back to NOT_SET).
+- carry forward: a suppressed decision on one version (NOT_AFFECTED, FALSE_POSITIVE, or an
+  accepted risk: EXPLOITABLE with response WILL_NOT_FIX or CAN_NOT_FIX) is copied to the
+  other active versions of the group, for the same component (identical package URL, i.e.
+  the same build) and the same vulnerability, where nobody has triaged the finding yet. The
+  newest decision wins; state, justification, response and comment go along. The comment
+  says where it came from and ends "via vulnflow", so `unignore --from` can revert a copy.
+- review dates: a suppressed decision whose comment says "review by YYYY-MM-DD" (`ignore
+  --review-by`) is unsuppressed after that day, so it shows up again in the lists and, at
+  the next export, in DefectDojo. That is the expiry DT's analyses lack, and why accepted
+  risks live in DT: DefectDojo's own risk acceptances stay with one version's test.
 - deactivate: a project whose last upload is older than `superseded_days` while a newer
   version of the group exists, or older than `gone_days` when it is the newest (nothing
   runs it any more). Its findings in DefectDojo are closed by re-importing an empty
@@ -36,11 +41,12 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from .clients import DefectDojo, DependencyTrack, DTProject, project_label
 from .config import Inventory, Team
-from .triage import MARKER, UNSET, current_analysis
+from .triage import ACCEPT_RESPONSES, MARKER, UNSET, current_analysis, review_date
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +61,12 @@ class PruneReport:
     carried: list[str] = field(default_factory=list)
     deactivated: list[str] = field(default_factory=list)
     reactivated: list[str] = field(default_factory=list)
+    reopened: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.carried or self.deactivated or self.reactivated)
+        return bool(self.carried or self.deactivated or self.reactivated or self.reopened)
 
 
 @dataclass
@@ -116,19 +123,83 @@ def _reason(analysis: dict[str, Any]) -> str:
     return ""
 
 
-def _carry(
-    dt: DependencyTrack, group: list[_Proj], targets: list[_Proj], apply: bool, rep: PruneReport
+def _suppressed(
+    dt: DependencyTrack, m: _Proj, rep: PruneReport
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """(finding, its analysis) for every suppressed finding of a project."""
+    out = []
+    try:
+        for f in dt.findings(m.p.uuid, suppressed=True):
+            if _state(f)[1] and all(_key(f)):
+                a = current_analysis(
+                    dt.http, m.p.uuid, str(f["component"]["uuid"]), str(f["vulnerability"]["uuid"])
+                )
+                out.append((f, a))
+    except Exception as e:
+        rep.errors.append(f"findings of {m.label}: {e}")
+    return out
+
+
+def _is_decision(a: dict[str, Any]) -> bool:
+    state = str(a.get("analysisState") or "")
+    if not a.get("isSuppressed"):
+        return False
+    if state == "EXPLOITABLE":  # an accepted risk, not "exploitable, fix it"
+        return str(a.get("analysisResponse") or "") in ACCEPT_RESPONSES
+    return state in CARRY_STATES
+
+
+def _reopen(
+    dt: DependencyTrack,
+    m: _Proj,
+    found: list[tuple[dict[str, Any], dict[str, Any]]],
+    today: date,
+    apply: bool,
+    rep: PruneReport,
 ) -> None:
-    """Copy decisions within one group into `targets` (its active members)."""
-    decided: dict[tuple[str, str], tuple[_Proj, dict[str, Any]]] = {}
-    for src in group:  # newest first: the first decision for a key wins
+    """Lift the suppression of decisions whose "review by" date has passed (mutates `found`:
+    a reopened analysis is no longer a decision to carry)."""
+    for f, a in found:
+        due = review_date(_reason(a))
+        if due is None or due >= today:
+            continue
+        comp, vid = _key(f)
+        rep.reopened.append(
+            f"{m.team.key}/{m.label}: {comp} {vid} ({a.get('analysisState')}, review by {due})"
+        )
+        a["isSuppressed"] = False
+        if not apply:
+            continue
+        body: dict[str, Any] = {
+            "project": m.p.uuid,
+            "component": str(f["component"]["uuid"]),
+            "vulnerability": str(f["vulnerability"]["uuid"]),
+            "analysisState": a.get("analysisState"),
+            "isSuppressed": False,
+            "comment": f"Review date {due} passed: shown again; {MARKER}",
+        }
+        for k in ("analysisJustification", "analysisResponse"):
+            if a.get(k):
+                body[k] = a[k]
         try:
-            for f in dt.findings(src.p.uuid, suppressed=True):
-                state, suppressed = _state(f)
-                if suppressed and state in CARRY_STATES and all(_key(f)):
-                    decided.setdefault(_key(f), (src, f))
+            dt.http.put("api/v1/analysis", json_body=body)
         except Exception as e:
-            rep.errors.append(f"findings of {src.label}: {e}")
+            rep.errors.append(f"reopen {m.label}: {comp} {vid}: {e}")
+
+
+def _carry(
+    dt: DependencyTrack,
+    sources: list[tuple[_Proj, list[tuple[dict[str, Any], dict[str, Any]]]]],
+    targets: list[_Proj],
+    apply: bool,
+    rep: PruneReport,
+) -> None:
+    """Copy decisions within one group (`sources` newest first) into `targets`."""
+    decided: dict[tuple[str, str], tuple[_Proj, dict[str, Any]]] = {}
+    for src, found in sources:  # newest first: the first decision for a key wins
+        for f, a in found:
+            if _is_decision(a):
+                decided.setdefault(_key(f), (src, a))
     if not decided:
         return
     for dst in targets:
@@ -141,32 +212,30 @@ def _carry(
             hit = decided.get(_key(f))
             if hit is None or hit[0].p.uuid == dst.p.uuid or _state(f)[0] not in UNSET:
                 continue
-            src, sf = hit
+            src, a = hit
             comp, vid = _key(f)
-            line = f"{dst.team.key}/{dst.label}: {comp} {vid} <- {_state(sf)[0]} from {src.label}"
+            state = str(a.get("analysisState"))
+            if a.get("analysisResponse") and state == "EXPLOITABLE":
+                state += f"/{a['analysisResponse']}"
+            line = f"{dst.team.key}/{dst.label}: {comp} {vid} <- {state} from {src.label}"
             if not apply:
                 rep.carried.append(line)
                 continue
+            why = _reason(a).removesuffix(MARKER).rstrip("; ")
+            if not why.startswith("Carried forward from "):  # keep the original source
+                why = f"Carried forward from {src.label}" + (f": {why}" if why else "")
+            body: dict[str, Any] = {
+                "project": dst.p.uuid,
+                "component": str(f["component"]["uuid"]),
+                "vulnerability": str(f["vulnerability"]["uuid"]),
+                "analysisState": a.get("analysisState"),
+                "isSuppressed": True,
+                "comment": f"{why}; {MARKER}",
+            }
+            for k in ("analysisJustification", "analysisResponse"):
+                if a.get(k):
+                    body[k] = a[k]
             try:
-                a = current_analysis(
-                    dt.http,
-                    src.p.uuid,
-                    str(sf["component"]["uuid"]),
-                    str(sf["vulnerability"]["uuid"]),
-                )
-                why = _reason(a).removesuffix(MARKER).rstrip("; ")
-                if not why.startswith("Carried forward from "):  # keep the original source
-                    why = f"Carried forward from {src.label}" + (f": {why}" if why else "")
-                body: dict[str, Any] = {
-                    "project": dst.p.uuid,
-                    "component": str(f["component"]["uuid"]),
-                    "vulnerability": str(f["vulnerability"]["uuid"]),
-                    "analysisState": a.get("analysisState") or _state(sf)[0],
-                    "isSuppressed": True,
-                    "comment": f"{why}; {MARKER}",
-                }
-                if a.get("analysisJustification"):
-                    body["analysisJustification"] = a["analysisJustification"]
                 dt.http.put("api/v1/analysis", json_body=body)
                 rep.carried.append(line)
             except Exception as e:
@@ -195,6 +264,7 @@ def prune(
 ) -> PruneReport:
     rep = PruneReport()
     now = time.time() if now is None else now
+    today = date.fromtimestamp(now)
     for group in groups(inv, dt, rep.errors):
         uploaded = [m for m in group if m.p.last_bom_import]
         if not uploaded:
@@ -225,8 +295,15 @@ def prune(
                         continue
                 m.p.active = False
         targets = [m for m in group if m.p.active]
+        # inactive versions only matter as a source of decisions for the active ones
+        sources = [
+            (m, _suppressed(dt, m, rep)) for m in group if m.p.active or (len(group) > 1 and targets)
+        ]
+        for m, found in sources:
+            if m.p.active:
+                _reopen(dt, m, found, today, apply, rep)
         if len(group) > 1 and targets:
-            _carry(dt, group, targets, apply, rep)
-    for lines in (rep.carried, rep.deactivated, rep.reactivated):
+            _carry(dt, sources, targets, apply, rep)
+    for lines in (rep.carried, rep.deactivated, rep.reactivated, rep.reopened):
         lines.sort()
     return rep

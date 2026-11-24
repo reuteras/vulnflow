@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -38,7 +39,12 @@ from .net import Http
 
 log = logging.getLogger(__name__)
 
-STATES = ("NOT_AFFECTED", "FALSE_POSITIVE")
+STATES = ("NOT_AFFECTED", "FALSE_POSITIVE", "EXPLOITABLE")
+# EXPLOITABLE is only written as an accepted risk, with one of these responses (DT 5.2.2
+# AnalysisResponse: CAN_NOT_FIX, WILL_NOT_FIX, UPDATE, ROLLBACK, WORKAROUND_AVAILABLE)
+ACCEPT_RESPONSES = ("WILL_NOT_FIX", "CAN_NOT_FIX")
+# "review by 2027-03-01" in the comment: `prune` lifts the suppression after that day
+REVIEW_BY = re.compile(r"\breview by (\d{4}-\d{2}-\d{2})\b")
 UNSET = ("", "NOT_SET")
 MARKER = "via vulnflow"  # ends every comment `ignore` writes
 REQUIRED = (
@@ -76,9 +82,21 @@ class IgnoreItem:
         return f"{self.team}/{project_label(self.project, self.project_version)}"
 
 
-def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
+def review_date(text: str) -> date | None:
+    """The last "review by YYYY-MM-DD" in a comment."""
+    found = REVIEW_BY.findall(text or "")
+    try:
+        return date.fromisoformat(found[-1]) if found else None
+    except ValueError:
+        return None
+
+
+def load_review(
+    path: Path, today: date | None = None, review_by: date | None = None
+) -> list[IgnoreItem]:
     """Read and validate a review file. Any bad row rejects the whole file: a half-applied
-    list is worse than none."""
+    list is worse than none. With review_by, every comment gets "review by <date>", after
+    which `prune` shows the finding again."""
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -116,6 +134,10 @@ def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
                 f"Debian tracker: {row['urgency']}"
                 f"{f' ({status})' if status else ''} in {row['release']}, source package "
                 f"{row['package']}; reviewed {day} via vulnflow"
+            )
+        if review_by is not None:
+            comment = comment.replace(
+                f"; reviewed {day} via vulnflow", f"; review by {review_by}; reviewed {day} via vulnflow"
             )
         item = IgnoreItem(
             team=str(row["team"]),
@@ -168,6 +190,7 @@ def apply_ignores(
     *,
     overwrite: bool = False,
     ledger: Path | None = None,
+    response: str | None = None,
 ) -> tuple[list[IgnoreItem], list[IgnoreItem], list[Kept], list[str]]:
     """(written, already in that state, kept because somebody already triaged them, errors).
     Rewriting an identical analysis would only add a duplicate comment, so those are left
@@ -175,6 +198,8 @@ def apply_ignores(
     goes to the ledger together with the analysis it replaced."""
     if state not in STATES:
         raise ValueError(f"state must be one of {STATES}")
+    if state == "EXPLOITABLE" and response not in ACCEPT_RESPONSES:
+        raise ValueError(f"EXPLOITABLE is an accepted risk: response must be one of {ACCEPT_RESPONSES}")
     written: list[IgnoreItem] = []
     skipped: list[IgnoreItem] = []
     kept: list[Kept] = []
@@ -192,6 +217,8 @@ def apply_ignores(
             body = _put_body(it, state, it.comment, True)
             if justification:
                 body["analysisJustification"] = justification
+            if response:
+                body["analysisResponse"] = response
             http.put("api/v1/analysis", json_body=body)
             written.append(it)
             if ledger is not None:
