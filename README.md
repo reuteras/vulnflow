@@ -690,6 +690,16 @@ prune` shows what the next round would do (`--apply`, `--superseded-days`, `--go
 Only projects the agents make (`kind-*` tag) are touched, and never one that was not
 uploaded yet.
 
+An image's own Go binary without a version gets the image tag. Some projects put their
+version only into the linker flags (Grafana does), so the binary's build info has none, and
+syft reports the main module as `UNKNOWN` with a CPE whose version is `*`: every CVE the
+product ever had matches (202 of them on two Grafana tags). syft's `from-contents` option
+guessed `v3.53.4` for Grafana 13.3.1, so it stays off. Instead the agent sets version, purl
+and CPE from the tag, only for the binary's main module (`syft:metadata:mainModule`) whose
+last path element is the image's name (`github.com/grafana/grafana` in
+`docker.io/grafana/grafana`), and only when the tag is a release number (`13.3.1`, not
+`latest`); the component gets the property `vulnflow:version-from=image-tag`.
+
 Kernels: a host project lists only the kernel that runs (`uname -r`). Kernel packages that
 are installed but not booted (old ones Debian keeps, a new one waiting for a reboot),
 `linux-libc-dev` and syft's `/boot/vmlinuz-*` entries are left out, because every kernel CVE
