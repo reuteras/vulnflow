@@ -127,6 +127,9 @@ class DTProject:
     active: bool
     tags: list[str]
     last_bom_import: float | None = None  # epoch seconds
+    # when it was deactivated (epoch seconds); DT 5.2.2 sets inactiveSince on PATCH
+    # active=false and clears it on reactivation (seen live 2026-11-24)
+    inactive_since: float | None = None
 
 
 def project_label(name: str, version: str = "") -> str:
@@ -174,6 +177,7 @@ class DependencyTrack:
                         active=bool(p.get("active", p.get("inactiveSince") is None)),
                         tags=[t.get("name", "") for t in p.get("tags") or []],
                         last_bom_import=_epoch(p.get("lastBomImport")),
+                        inactive_since=_epoch(p.get("inactiveSince")),
                     )
                 )
             total = int(r.headers.get("X-Total-Count", len(out)) or len(out))

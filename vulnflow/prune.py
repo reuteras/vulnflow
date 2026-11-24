@@ -21,10 +21,13 @@ projects are one group each):
   version of the group exists, or older than `gone_days` when it is the newest (nothing
   runs it any more). Its findings in DefectDojo are closed by re-importing an empty
   finding list into its test (close_old_findings); dt2dojo skips inactive projects.
-- reactivate: an inactive project uploaded again within `superseded_days` (a rollback, or
-  a version that runs next to a newer one, e.g. two postgres containers on one host; DT
-  accepts uploads to an inactive project and leaves it inactive). Not only the newest:
-  a parallel version deactivated while its host was offline would otherwise stay hidden.
+- reactivate: an inactive project uploaded again after it was deactivated (lastBomImport
+  newer than DT's inactiveSince): a rollback, or a version that runs next to a newer one
+  (two postgres containers on one host) and was deactivated while its host was offline.
+  DT accepts uploads to an inactive project and leaves it inactive. A version retired
+  early (by hand, or with a small --superseded-days) and not uploaded since stays retired.
+  Without inactiveSince (older DT) only the newest version of a group comes back, when it
+  was uploaded within `superseded_days`.
 
 Runs at the start of every `dt2dojo` round with DT_MAINTENANCE_API_KEY (team
 vulnflow-maintenance, see bootstrap.DT_MAINTENANCE_PERMISSIONS), and by hand as
@@ -253,6 +256,14 @@ def close_in_dojo(dt: DependencyTrack, dojo: DefectDojo, m: _Proj, engagement: s
     reimport_project(dojo, m.team, m.p, json.dumps(fpf).encode(), engagement)
 
 
+def _uploaded_since_deactivation(m: _Proj, newest: bool, age: float, superseded_days: float) -> bool:
+    """Whether an inactive project was uploaded after it was deactivated."""
+    since, last = m.p.inactive_since, m.p.last_bom_import
+    if since is not None and last is not None:
+        return last > since
+    return newest and age < superseded_days * DAY  # no inactiveSince: the old rule
+
+
 def prune(
     inv: Inventory,
     dt: DependencyTrack,
@@ -275,9 +286,7 @@ def prune(
         for m in uploaded:
             age = now - (m.p.last_bom_import or 0)
             limit = gone_days if m is newest else superseded_days
-            # uploaded again since it was deactivated: the deactivation rule needs an age
-            # above superseded_days, so this can't flip back and forth
-            if not m.p.active and age < superseded_days * DAY:
+            if not m.p.active and _uploaded_since_deactivation(m, m is newest, age, superseded_days):
                 rep.reactivated.append(f"{m.team.key}/{m.label}")
                 if apply:
                     try:
