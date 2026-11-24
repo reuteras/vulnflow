@@ -693,7 +693,7 @@ uploaded yet.
 An image's own Go binary without a version gets the image tag. Some projects put their
 version only into the linker flags (Grafana does), so the binary's build info has none, and
 syft reports the main module as `UNKNOWN` with a CPE whose version is `*`: every CVE the
-product ever had matches (202 of them on two Grafana tags). syft's `from-contents` option
+product ever had matches (204 open findings on two Grafana tags, 102 each). syft's `from-contents` option
 guessed `v3.53.4` for Grafana 13.3.1, so it stays off. Instead the agent sets version, purl
 and CPE from the tag, only for the binary's main module (`syft:metadata:mainModule`) whose
 last path element is the image's name (`github.com/grafana/grafana` in
