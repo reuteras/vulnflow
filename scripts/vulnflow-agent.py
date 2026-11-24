@@ -192,7 +192,40 @@ def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
         shutil.rmtree(work, ignore_errors=True)
     if code != 0:
         raise ScanError(f"syft {target} failed ({code}): {syft_error(err)}")
-    return parse_docs(out)
+    return no_apt_python_copies(parse_docs(out))
+
+
+# Where apt (Debian, Ubuntu) installs python3-* packages; pip installs elsewhere
+# (/usr/local/lib/python3.X/dist-packages, venvs' site-packages)
+APT_PYTHON_DIR = "/usr/lib/python3/dist-packages/"
+
+
+def no_apt_python_copies(docs: list[Doc]) -> list[Doc]:
+    """Drop the pkg:pypi copies syft makes of apt's python3-* packages.
+
+    syft reports python3-urllib3 2.3.0-3+deb13u2 as a deb and, from its dist-info, again as
+    pkg:pypi/urllib3@2.3.0; the PyPI one matches every upstream CVE Debian has backported a
+    fix for (seen 2026-11-24: 47 findings on 4 Debian hosts, all such copies). The deb stays
+    and carries the right version."""
+    out = []
+    for d in docs:
+        keep = []
+        for c in d.get("components") or []:
+            paths = [
+                str(p.get("value", ""))
+                for p in c.get("properties") or []
+                if str(p.get("name", "")).startswith("syft:location:")
+                and str(p.get("name", "")).endswith(":path")
+            ]
+            if (
+                str(c.get("purl", "")).startswith("pkg:pypi/")
+                and paths
+                and all(x.startswith(APT_PYTHON_DIR) for x in paths)
+            ):
+                continue
+            keep.append(c)
+        out.append({**d, "components": keep})
+    return out
 
 
 def syft_error(err: str, limit: int = 400) -> str:
