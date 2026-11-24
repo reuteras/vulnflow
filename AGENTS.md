@@ -18,6 +18,10 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   `CONFIG_FORMAT` must match `AGENT_CONFIG_FORMAT` in `vulnflow/machines.py`, which renders
   the per-host config (`vulnflow agent-bundle`). Each host has its own DT team
   `agent-<host>` with only `BOM_UPLOAD` + `PROJECT_CREATION_UPLOAD`.
+- `prune` (`vulnflow/prune.py`, run by every `dt2dojo` round) carries analyses to new project
+  versions and deactivates stale ones with its own team `vulnflow-maintenance`
+  (`DT_MAINTENANCE_API_KEY`). The glue team `vulnflow` stays read-only: don't give it
+  `VULNERABILITY_ANALYSIS` or `PORTFOLIO_MANAGEMENT`.
 - The operator's hosts and groups, and the detailed OpenCVE subscriptions
   (`[subscriptions.<team>]`, merged into the teams by `sync`/`opencve-bootstrap`/
   `suggest-subscriptions`), are in `machines.toml` (repo root), which is gitignored and

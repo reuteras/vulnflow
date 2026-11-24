@@ -342,6 +342,7 @@ python3 -m vulnflow vendor --ubuntu --redhat  # Ubuntu / Red Hat verdicts; asks 
 python3 -m vulnflow disputed                 # CVEs NVD tags disputed / unsupported-when-assigned, or rejected (--team, --json, --no-nvd)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
 python3 -m vulnflow unignore                    # undo `ignore` from the ledger (data/ignored.jsonl); dry run, --apply writes; --from review.json for older ones
+python3 -m vulnflow prune                       # what dt2dojo does every round: carry decisions to new versions, deactivate stale ones (dry run; --apply)
 ```
 
 It turns every component in each team's Dependency-Track projects into NVD vendor:product
@@ -602,6 +603,30 @@ two hosts is two projects (`container:nginx@1.31.8`, `container:nginx@trixie`; t
 commands print the version for that reason). The same image name *and* tag on two hosts is
 one project, and each host's upload replaces the other's components; for images pulled from
 a registry those are the same anyway.
+
+New versions and old ones (`prune`, run by `dt2dojo` at the start of every round, every 30
+minutes, so shortly after the agents' daily uploads). Dependency-Track keeps a decision per
+project, component and CVE, so a Not Affected on `container:searxng@2026.11.15` would not
+apply to `@2026.11.17`, and nothing retired the old version. Per project name and host
+(`host-<host>` tag):
+
+- **Carried forward:** a Not Affected or False Positive (suppressed) decision on one version
+  is copied to the other active versions for the same component build (identical package
+  URL) and CVE, where nobody has triaged the finding yet. The comment says
+  `Carried forward from <project>@<version>: <original reason>; via vulnflow`, so
+  `unignore --from` reverts a copy.
+- **Deactivated:** a version not uploaded for 2 days while a newer one exists, or the newest
+  one when nothing uploaded it for 7 days (the container or host is gone). Its findings in
+  DefectDojo are closed first, by re-importing an empty list into its test.
+- **Reactivated:** an inactive version that is the newest upload again (a rollback).
+
+It uses its own key, `DT_MAINTENANCE_API_KEY` (team `vulnflow-maintenance`, created by
+`dt-bootstrap`): writing analyses and (de)activating projects needs `VULNERABILITY_ANALYSIS`
+and `PORTFOLIO_MANAGEMENT`, and the latter also allows deleting projects in DT 5.2.2, so the
+glue's own key stays read-only. Without that key `dt2dojo` says `skip prune`. `vulnflow
+prune` shows what the next round would do (`--apply`, `--superseded-days`, `--gone-days`).
+Only projects the agents make (`kind-*` tag) are touched, and never one that was not
+uploaded yet.
 
 Kernels: a host project lists only the kernel that runs (`uname -r`). Kernel packages that
 are installed but not booted (old ones Debian keeps, a new one waiting for a reboot),

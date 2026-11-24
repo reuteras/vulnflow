@@ -195,13 +195,15 @@ class DependencyTrack:
                 return out
             page += 1
 
-    def findings(self, project_uuid: str) -> list[dict[str, Any]]:
-        """Findings of a project (component, vulnerability, analysis), paginated."""
+    def findings(self, project_uuid: str, suppressed: bool = False) -> list[dict[str, Any]]:
+        """Findings of a project (component, vulnerability, analysis {state, isSuppressed}),
+        paginated; suppressed ones only when asked."""
         out: list[dict[str, Any]] = []
         page = 1
+        extra = "&suppressed=true" if suppressed else ""
         while True:
             r = self.http.get(
-                f"api/v1/finding/project/{project_uuid}?pageSize={self.PAGE}&pageNumber={page}"
+                f"api/v1/finding/project/{project_uuid}?pageSize={self.PAGE}&pageNumber={page}{extra}"
             )
             items: list[dict[str, Any]] = r.json() or []
             out.extend(items)
@@ -234,6 +236,11 @@ class DependencyTrack:
         }
         r = self.http.put("api/v1/bom", json_body=body)
         return (r.json() or {}).get("token", "")
+
+    def set_active(self, project_uuid: str, active: bool) -> None:
+        """PATCH /api/v1/project/{uuid} {"active": ...}; needs PORTFOLIO_MANAGEMENT
+        (ProjectResource.patchProject, DT 5.2.2)."""
+        self.http.request("PATCH", f"api/v1/project/{project_uuid}", json_body={"active": active})
 
     def export_fpf(self, project_uuid: str) -> bytes:
         return self.http.get(f"api/v1/finding/project/{project_uuid}/export").body

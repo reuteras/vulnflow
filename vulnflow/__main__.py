@@ -102,7 +102,25 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
         )
     else:
         print(f"  {'set ' if res.osv.startswith('updated') else 'ok  '}  OSV source: {res.osv}")
+    from .bootstrap import DT_MAINTENANCE_TEAM, dt_admin_http, maintenance_key
+
+    try:
+        admin = dt_admin_http(env("DT_URL", "http://localhost:8180"), admin_pw)
+        key, new = maintenance_key(admin, env("DT_MAINTENANCE_API_KEY"))
+    except BootstrapError as e:
+        print(f"  error {DT_MAINTENANCE_TEAM}: {e}", file=sys.stderr)
+        return 1
+    if new:
+        set_env_values(env_file, {"DT_MAINTENANCE_API_KEY": key})
+        print(f"  new   {DT_MAINTENANCE_TEAM} key written to {env_file} as DT_MAINTENANCE_API_KEY")
+    else:
+        print(f"  ok    existing DT_MAINTENANCE_API_KEY still valid ({DT_MAINTENANCE_TEAM})")
     return 0
+
+
+def _maintenance_dt() -> DependencyTrack | None:
+    key = env("DT_MAINTENANCE_API_KEY")
+    return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
 
 
 def _dd_bootstrap(env_file: str, wait: float) -> int:
@@ -350,6 +368,30 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("dt2dojo", help="copy Dependency-Track findings into DefectDojo")
     d.add_argument("--dry-run", action="store_true")
     d.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="skip `prune` at the start of each round (it runs when DT_MAINTENANCE_API_KEY is set)",
+    )
+    pr = sub.add_parser(
+        "prune",
+        help="carry Not Affected/False Positive decisions to new project versions, deactivate "
+        "versions no longer uploaded and close them in DefectDojo; dry run unless --apply "
+        "(dt2dojo runs this every round)",
+    )
+    pr.add_argument("--apply", action="store_true", help="write to Dependency-Track / DefectDojo")
+    pr.add_argument(
+        "--superseded-days",
+        type=float,
+        default=2,
+        help="deactivate a version not uploaded for this long once a newer one exists (2)",
+    )
+    pr.add_argument(
+        "--gone-days",
+        type=float,
+        default=7,
+        help="deactivate the newest version too when nothing uploaded it for this long (7)",
+    )
+    d.add_argument(
         "--loop",
         type=int,
         default=0,
@@ -595,8 +637,11 @@ def main(argv: list[str] | None = None) -> int:
         dt, dd = _dtrack(required=True), _dojo(required=True)
         if dt is None or dd is None:  # unreachable: required=True exits first
             return 2
+        maint = None if a.no_prune else _maintenance_dt()
+        if maint is None and not a.no_prune:
+            print("  skip  prune (DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates it)")
         while True:
-            rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run)
+            rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint)
             rep.print()
             if not a.loop:
                 return 1 if rep.errors else 0
@@ -643,6 +688,41 @@ def main(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
+
+    if a.cmd == "prune":
+        from .prune import prune
+
+        maint = _maintenance_dt()
+        if maint is None:
+            print(
+                "  error DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates team "
+                "vulnflow-maintenance and its key",
+                file=sys.stderr,
+            )
+            return 2
+        pres = prune(
+            inv,
+            maint,
+            _dojo() if a.apply else None,
+            apply=a.apply,
+            superseded_days=a.superseded_days,
+            gone_days=a.gone_days,
+        )
+        for line in pres.reactivated:
+            print(f"  reactivate  {line}")
+        for line in pres.deactivated:
+            print(f"  deactivate  {line}")
+        for line in pres.carried:
+            print(f"  carry       {line}")
+        print(
+            f"  {len(pres.carried)} decision(s) carried forward, {len(pres.deactivated)} "
+            f"project(s) deactivated, {len(pres.reactivated)} reactivated"
+            + ("" if a.apply else "; dry run, add --apply"),
+            file=sys.stderr,
+        )
+        for msg in pres.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if pres.errors else 0
 
     if a.cmd == "ignore":
         return _ignore(a)

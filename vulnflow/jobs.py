@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
-from .clients import DefectDojo, DependencyTrack, OpenCVE
-from .config import Inventory
+from .clients import DefectDojo, DependencyTrack, DTProject, OpenCVE
+from .config import Inventory, Team
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,22 @@ def sync_inventory(
     return rep
 
 
+def reimport_project(
+    dojo: DefectDojo, team: Team, p: DTProject, fpf: bytes, engagement: str
+) -> dict[str, Any]:
+    """One DT project's FPF into its DefectDojo product/test (one test per version)."""
+    return dojo.reimport(
+        scan_type=DefectDojo.FPF_SCAN_TYPE,
+        report=fpf,
+        filename=f"{p.name}-{p.version or 'na'}.fpf.json",
+        product_name=p.name,
+        product_type=team.defectdojo_product_type,
+        engagement=engagement,
+        tags=[team.dtrack_tag, "source-dtrack"],
+        test_title=f"Dependency-Track {p.version}".strip(),
+    )
+
+
 def dt_to_dojo(
     inv: Inventory,
     dtrack: DependencyTrack,
@@ -101,13 +118,25 @@ def dt_to_dojo(
     *,
     engagement: str = "Dependency-Track",
     dry_run: bool = False,
+    maintenance: DependencyTrack | None = None,
 ) -> Report:
     """Copy findings per DT project into DefectDojo, routed to the owning team's product type.
 
     Re-import with close_old_findings means a component fixed in DT gets its finding
     closed in DefectDojo on the next run; triage notes/status live in DefectDojo.
+    With a `maintenance` client (DT_MAINTENANCE_API_KEY) each round starts with `prune`:
+    decisions carried to new versions, stale versions deactivated and closed in DefectDojo.
     """
     rep = Report()
+    if maintenance is not None:
+        from .prune import prune
+
+        pr = prune(inv, maintenance, dojo, apply=not dry_run, engagement=engagement)
+        tag = "[dry-run] " if dry_run else ""
+        rep.done += [f"{tag}prune: carried {line}" for line in pr.carried]
+        rep.done += [f"{tag}prune: deactivated {line}" for line in pr.deactivated]
+        rep.done += [f"{tag}prune: reactivated {line}" for line in pr.reactivated]
+        rep.errors += [f"prune: {e}" for e in pr.errors]
     for team in inv.teams.values():
         try:
             projects = dtrack.projects_by_tag(team.dtrack_tag)
@@ -123,17 +152,7 @@ def dt_to_dojo(
                 rep.done.append(f"[dry-run] {label}")
                 continue
             try:
-                fpf = dtrack.export_fpf(p.uuid)
-                res = dojo.reimport(
-                    scan_type=DefectDojo.FPF_SCAN_TYPE,
-                    report=fpf,
-                    filename=f"{p.name}-{p.version or 'na'}.fpf.json",
-                    product_name=p.name,
-                    product_type=team.defectdojo_product_type,
-                    engagement=engagement,
-                    tags=[team.dtrack_tag, "source-dtrack"],
-                    test_title=f"Dependency-Track {p.version}".strip(),
-                )
+                res = reimport_project(dojo, team, p, dtrack.export_fpf(p.uuid), engagement)
                 stats = res.get("statistics", {}).get("after", {}).get("total", {})
                 rep.done.append(f"{label} (active findings: {stats.get('active', '?')})")
             except Exception as e:

@@ -1421,6 +1421,171 @@ def test_debian_cli_shows_project_version_and_why_debian_has_no_fix(inv, tmp_pat
     assert [it.label for it in load_review(review)] == ["dev/container:nginx@1.31.8"]
 
 
+class FakePortfolio:
+    """Stateful fake of the DT endpoints `prune` uses: projects by tag, findings (with and
+    without suppressed), analysis GET/PUT, project PATCH and the FPF export."""
+
+    def __init__(self, projects: list[dict], findings: dict[str, list[dict]]):
+        self.projects = {p["uuid"]: p for p in projects}
+        self.findings = findings  # project uuid -> findings (analysis in "analysis")
+        self.analyses: dict[tuple[str, str, str], dict] = {}
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, method, url, headers, body, timeout):
+        from urllib.parse import parse_qs, urlsplit
+
+        u = urlsplit(url)
+        path, q = u.path.removeprefix("/"), {k: v[0] for k, v in parse_qs(u.query).items()}
+        self.calls.append((method, path))
+
+        def ok(obj):
+            return Response(200, json.dumps(obj).encode(), {})
+
+        if path.startswith("api/v1/project/tag/"):
+            tag = path.rsplit("/", 1)[1]
+            return ok([p for p in self.projects.values() if any(t["name"] == tag for t in p["tags"])])
+        if method == "PATCH" and path.startswith("api/v1/project/"):
+            self.projects[path.rsplit("/", 1)[1]].update(json.loads(body))
+            return ok({})
+        if path.endswith("/export"):
+            uuid = path.split("/")[-2]
+            return ok({"version": "1.2", "project": {"uuid": uuid}, "findings": self.findings[uuid]})
+        if path.startswith("api/v1/finding/project/"):
+            fs = self.findings[path.rsplit("/", 1)[1]]
+            if q.get("suppressed") != "true":
+                fs = [f for f in fs if not f["analysis"].get("isSuppressed")]
+            return ok(fs)
+        if path == "api/v1/analysis" and method == "GET":
+            k = (q["project"], q["component"], q["vulnerability"])
+            return ok(self.analyses[k]) if k in self.analyses else Response(404, b"", {})
+        if path == "api/v1/analysis" and method == "PUT":
+            b = json.loads(body)
+            k = (b["project"], b["component"], b["vulnerability"])
+            self.analyses[k] = {
+                "analysisState": b["analysisState"],
+                "analysisJustification": b.get("analysisJustification"),
+                "isSuppressed": b["isSuppressed"],
+                "analysisComments": [{"comment": b["comment"]}],
+            }
+            for f in self.findings[b["project"]]:
+                if (f["component"]["uuid"], f["vulnerability"]["uuid"]) == k[1:]:
+                    f["analysis"] = {"state": b["analysisState"], "isSuppressed": b["isSuppressed"]}
+            return ok(self.analyses[k])
+        raise AssertionError(f"unexpected {method} {url}")
+
+
+def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv):
+    from vulnflow.prune import prune
+
+    now = 1_800_000_000.0
+    hours = 3600 * 1000  # lastBomImport is epoch milliseconds
+
+    def proj(uuid, name, version, tags, age_h, active=True):
+        return {
+            "uuid": uuid,
+            "name": name,
+            "version": version,
+            "active": active,
+            "tags": [{"name": t} for t in tags],
+            "lastBomImport": None if age_h is None else int(now * 1000 - age_h * hours),
+        }
+
+    box = "pkg:generic/busybox@1.34.1"
+
+    def f(proj_uuid, comp, purl, cve, state="", suppressed=False):
+        return {
+            "component": {"uuid": f"{proj_uuid}-{comp}", "name": comp, "version": "x", "purl": purl},
+            "vulnerability": {"uuid": f"V-{cve}", "vulnId": cve},
+            "analysis": {"state": state, "isSuppressed": suppressed} if state else {},
+        }
+
+    c = ["kind-container", "team-dev", "host-h1"]
+    projects = [
+        proj("old", "container:searxng", "v1", c, 72),  # superseded for 3 days
+        proj("new", "container:searxng", "v2", c, 1),
+        proj("ng1", "container:nginx", "1.30", c, 1, active=False),  # rolled back to
+        proj("ng2", "container:nginx", "1.31", c, 24),  # newer tag, seen yesterday: kept
+        proj("h2", "host:h2", "debian-13", ["kind-host", "team-sysadm"], 8 * 24),  # gone a week
+        proj("man", "manual", "1", ["team-dev"], 500),  # not an agent project: untouched
+        proj("nev", "container:never", "1", c, None),  # never uploaded: untouched
+    ]
+    findings = {
+        "old": [
+            f("old", "busybox", box, "CVE-1", "NOT_AFFECTED", True),
+            f("old", "busybox", box, "CVE-2", "IN_TRIAGE"),  # not a decision to carry
+        ],
+        "new": [
+            f("new", "busybox", box, "CVE-1"),  # same build, untriaged: gets the decision
+            f("new", "busybox", box, "CVE-2"),
+            f("new", "busybox2", "pkg:generic/busybox@1.37.0", "CVE-1"),  # other build: no
+        ],
+        "ng1": [],
+        "ng2": [],
+        "h2": [],
+        "man": [],
+        "nev": [],
+    }
+    fake = FakePortfolio(projects, findings)
+    fake.analyses[("old", "old-busybox", "V-CVE-1")] = {
+        "analysisState": "NOT_AFFECTED",
+        "analysisJustification": "CODE_NOT_PRESENT",
+        "isSuppressed": True,
+        "analysisComments": [
+            {"comment": "Analysis: NOT_SET → NOT_AFFECTED"},
+            {"comment": "Void patches it (0001, 0002); reviewed 2026-11-24 via vulnflow"},
+            {"comment": "Suppressed"},
+        ],
+    }
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+
+    dry = prune(inv, dt, now=now)
+    assert [c for c in fake.calls if c[0] != "GET"] == []  # a dry run writes nothing
+    assert dry.reactivated == ["dev/container:nginx@1.30"]
+    assert dry.deactivated == [
+        "dev/container:searxng@v1 (newer version uploaded; last 3.0 days ago)",
+        "sysadm/host:h2@debian-13 (no upload; last 8.0 days ago)",
+    ]
+    assert dry.carried == [
+        f"dev/container:searxng@v2: {box} CVE-1 <- NOT_AFFECTED from container:searxng@v1"
+    ]
+
+    dojo_t = FakeTransport({"POST /api/v2/reimport-scan/": {"statistics": {}}})
+    dojo = DefectDojo("http://dd", "t", transport=dojo_t)
+    for p in projects:  # the dry run only changed its own copies
+        fake.projects[p["uuid"]]["active"] = p["active"]
+    fake.projects["ng1"]["active"] = False
+    rep = prune(inv, dt, dojo, apply=True, now=now)
+    assert rep.errors == [] and rep.carried == dry.carried
+    assert {u: fake.projects[u]["active"] for u in ("old", "new", "ng1", "ng2", "h2", "man", "nev")} == {
+        "old": False,
+        "new": True,
+        "ng1": True,
+        "ng2": True,
+        "h2": False,
+        "man": True,
+        "nev": True,
+    }
+    carried = fake.analyses[("new", "new-busybox", "V-CVE-1")]
+    assert carried["analysisState"] == "NOT_AFFECTED" and carried["isSuppressed"] is True
+    assert carried["analysisJustification"] == "CODE_NOT_PRESENT"
+    assert carried["analysisComments"][0]["comment"] == (
+        "Carried forward from container:searxng@v1: Void patches it (0001, 0002); "
+        "reviewed 2026-11-24; via vulnflow"
+    )
+    assert ("new", "new-busybox2", "V-CVE-1") not in fake.analyses  # a different build
+    assert ("new", "new-busybox", "V-CVE-2") not in fake.analyses  # In Triage is no decision
+
+    # the deactivated ones were closed in DefectDojo first: same product/test, no findings
+    posts = [c for c in dojo_t.calls if c[0] == "POST"]
+    assert len(posts) == 2
+    first = next(c[3] for c in posts if b'name="product_name"\r\n\r\ncontainer:searxng\r\n' in c[3])
+    assert b'name="test_title"\r\n\r\nDependency-Track v1\r\n' in first
+    assert b'"findings": []' in first and b'name="close_old_findings"\r\n\r\ntrue' in first
+
+    again = prune(inv, dt, dojo, apply=True, now=now)  # idempotent: nothing left to do
+    assert not again.changed and again.errors == []
+
+
 def test_debian_version_order_matches_dpkg():
     from vulnflow.debver import compare
 
@@ -2256,6 +2421,31 @@ def test_agent_keys_per_host_team_keep_rotate_revoke():
     assert not revoke_agent(admin, "web1")
     with pytest.raises(Exception, match="log in"):
         dt_admin_http("http://dt:8180", "wrong", transport=dt)
+
+
+def test_maintenance_key_has_its_own_team_with_only_prune_permissions():
+    from vulnflow.bootstrap import (
+        DT_MAINTENANCE_PERMISSIONS,
+        DT_MAINTENANCE_TEAM,
+        dt_admin_http,
+        maintenance_key,
+    )
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    admin = dt_admin_http("http://dt:8180", TEST_PW, transport=dt)
+    k1, new1 = maintenance_key(admin)
+    assert new1 and dt.keys[k1] == DT_MAINTENANCE_TEAM == "vulnflow-maintenance"
+    assert (
+        {p["name"] for p in dt.teams[DT_MAINTENANCE_TEAM]["permissions"]}
+        == {
+            "VIEW_PORTFOLIO",
+            "VIEW_VULNERABILITY",
+            "VULNERABILITY_ANALYSIS",
+            "PORTFOLIO_MANAGEMENT",
+        }
+        == set(DT_MAINTENANCE_PERMISSIONS)
+    )
+    assert maintenance_key(admin, k1) == (k1, False)  # rerun of dt-bootstrap keeps it
 
 
 def test_write_bundle_is_private(tmp_path):
