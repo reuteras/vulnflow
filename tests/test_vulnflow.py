@@ -900,7 +900,7 @@ def test_patched_findings_lists_only_recorded_fixes(inv):
 
     t = FakeTransport({"GET /api/v1/": route})
     dt = DependencyTrack("http://dt", "k", transport=t)
-    rows, unknown, _, errors = patched_findings(inv, dt)
+    rows, unknown, _, _, errors = patched_findings(inv, dt)
     assert errors == []
     assert [(r.team, r.project, r.vuln_id, r.patched) for r in rows] == [
         ("dev", "app", "GHSA-fixed", "2.31.0")
@@ -952,11 +952,11 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
 
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
 
-    rows, unknown, _, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
+    rows, unknown, _, _, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
     assert rows == [] and unknown == 1
 
     osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, _, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
+    rows, unknown, _, _, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
     assert errors == [] and unknown == 0
     assert [(r.vuln_id, r.patched, r.via) for r in rows] == [("CVE-2024-1", "2.31.0", "osv")]
     method, url, _, body = osv_t.calls[0]
@@ -1155,8 +1155,9 @@ def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
         return Response(200, json.dumps({"description": "** DISPUTED ** from the record"}).encode(), {})
 
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
-    rows, checked, errors = disputed_findings(inv, dt)
-    assert errors == [] and checked == 4
+    res = disputed_findings(inv, dt)  # no NVD feeds: only the description prefix
+    rows, checked, errors = res.rows, res.checked, res.errors
+    assert errors == [] and checked == 4 and res.unchecked == 0
     assert [(r.vuln_id, r.marker) for r in rows] == [
         ("CVE-2020-2", "REJECT"),  # withdrawn first
         ("CVE-2020-1", "DISPUTED"),
@@ -1183,6 +1184,241 @@ def test_disputed_findings_and_ignore_roundtrip(inv, tmp_path):
     assert errs == [] and len(written) == 1
     put = next(c for c in t.calls if c[0] == "PUT")
     assert json.loads(put[3])["comment"] == items[0].comment
+
+
+def _nvd_feed(records: list[dict]) -> tuple[bytes, bytes]:
+    """(feed .json.gz body, .meta body) in NVD's JSON 2.0 feed layout."""
+    import gzip
+    import hashlib
+
+    raw = json.dumps(
+        {"resultsPerPage": len(records), "format": "NVD_CVE", "vulnerabilities": records}
+    ).encode()
+    meta = (
+        f"lastModifiedDate:2026-11-21T03:04:08-05:00\nsha256:{hashlib.sha256(raw).hexdigest().upper()}\n"
+    )
+    return gzip.compress(raw), meta.encode()
+
+
+def _nvd_cve(cid: str, desc: str, status: str = "Modified", tags: list[str] | None = None) -> dict:
+    cve: dict[str, Any] = {
+        "id": cid,
+        "vulnStatus": status,
+        "descriptions": [{"lang": "es", "value": "otro"}, {"lang": "en", "value": desc}],
+    }
+    if tags:
+        cve["cveTags"] = [{"sourceIdentifier": "cve@mitre.org", "tags": tags}]
+    return {"cve": cve}
+
+
+def test_nvd_feed_is_read_record_by_record_and_checksummed():
+    from vulnflow.disputed import scan_feed
+
+    records = [
+        _nvd_cve(
+            "CVE-2018-20225", "pip installs the highest version. NOTE: intended.", tags=["disputed"]
+        ),
+        _nvd_cve("CVE-2018-1", "Rejected reason: duplicate of CVE-2018-2.", status="Rejected"),
+        _nvd_cve("CVE-2018-2", "Plain flaw, café", tags=["exclusively-hosted-service"]),
+        _nvd_cve("CVE-2018-3", "** DISPUTED ** old style", status="Analyzed"),
+        _nvd_cve("CVE-2018-4", "Assigned to an EOL product.", tags=["unsupported-when-assigned"]),
+    ]
+    body, meta = _nvd_feed(records)
+    want = meta.decode().split("sha256:")[1].strip()
+    for chunk in (7, 1 << 20):  # 7 bytes: records, keys and the "é" span reads
+        ids, flags, sha = scan_feed(body, chunk=chunk)
+        assert sha == want
+        assert ids == ["CVE-2018-20225", "CVE-2018-1", "CVE-2018-2", "CVE-2018-3", "CVE-2018-4"]
+        assert flags == {
+            "CVE-2018-20225": ["DISPUTED", "NOTE: intended."],
+            "CVE-2018-1": ["REJECT", "Rejected reason: duplicate of CVE-2018-2."],
+            "CVE-2018-3": ["DISPUTED", "old style"],
+            "CVE-2018-4": ["UNSUPPORTED", "Assigned to an EOL product."],
+        }
+    import gzip
+
+    with pytest.raises(ValueError, match="ends inside"):
+        scan_feed(gzip.compress(b'{"vulnerabilities": [{"cve": {"id": "CVE-2018-1"}},'))
+
+
+def test_nvd_feeds_download_once_per_year_and_recheck_the_meta(tmp_path):
+    import os
+
+    from vulnflow.disputed import NvdFeeds
+
+    body18, meta18 = _nvd_feed([_nvd_cve("CVE-2018-20225", "x NOTE: intended.", tags=["disputed"])])
+    body02, meta02 = _nvd_feed([_nvd_cve("CVE-1999-0001", "old")])
+    routes: dict[str, object] = {
+        "GET /nvdcve-2.0-2018.meta": Response(200, meta18, {}),
+        "GET /nvdcve-2.0-2018.json.gz": Response(200, body18, {}),
+        "GET /nvdcve-2.0-2002.meta": Response(200, meta02, {}),
+        "GET /nvdcve-2.0-2002.json.gz": Response(200, body02, {}),
+    }
+    t = FakeTransport(routes)
+    notes: list[str] = []
+    nvd = NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds", notify=notes.append)
+    assert nvd.flag("CVE-2018-20225") == ("DISPUTED", "NOTE: intended.")
+    assert nvd.knows("CVE-2018-20225") and not nvd.knows("CVE-2018-9")  # not in the feed (yet)
+    assert nvd.knows("CVE-1999-0001") and nvd.flag("CVE-1999-0001") is None  # 1999-2001: 2002 feed
+    assert not nvd.knows("CVE-2019-1") and nvd.errors == [
+        "NVD feed 2019: GET https://nvd.test/feeds/nvdcve-2.0-2019.meta -> HTTP 404: "
+        '{"detail":"not found"}'
+    ]
+    assert notes == ["downloading NVD feed 2018", "downloading NVD feed 2002"]
+    assert [c[1].rsplit("/", 1)[1] for c in t.calls] == [
+        "nvdcve-2.0-2018.meta",
+        "nvdcve-2.0-2018.json.gz",
+        "nvdcve-2.0-2002.meta",
+        "nvdcve-2.0-2002.json.gz",
+        "nvdcve-2.0-2019.meta",
+    ]
+    assert not (tmp_path / "nvd" / "nvdcve-2.0-2018.json.gz").exists()  # only the small index
+
+    t.calls.clear()  # within a day: the index on disk, nothing fetched
+    assert NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds").flag("CVE-2018-20225")
+    assert t.calls == []
+
+    index = tmp_path / "nvd" / "nvdcve-2.0-2018.flags.json"
+    os.utime(index, (0, 0))  # a day later, same sha256: only the .meta
+    assert NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds").flag("CVE-2018-20225")
+    assert [c[1].rsplit("/", 1)[1] for c in t.calls] == ["nvdcve-2.0-2018.meta"]
+
+    t.calls.clear()  # changed upstream, but the download does not match the new .meta
+    os.utime(index, (0, 0))
+    routes["GET /nvdcve-2.0-2018.meta"] = Response(200, b"sha256:" + b"0" * 64 + b"\n", {})
+    stale = NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds")
+    assert stale.flag("CVE-2018-20225") == ("DISPUTED", "NOTE: intended.")  # stale beats nothing
+    assert len(stale.errors) == 1 and "does not match the .meta file" in stale.errors[0]
+
+
+def test_disputed_uses_nvd_tags_and_counts_what_nvd_cannot_answer(inv, tmp_path):
+    from vulnflow.disputed import NvdFeeds, disputed_findings
+
+    def finding(vid, desc=""):
+        return {
+            "component": {"name": "pip", "version": "24.0", "uuid": "c-pip"},
+            "vulnerability": {"source": "NVD", "vulnId": vid, "severity": "HIGH", "uuid": f"v-{vid}"}
+            | ({"description": desc} if desc else {"description": "plain text from DT"}),
+            "analysis": {},
+        }
+
+    findings = [
+        finding("CVE-2018-20225"),  # disputed only in NVD's cveTags, not in DT's description
+        finding("CVE-2018-1"),  # rejected
+        finding("CVE-2026-99999"),  # newer than the feed
+        finding("GHSA-xxxx-yyyy-zzzz"),  # not a CVE: not counted as unchecked
+        finding("CVE-2018-5", "** DISPUTED ** old prefix still counts"),
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            proj = [{"uuid": "p1", "name": "container:app", "version": "1.2", "active": True}]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    body18, meta18 = _nvd_feed(
+        [
+            _nvd_cve("CVE-2018-20225", "pip installs it. NOTE: intended.", tags=["disputed"]),
+            _nvd_cve("CVE-2018-1", "Rejected reason: not a vulnerability.", status="Rejected"),
+            _nvd_cve("CVE-2018-5", "** DISPUTED ** old prefix still counts"),
+        ]
+    )
+    body26, meta26 = _nvd_feed([])
+    nvd = NvdFeeds(
+        tmp_path,
+        url="https://nvd.test/feeds",
+        transport=FakeTransport(
+            {
+                "GET /nvdcve-2.0-2018.meta": Response(200, meta18, {}),
+                "GET /nvdcve-2.0-2018.json.gz": Response(200, body18, {}),
+                "GET /nvdcve-2.0-2026.meta": Response(200, meta26, {}),
+                "GET /nvdcve-2.0-2026.json.gz": Response(200, body26, {}),
+            }
+        ),
+    )
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    res = disputed_findings(inv, dt, nvd=nvd)
+    assert res.errors == [] and res.checked == 5 and res.unchecked == 1
+    assert [(r.vuln_id, r.marker, r.project_version) for r in res.rows] == [
+        ("CVE-2018-1", "REJECT", "1.2"),
+        ("CVE-2018-20225", "DISPUTED", "1.2"),
+        ("CVE-2018-5", "DISPUTED", "1.2"),
+    ]
+    assert res.rows[1].reason == 'CVE-2018-20225 is marked DISPUTED in NVD: "NOTE: intended."'
+
+
+def test_debian_cli_shows_project_version_and_why_debian_has_no_fix(inv, tmp_path, monkeypatch, capsys):
+    import secrets
+
+    from vulnflow.__main__ import main
+    from vulnflow.triage import load_review
+
+    monkeypatch.setenv("DT_URL", "http://dt.test")
+    monkeypatch.setenv("DT_API_KEY", secrets.token_hex(8))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    purl = "pkg:deb/debian/gnupg@2.4.7-21?distro=debian-13"
+
+    def finding(proj):
+        return {
+            "component": {"name": "gnupg", "version": "2.4.7-21", "purl": purl, "uuid": f"c-{proj}"},
+            "vulnerability": {
+                "source": "NVD",
+                "vulnId": "CVE-2025-1",
+                "severity": "MEDIUM",
+                "uuid": "v1",
+            },
+            "analysis": {},
+        }
+
+    def route(m, url, h, b):
+        if "/project/tag/team-dev" in url:  # one image name, two hosts, two tags
+            proj = [
+                {"uuid": "p1", "name": "container:nginx", "version": "1.31.8", "active": True},
+                {"uuid": "p2", "name": "container:nginx", "version": "trixie", "active": True},
+            ]
+            return Response(200, json.dumps(proj).encode(), {})
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        if "/finding/project/" in url:
+            return Response(
+                200, json.dumps([finding(url.split("/finding/project/")[1][:2])]).encode(), {}
+            )
+        assert "/tracker/data/json" in url
+        rel = {
+            "status": "open",
+            "urgency": "not yet assigned",
+            "nodsa": "Minor issue",
+            "nodsa_reason": "postponed",
+            "next_point_update": True,
+        }
+        return Response(
+            200, json.dumps({"gnupg": {"CVE-2025-1": {"releases": {"trixie": rel}}}}).encode(), {}
+        )
+
+    monkeypatch.setattr("vulnflow.net.urllib_transport", FakeTransport({"GET ": route}))
+    args = ["--env-file", str(env_file), "--inventory", str(INV), "--data-dir", str(tmp_path)]
+    assert main([*args, "debian"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    note = "(fix queued for the next point release; no DSA: Minor issue [postponed])"
+    assert out == [
+        f"not yet assigned no-fix   dev/container:nginx@1.31.8: gnupg 2.4.7-21 CVE-2025-1 "
+        f"(gnupg, trixie) fix: - {note}",
+        f"not yet assigned no-fix   dev/container:nginx@trixie: gnupg 2.4.7-21 CVE-2025-1 "
+        f"(gnupg, trixie) fix: - {note}",
+    ]
+
+    assert main([*args, "debian", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [(r["project_version"], r["note"]) for r in rows] == [
+        ("1.31.8", note[1:-1]),
+        ("trixie", note[1:-1]),
+    ]
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps(rows[:1]))
+    assert [it.label for it in load_review(review)] == ["dev/container:nginx@1.31.8"]
 
 
 def test_debian_version_order_matches_dpkg():
@@ -1308,7 +1544,18 @@ def test_recommend_picks_the_fix_for_the_installed_branch():
 
 def test_patches_skips_osv_for_unknown_component_versions(inv):
     from vulnflow.clients import OSV
-    from vulnflow.patches import patched_findings
+    from vulnflow.patches import is_go_pseudo_version, patched_findings
+
+    for v in (
+        "v0.0.0-20261105150651-e2e28adeee2c+dirty",
+        "v1.5.1-0.20260910130453-bcfe9f230c1d",
+        "v1.2.0-rc.1.0.20260101000000-abcdefabcdef",
+        "v2.0.0-20200101000000-abcdefabcdef+incompatible",
+    ):
+        assert is_go_pseudo_version("pkg:golang/x@" + v, v), v
+    for v in ("v1.2.0", "go1.24.6", "v1.2.3-rc.1", "v0.0.0-2026-abc"):
+        assert not is_go_pseudo_version("pkg:golang/x@" + v, v), v
+    assert not is_go_pseudo_version("pkg:npm/x", "v0.0.0-20261105150651-e2e28adeee2c")
 
     def finding(name, version, cve):
         return {
@@ -1321,6 +1568,8 @@ def test_patches_skips_osv_for_unknown_component_versions(inv):
         finding("github.com/grafana/grafana", "UNKNOWN", "CVE-2018-1"),
         finding("github.com/grafana/grafana", "UNKNOWN", "CVE-2018-2"),
         finding("minimatch", "9.0.3", "CVE-2026-1"),
+        # built from a commit: sorts before every release, so not sent to OSV either
+        finding("github.com/prometheus/prometheus", "v0.0.0-20261105150651-e2e28adeee2c", "CVE-2026-2"),
     ]
 
     def dt_route(m, url, h, b):
@@ -1349,10 +1598,10 @@ def test_patches_skips_osv_for_unknown_component_versions(inv):
     ]
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
     osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, unversioned, errors = patched_findings(
+    rows, unknown, unversioned, pseudo, errors = patched_findings(
         inv, dt, osv=OSV("https://osv.test", transport=osv_t)
     )
-    assert errors == [] and unknown == 0 and unversioned == 2
+    assert errors == [] and unknown == 0 and unversioned == 2 and pseudo == 1
     assert [(r.vuln_id, r.recommended, r.patched) for r in rows] == [
         ("CVE-2026-1", "9.0.6", "10.2.1, 9.0.6, 3.1.3")
     ]

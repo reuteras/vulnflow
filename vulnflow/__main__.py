@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE
+from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE, project_label
 from .config import (
     Inventory,
     add_subscriptions,
@@ -179,7 +179,7 @@ def _ignore(a: argparse.Namespace) -> int:
         print(f"  error {e}", file=sys.stderr)
         return 2
     for it in items:
-        print(f"  {it.team}/{it.project}: {it.component} {it.version} {it.vuln_id} -> {a.state}")
+        print(f"  {it.label}: {it.component} {it.version} {it.vuln_id} -> {a.state}")
         print(f"      comment: {it.comment}")
     if not a.apply:
         print(
@@ -204,7 +204,7 @@ def _ignore(a: argparse.Namespace) -> int:
     print(f"  {len(written)} written, {len(skipped)} already {a.state} and suppressed")
     for k in kept:
         print(
-            f"  kept  {k.item.team}/{k.item.project}: {k.item.component} {k.item.vuln_id} "
+            f"  kept  {k.item.label}: {k.item.component} {k.item.vuln_id} "
             f"already triaged as {k.state}; --overwrite to replace it"
         )
     if written:
@@ -238,10 +238,7 @@ def _unignore(a: argparse.Namespace) -> int:
     for it in todo:
         back = it.previous_state + (" (suppressed)" if it.previous_suppressed else "")
         src = "ledger" if it.from_ledger else "review file, previous state unknown"
-        print(
-            f"  {it.team}/{it.project}: {it.component} {it.vuln_id}: "
-            f"{it.expected_state} -> {back} [{src}]"
-        )
+        print(f"  {it.label}: {it.component} {it.vuln_id}: {it.expected_state} -> {back} [{src}]")
     if not a.apply:
         print(
             f"  dry run: {len(todo)} finding(s) would be reverted, each only if it is still as "
@@ -258,7 +255,7 @@ def _unignore(a: argparse.Namespace) -> int:
     reverted, skipped, errors = apply_reverts(admin, todo, ledger)
     print(f"  {len(reverted)} reverted, {len(skipped)} left alone")
     for it, why in skipped:
-        print(f"  left  {it.team}/{it.project}: {it.component} {it.vuln_id}: {why}")
+        print(f"  left  {it.label}: {it.component} {it.vuln_id}: {why}")
     for msg in errors:
         print(f"  error {msg}", file=sys.stderr)
     return 1 if errors else 0
@@ -420,10 +417,16 @@ def main(argv: list[str] | None = None) -> int:
 
     dp = sub.add_parser(
         "disputed",
-        help="open findings whose CVE record starts with ** DISPUTED ** or ** REJECT **",
+        help="open findings NVD marks disputed, rejected or unsupported-when-assigned "
+        "(downloads NVD's yearly feeds for the years of your CVE ids, cached)",
     )
     dp.add_argument("--team", default=None, help="only this team (default: all)")
     dp.add_argument("--json", action="store_true")
+    dp.add_argument(
+        "--no-nvd",
+        action="store_true",
+        help="do not download NVD feeds; only the old ** DISPUTED ** description prefix is checked",
+    )
 
     ig = sub.add_parser(
         "ignore",
@@ -608,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        rows, unknown, unversioned, errors = patched_findings(
+        rows, unknown, unversioned, pseudo, errors = patched_findings(
             inv, dt, a.team, osv=OSV() if a.osv else None
         )
         if a.json:
@@ -616,7 +619,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for r in rows:
                 print(
-                    f"{r.severity or '-':8} {r.team}/{r.project}: {r.component} {r.version} "
+                    f"{r.severity or '-':8} {r.team}/{project_label(r.project, r.project_version)}: "
+                    f"{r.component} {r.version} "
                     f"{r.vuln_id} -> {r.recommended or r.patched}{' (osv)' if r.via == 'osv' else ''}"
                 )
         print(
@@ -626,6 +630,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"; {unversioned} skipped: component version unknown (the SBOM tool could not "
                 "resolve it, so every CVE of the package matches; fix the SBOM, not the package)"
                 if unversioned
+                else ""
+            )
+            + (
+                f"; {pseudo} skipped: Go pseudo-version (built from a commit, so every advisory "
+                "matches; check the commit date in the version instead)"
+                if pseudo
                 else ""
             ),
             file=sys.stderr,
@@ -679,7 +689,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 note = f" ({vrow.note})" if vrow.note and vrow.action == "wontfix" else ""
                 print(
-                    f"{vrow.vendor_severity or '-':10} {vrow.action:12} {vrow.team}/{vrow.project}: "
+                    f"{vrow.vendor_severity or '-':10} {vrow.action:12} "
+                    f"{vrow.team}/{project_label(vrow.project, vrow.project_version)}: "
                     f"{vrow.component} {vrow.version} {vrow.vuln_id} "
                     f"({VENDOR_NAMES[vrow.vendor]} {vrow.package}, {vrow.release}) "
                     f"fix: {vrow.fixed or '-'}{extra}{note}"
@@ -697,7 +708,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if vres.errors else 0
 
     if a.cmd == "disputed":
-        from .disputed import disputed_findings
+        from .disputed import NvdFeeds, disputed_findings
 
         if a.team and a.team not in inv.teams:
             print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
@@ -705,20 +716,33 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        disp, checked, errors = disputed_findings(inv, dt, a.team)
+        nvd = None
+        if not a.no_nvd:
+            nvd = NvdFeeds(data_dir, notify=lambda msg: print(f"  {msg}", file=sys.stderr))
+        res = disputed_findings(inv, dt, a.team, nvd=nvd)
         if a.json:
-            print(json.dumps([asdict(x) for x in disp], indent=2))
+            print(json.dumps([asdict(x) for x in res.rows], indent=2))
         else:
-            for x in disp:
-                print(f"{x.marker:8} {x.team}/{x.project}: {x.component} {x.version} {x.reason}")
+            for x in res.rows:
+                print(
+                    f"{x.marker:11} {x.team}/{project_label(x.project, x.project_version)}: "
+                    f"{x.component} {x.version} {x.reason}"
+                )
         print(
-            f"  {len(disp)} of {checked} open finding(s) are marked disputed or rejected "
-            "(a marker is a reason to review, not a verdict)",
+            f"  {len(res.rows)} of {res.checked} open finding(s) are marked disputed, rejected or "
+            "unsupported (a marker is a reason to review, not a verdict)"
+            + (
+                "; NVD feeds skipped (--no-nvd): only the old description prefix was checked, "
+                "which current NVD records no longer carry"
+                if nvd is None
+                else f"; {res.unchecked} CVE finding(s) not in the NVD feeds (too new, or the "
+                "feed could not be read)"
+            ),
             file=sys.stderr,
         )
-        for msg in errors:
+        for msg in res.errors:
             print(f"  error {msg}", file=sys.stderr)
-        return 1 if errors else 0
+        return 1 if res.errors else 0
 
     if a.cmd == "debian":
         from .debian import ACTIONS, DebianTracker, debian_findings
@@ -743,9 +767,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for drow in shown:
                 print(
-                    f"{drow.urgency or '-':16} {drow.action:8} {drow.team}/{drow.project}: "
+                    f"{drow.urgency or '-':16} {drow.action:8} "
+                    f"{drow.team}/{project_label(drow.project, drow.project_version)}: "
                     f"{drow.component} {drow.installed or drow.version} {drow.vuln_id} "
                     f"({drow.package}, {drow.release}) fix: {drow.fixed or '-'}"
+                    + (f" ({drow.note})" if drow.note and drow.action != "fixed" else "")
                 )
         by_action = {k: sum(1 for r in drows if r.action == k) for k in ACTIONS}
         print(

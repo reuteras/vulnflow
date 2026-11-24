@@ -136,6 +136,7 @@ class VendorFinding:
     project_uuid: str = ""
     component_uuid: str = ""
     vuln_uuid: str = ""
+    project_version: str = ""
 
 
 @dataclass
@@ -419,6 +420,7 @@ def vendor_findings(
             VendorFinding(
                 team=key,
                 project=proj.name,
+                project_version=proj.version,
                 component=str(c.get("name") or ""),
                 version=comp.installed,
                 vuln_id=vid,

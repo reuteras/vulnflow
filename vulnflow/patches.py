@@ -12,11 +12,18 @@ version (see versions.recommend).
 Components whose version is unknown (the SBOM tool could not resolve it, shown as UNKNOWN)
 are not sent to OSV: with no version every historic CVE of the package matches and the
 "fixes" would mean nothing. They are counted separately.
+
+Go modules built from a commit instead of a release carry a pseudo-version
+(`v0.0.0-20261105150651-e2e28adeee2c`, `v1.5.1-0.20260910130453-bcfe9f230c1d`). It sorts
+before every release, so every advisory matches and the "fix" is often older than what runs
+(seen live, 2026-11-24: a Prometheus built on 2026-11-05 was told to go to 0.305.2). Those
+are skipped and counted too; the commit date in the version is the thing to check.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +47,7 @@ class PatchedFinding:
     patched: str
     via: str = "dt"  # where the fix version came from: dt or osv
     recommended: str = ""  # the fix for the installed version, when it can be worked out
+    project_version: str = ""
 
 
 def open_findings(
@@ -67,17 +75,26 @@ def open_findings(
 
 
 UNKNOWN_VERSIONS = ("", "unknown", "(devel)", "devel")
+# vX.0.0-<14-digit UTC time>-<12 hex>, vX.Y.Z-0.<time>-<hex>, vX.Y.Z-pre.0.<time>-<hex>,
+# optionally +incompatible / +dirty (https://go.dev/ref/mod#pseudo-versions)
+_GO_PSEUDO = re.compile(r"(?:^v?\d+\.\d+\.\d+-|\.)\d{14}-[0-9a-f]{12}(?:\+[0-9A-Za-z.]+)?$")
+
+
+def is_go_pseudo_version(purl: str, version: str) -> bool:
+    return purl.startswith("pkg:golang/") and bool(_GO_PSEUDO.search(version.strip()))
 
 
 def patched_findings(
     inv: Inventory, dt: DependencyTrack, team: str | None = None, osv: OSV | None = None
-) -> tuple[list[PatchedFinding], int, int, list[str]]:
+) -> tuple[list[PatchedFinding], int, int, int, list[str]]:
     """(findings with a recorded fix, count of open findings without one, count skipped
-    because the component version is unknown, errors)."""
+    because the component version is unknown, count skipped because it is a Go
+    pseudo-version, errors)."""
     rows: list[PatchedFinding] = []
     errors: list[str] = []
     unknown = 0
     unversioned = 0
+    pseudo = 0
     cache: dict[tuple[str, str], str] = {}
     osv_cache: dict[str, list[dict[str, Any]] | None] = {}
     for key, proj, f in open_findings(inv, dt, team, errors):
@@ -101,6 +118,9 @@ def patched_findings(
         if not patched and version.strip().lower() in UNKNOWN_VERSIONS:
             unversioned += 1
             continue
+        if not patched and is_go_pseudo_version(purl, version):
+            pseudo += 1
+            continue
         if not patched and osv and purl:
             if purl not in osv_cache:
                 try:
@@ -119,6 +139,7 @@ def patched_findings(
             PatchedFinding(
                 team=key,
                 project=proj.name,
+                project_version=proj.version,
                 component=c.get("name", ""),
                 version=c.get("version", ""),
                 source=src,
@@ -131,4 +152,4 @@ def patched_findings(
         )
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     rows.sort(key=lambda r: (order.get(r.severity, 9), r.team, r.project, r.component, r.vuln_id))
-    return rows, unknown, unversioned, errors
+    return rows, unknown, unversioned, pseudo, errors
