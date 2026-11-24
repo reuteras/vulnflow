@@ -87,7 +87,8 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
 - Dependabot covers uv, GitHub Actions, pre-commit, `deploy/Dockerfile` and the
   Dependency-Track images (tags are written out in
   `stacks/dependency-track/docker-compose.yml` on purpose; `${VAR}` tags are invisible to
-  Dependabot). `DD_REF` and `OPENCVE_REF` in `.env.example` are bumped by hand. `vulnflow check-updates`
+  Dependabot). `DD_REF` and `OPENCVE_REF` in `.env.example`, and the valkey image pinned ahead
+  of `DD_REF` in `stacks/defectdojo/override.yml`, are bumped by hand. `vulnflow check-updates`
   (`vulnflow/upstreams.py`, nightly from the server's update) reports when one is due;
   `./poc.sh upgrade` deploys a merged pin after a database dump.
 - Container images use exact tags, never floating ones: `deploy/Dockerfile` is

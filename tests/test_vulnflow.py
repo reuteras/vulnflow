@@ -3472,6 +3472,13 @@ UPSTREAM_ROUTES: dict[str, object] = {
         _rel("5.2.2", "2026-11-10"),
         _rel("5.3.0-rc.1", "2026-11-01", pre=True),
     ],
+    "GET valkey-io/valkey/releases": [
+        _rel("9.2.0", "2026-11-19"),
+        _rel("9.1.4", "2026-11-18"),
+        _rel("9.0.8", "2026-11-18"),
+        _rel("8.1.12", "2026-11-18"),
+        _rel("9.1.3", "2026-10-26"),
+    ],
 }
 
 
@@ -3481,9 +3488,28 @@ def _upstream_root(tmp_path: Path, running_dd: str) -> tuple[Path, Path]:
         "services:\n  apiserver:\n    image: ghcr.io/dependencytrack/apiserver:5.2.2\n"
     )
     (tmp_path / ".env.example").write_text("DD_REF=3.5.201\nOPENCVE_REF=v3.1.0\n")
+    (tmp_path / "stacks/defectdojo").mkdir(parents=True)
+    (tmp_path / "stacks/defectdojo/override.yml").write_text(
+        "services:\n  valkey:\n    <<: *restart\n"
+        "    image: valkey/valkey:9.1.4-alpine@sha256:" + "a" * 64 + "\n"
+    )
     env_file = tmp_path / ".env"
     env_file.write_text(f"DD_REF='{running_dd}'\nOPENCVE_REF=v3.1.0\n")
     return tmp_path, env_file
+
+
+def test_image_tag_and_version() -> None:
+    from vulnflow.upstreams import image_tag, image_version
+
+    digest = "@sha256:" + "b" * 64
+    assert image_tag("valkey/valkey:9.1.2-alpine" + digest) == "9.1.2-alpine"
+    assert image_tag("localhost:5000/redis") == ""  # a registry port is not a tag
+    assert image_tag("ghcr.io/dependencytrack/apiserver:5.2.2") == "5.2.2"
+    assert (image_version("9.1.4-alpine"), image_version("v1.2"), image_version("latest")) == (
+        "9.1.4",
+        "v1.2",
+        "",
+    )
 
 
 def test_upstream_releases_skip_prereleases_drafts_and_odd_tags() -> None:
@@ -3511,9 +3537,9 @@ def test_check_updates_cooldown_ready_and_major_line(tmp_path: Path) -> None:
 
     root, env_file = _upstream_root(tmp_path, running_dd="3.5.200")
     now = datetime(2026, 11, 24, 18, 0, tzinfo=UTC)
-    st = {
-        s.component.name: s for s in check(root, env_file, FakeTransport(UPSTREAM_ROUTES), now, "5.2.2")
-    }
+    running_valkey = "9.1.2-alpine"
+    statuses = check(root, env_file, FakeTransport(UPSTREAM_ROUTES), now, "5.2.2", running_valkey)
+    st = {s.component.name: s for s in statuses}
 
     dojo = st["dojo"]
     assert (dojo.running, dojo.pinned) == ("3.5.200", "3.5.201")
@@ -3531,6 +3557,16 @@ def test_check_updates_cooldown_ready_and_major_line(tmp_path: Path) -> None:
     assert dt.pinned == "5.2.2" and dt.upstream and dt.upstream.tag == "5.2.2"
     assert dt.waiting and dt.waiting.tag == "5.2.3"
     assert not dt.actionable
+
+    vk = st["valkey"]  # variant and digest stripped; 9.1.4 and 9.2.0 still in the cooldown
+    assert (vk.running, vk.pinned) == ("9.1.2", "9.1.4")
+    assert vk.upstream and vk.upstream.tag == "9.1.3"
+    assert vk.waiting and vk.waiting.tag == "9.2.0"  # same major; 8.1.12 ignored
+    assert vk.lines() == [
+        "Valkey (DefectDojo): running 9.1.2, pinned 9.1.4",
+        "  READY  9.1.4 is pinned: ./poc.sh dojo-up",
+        "  new    9.2.0 (cooldown until 2026-11-26)",
+    ]
     assert "Nothing to do." not in report(list(st.values()))
 
 
@@ -3544,10 +3580,16 @@ def test_check_updates_nothing_to_do_and_errors(tmp_path: Path) -> None:
     env_file.write_text("DD_REF=3.5.202\nOPENCVE_REF=v3.1.0\n")
     now = datetime(2026, 11, 20, tzinfo=UTC)  # 3.5.202 and 5.2.3 not out of cooldown / released
     routes = dict(UPSTREAM_ROUTES)
-    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2"))
+    vk = "9.1.4-alpine@sha256:" + "a" * 64
+    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2", vk))
     assert out.endswith("Nothing to do."), out
 
+    routes["GET valkey-io/valkey/releases"] = [_rel("9.1.5", "2026-11-01")]  # ready: bump it
+    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2", vk))
+    assert "  UPDATE 9.1.5 released 2026-11-01: bump the valkey image (tag and digest) in " in out
+    routes["GET valkey-io/valkey/releases"] = UPSTREAM_ROUTES["GET valkey-io/valkey/releases"]
+
     routes["GET opencve/opencve/releases"] = Response(500, b"boom", {})
-    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2"))
+    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2", vk))
     assert "OpenCVE: running v3.1.0, pinned v3.1.0\n  ERROR  release check failed:" in out
     assert "Nothing to do." not in out

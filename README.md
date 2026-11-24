@@ -123,9 +123,11 @@ Stopping and starting later (data is kept in Docker volumes):
 ### Updates
 
 `./poc.sh check-updates` (run nightly on the server, output in the cron mail) compares, for
-DefectDojo, OpenCVE and Dependency-Track, the newest upstream GitHub release that is at least
-7 days old, the version pinned in the repository (`DD_REF`/`OPENCVE_REF` in `.env.example`,
-the image tags in `stacks/dependency-track/docker-compose.yml`) and the running one:
+DefectDojo, OpenCVE, Dependency-Track and DefectDojo's Valkey, the newest upstream GitHub
+release that is at least 7 days old, the version pinned in the repository
+(`DD_REF`/`OPENCVE_REF` in `.env.example`, the image tags in
+`stacks/dependency-track/docker-compose.yml`, the valkey image in
+`stacks/defectdojo/override.yml`) and the running one:
 
 ```text
 DefectDojo: running 3.5.200, pinned 3.5.201
@@ -135,6 +137,10 @@ DefectDojo: running 3.5.200, pinned 3.5.201
 ```
 
 - **UPDATE**: bump the pin in the repository (Dependency-Track: Dependabot opens the PR).
+- **Valkey** is pinned in the DefectDojo overlay ahead of `DD_REF` and bumped by hand (tag
+  and digest; Dependabot doesn't read that file). Its release notes say `Upgrade urgency
+  SECURITY` when the cooldown is worth skipping. READY means `./poc.sh dojo-up`: Valkey
+  only holds DefectDojo's Celery queue and cache.
 - **READY**: on the server, `git pull` and `./poc.sh upgrade dojo|opencve|dtrack`. It dumps
   that stack's databases to `data/backups/` (newest 5 kept), sets the version in `.env` and
   reruns the stack's setup steps (clone/checkout, build, migrations on start, bootstrap).
@@ -958,7 +964,7 @@ connects in.
 | `registry.defectdojo.com` | DefectDojo `django` and `nginx` images | `setup`, `upgrade` |
 | Docker Hub | `postgres`, `valkey`, `nginx`, `redis/redis-stack`, the Airflow base image, `python` (glue and OpenCVE web images) | `setup`, `upgrade` |
 | PyPI | Python packages for OpenCVE's locally built images (vulnflow itself has no runtime dependencies) | OpenCVE build |
-| `api.github.com` | Newest releases of DefectDojo, OpenCVE and Dependency-Track (anonymous, three requests per run; sends nothing about you) | `./poc.sh check-updates` (nightly) |
+| `api.github.com` | Newest releases of DefectDojo, OpenCVE, Dependency-Track and Valkey (anonymous, four requests per run; sends nothing about you) | `./poc.sh check-updates` (nightly) |
 
 ### Vulnerability data, while running
 

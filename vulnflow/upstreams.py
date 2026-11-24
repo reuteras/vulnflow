@@ -5,7 +5,9 @@ Each component has three versions:
     running   what this server runs: DD_REF / OPENCVE_REF in .env, the image tag of the
               running Dependency-Track apiserver container
     pinned    the reviewed version in the repository: DD_REF / OPENCVE_REF in .env.example,
-              the image tag in stacks/dependency-track/docker-compose.yml
+              the image tag in stacks/dependency-track/docker-compose.yml, the valkey image
+              in stacks/defectdojo/override.yml (pinned ahead of DD_REF; image variant and
+              digest are not part of the version)
     upstream  the newest GitHub release (no drafts or prereleases) that is at least
               COOLDOWN_DAYS old, the same wait as Dependabot (AGENTS.md "Cooldown")
 
@@ -20,8 +22,9 @@ Releases younger than the cooldown are listed as information only. Upstream beha
 on (checked 2026-11-24): GET https://api.github.com/repos/<repo>/releases returns
 `tag_name`, `draft`, `prerelease`, `published_at` (ISO 8601, Z); DefectDojo tags `3.5.201`,
 OpenCVE `v3.1.0`, Dependency-Track 5.x is released from DependencyTrack/dependency-track
-next to a 4.x line (so only the pinned major is compared). Anonymous API use allows 60
-requests an hour, three per run.
+next to a 4.x line (so only the pinned major is compared), Valkey tags `9.1.4` with parallel
+8.x/9.0 lines and says "Upgrade urgency SECURITY" in the notes of security releases.
+Anonymous API use allows 60 requests an hour, four per run.
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ from .versions import version_key
 COOLDOWN_DAYS = 7
 DT_COMPOSE = "stacks/dependency-track/docker-compose.yml"
 DT_PROJECT = "vulnflow-dtrack"
+DD_PROJECT = "defectdojo"
+DD_OVERRIDE = "stacks/defectdojo/override.yml"
 
 
 @dataclass(frozen=True)
@@ -46,12 +51,33 @@ class Component:
     title: str
     repo: str  # GitHub owner/name
     same_major: bool  # compare only within the pinned major (parallel release lines)
+    bump: str  # how a newer upstream release gets pinned
+    deploy: str = ""  # how a pinned version reaches the server (default ./poc.sh upgrade)
+
+    @property
+    def deploy_cmd(self) -> str:
+        return self.deploy or f"./poc.sh upgrade {self.name}"
 
 
+_REF_BUMP = "in .env.example after the AGENTS.md checks"
 COMPONENTS = (
-    Component("dojo", "DefectDojo", "DefectDojo/django-DefectDojo", same_major=False),
-    Component("opencve", "OpenCVE", "opencve/opencve", same_major=False),
-    Component("dtrack", "Dependency-Track", "DependencyTrack/dependency-track", same_major=True),
+    Component("dojo", "DefectDojo", "DefectDojo/django-DefectDojo", False, f"bump DD_REF {_REF_BUMP}"),
+    Component("opencve", "OpenCVE", "opencve/opencve", False, f"bump OPENCVE_REF {_REF_BUMP}"),
+    Component(
+        "dtrack",
+        "Dependency-Track",
+        "DependencyTrack/dependency-track",
+        True,
+        "Dependabot PR to stacks/dependency-track",
+    ),
+    Component(
+        "valkey",
+        "Valkey (DefectDojo)",
+        "valkey-io/valkey",
+        True,
+        f"bump the valkey image (tag and digest) in {DD_OVERRIDE} by hand",
+        deploy="./poc.sh dojo-up",
+    ),
 )
 
 
@@ -76,17 +102,11 @@ class Status:
         if self.error:
             out.append(f"  ERROR  release check failed: {self.error}")
         if self.upstream and _newer(self.upstream.tag, self.pinned):
-            how = (
-                "Dependabot PR to stacks/dependency-track"
-                if c.name == "dtrack"
-                else f"bump {'DD_REF' if c.name == 'dojo' else 'OPENCVE_REF'} in .env.example "
-                "after the AGENTS.md checks"
-            )
             out.append(
-                f"  UPDATE {self.upstream.tag} released {self.upstream.published:%Y-%m-%d}: {how}"
+                f"  UPDATE {self.upstream.tag} released {self.upstream.published:%Y-%m-%d}: {c.bump}"
             )
         if self.pinned and _newer(self.pinned, self.running):
-            out.append(f"  READY  {self.pinned} is pinned: ./poc.sh upgrade {c.name}")
+            out.append(f"  READY  {self.pinned} is pinned: {c.deploy_cmd}")
         if self.waiting:
             until = self.waiting.published + timedelta(days=COOLDOWN_DAYS)
             out.append(f"  new    {self.waiting.tag} (cooldown until {until:%Y-%m-%d})")
@@ -122,24 +142,43 @@ def read_env_value(path: Path, key: str) -> str:
 
 
 def compose_image_tag(path: Path, image: str) -> str:
-    """Tag of `image:` <image>:<tag> in a compose file ("" if not found)."""
+    """Tag of `image:` <image>:<tag>[@digest] in a compose file ("" if not found)."""
     if not path.is_file():
         return ""
-    m = re.search(rf"^\s*image:\s*{re.escape(image)}:(\S+)\s*$", path.read_text(), re.M)
+    m = re.search(rf"^\s*image:\s*{re.escape(image)}:([^@\s]+)\S*\s*$", path.read_text(), re.M)
     return m.group(1) if m else ""
+
+
+def image_tag(ref: str) -> str:
+    """The tag of an image reference (registry/name:tag@sha256:...); "" without one."""
+    ref = ref.split("@", 1)[0]
+    last = ref.rsplit("/", 1)[-1]
+    return last.rsplit(":", 1)[1] if ":" in last else ""
+
+
+def image_version(tag: str) -> str:
+    """The version part of an image tag: 9.1.4-alpine -> 9.1.4 (the variant is not a
+    pre-release, which is what version_key would make of it)."""
+    m = re.match(r"v?\d+(?:\.\d+)*", tag)
+    return m.group(0) if m else ""
 
 
 def running_dt_tag() -> str:
     """Image tag of the running Dependency-Track apiserver container ("" when not running)."""
+    return running_tag(DT_PROJECT, "apiserver")
+
+
+def running_tag(project: str, service: str) -> str:
+    """Image tag of a running compose service's container ("" when not running)."""
     try:
         out = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [  # noqa: S607 - docker from PATH, as everywhere in poc.sh
                 "docker",
                 "ps",
                 "--filter",
-                f"label=com.docker.compose.project={DT_PROJECT}",
+                f"label=com.docker.compose.project={project}",
                 "--filter",
-                "label=com.docker.compose.service=apiserver",
+                f"label=com.docker.compose.service={service}",
                 "--format",
                 "{{.Image}}",
             ],
@@ -150,8 +189,7 @@ def running_dt_tag() -> str:
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    image = out.strip().splitlines()[0] if out.strip() else ""
-    return image.rsplit(":", 1)[1] if ":" in image.rsplit("/", 1)[-1] else ""
+    return image_tag(out.strip().splitlines()[0]) if out.strip() else ""
 
 
 def releases(repo: str, transport: Transport | None = None) -> list[Release]:
@@ -197,6 +235,7 @@ def check(
     transport: Transport | None = None,
     now: datetime | None = None,
     dt_running: str | None = None,
+    valkey_running: str | None = None,
 ) -> list[Status]:
     now = now or datetime.now(UTC)
     example = root / ".env.example"
@@ -210,6 +249,12 @@ def check(
         "dtrack": (
             running_dt_tag() if dt_running is None else dt_running,
             compose_image_tag(compose, "ghcr.io/dependencytrack/apiserver"),
+        ),
+        "valkey": (
+            image_version(
+                running_tag(DD_PROJECT, "valkey") if valkey_running is None else valkey_running
+            ),
+            image_version(compose_image_tag(root / DD_OVERRIDE, "valkey/valkey")),
         ),
     }
     out = []
