@@ -21,8 +21,10 @@ projects are one group each):
   version of the group exists, or older than `gone_days` when it is the newest (nothing
   runs it any more). Its findings in DefectDojo are closed by re-importing an empty
   finding list into its test (close_old_findings); dt2dojo skips inactive projects.
-- reactivate: an inactive project that is the newest upload of its group again (a
-  rollback; DT accepts uploads to an inactive project and leaves it inactive).
+- reactivate: an inactive project uploaded again within `superseded_days` (a rollback, or
+  a version that runs next to a newer one, e.g. two postgres containers on one host; DT
+  accepts uploads to an inactive project and leaves it inactive). Not only the newest:
+  a parallel version deactivated while its host was offline would otherwise stay hidden.
 
 Runs at the start of every `dt2dojo` round with DT_MAINTENANCE_API_KEY (team
 vulnflow-maintenance, see bootstrap.DT_MAINTENANCE_PERMISSIONS), and by hand as
@@ -273,7 +275,9 @@ def prune(
         for m in uploaded:
             age = now - (m.p.last_bom_import or 0)
             limit = gone_days if m is newest else superseded_days
-            if m is newest and not m.p.active and age < superseded_days * DAY:
+            # uploaded again since it was deactivated: the deactivation rule needs an age
+            # above superseded_days, so this can't flip back and forth
+            if not m.p.active and age < superseded_days * DAY:
                 rep.reactivated.append(f"{m.team.key}/{m.label}")
                 if apply:
                     try:

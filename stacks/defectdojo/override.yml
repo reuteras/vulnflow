@@ -12,7 +12,13 @@ x-restart: &restart
   restart: unless-stopped
 services:
   postgres: *restart
-  valkey: *restart
+  # Upstream pins valkey with DD_REF; pinned here ahead of it (9.1.4: CVE-2026-130822,
+  # 2026-11-18). Bumped by hand: Dependabot does not watch this file (the name is not a
+  # compose file name). Valkey holds only DefectDojo's Celery broker and cache.
+  # When bumping DD_REF, drop this if upstream's pin is as new.
+  valkey:
+    <<: *restart
+    image: valkey/valkey:9.1.4-alpine@sha256:56729e68bdda139cbd3f6a2538683dc3523325fc5711ea1a379938f1b37893f0
   celerybeat: *restart
   celeryworker: *restart
   initializer:

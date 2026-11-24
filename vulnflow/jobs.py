@@ -146,6 +146,7 @@ def dt_to_dojo(
         rep.done += [f"{tag}prune: reactivated {line}" for line in pr.reactivated]
         rep.done += [f"{tag}prune: review date passed, shown again: {line}" for line in pr.reopened]
         rep.errors += [f"prune: {e}" for e in pr.errors]
+    inactive = 0
     for team in inv.teams.values():
         try:
             projects = dtrack.projects_by_tag(team.dtrack_tag)
@@ -154,8 +155,8 @@ def dt_to_dojo(
             continue
         for p in projects:
             label = f"{p.name}@{p.version or '-'} -> {team.defectdojo_product_type}"
-            if not p.active:
-                rep.warnings.append(f"skip inactive {label}")
+            if not p.active:  # retired by prune (or by hand); its findings are closed
+                inactive += 1
                 continue
             if dry_run:
                 rep.done.append(f"[dry-run] {label}")
@@ -166,4 +167,6 @@ def dt_to_dojo(
                 rep.done.append(f"{label} (active findings: {stats.get('active', '?')})")
             except Exception as e:
                 rep.errors.append(f"{label}: {e}")
+    if inactive:
+        rep.done.append(f"{inactive} inactive project(s) skipped (retired versions)")
     return rep
