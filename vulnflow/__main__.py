@@ -858,12 +858,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         located, errors = locate(inv, dt, a.name, a.version, a.project, a.team)
         if a.json:
-            print(json.dumps([asdict(r) for r in located], indent=2))
+            print(json.dumps([asdict(loc) for loc in located], indent=2))
         else:
-            for r in located:
+            for loc in located:
                 print(
-                    f"{r.team}/{project_label(r.project, r.project_version)}: {r.component} "
-                    f"{r.version}  {', '.join(r.paths) or '(no path recorded)'}"
+                    f"{loc.team}/{project_label(loc.project, loc.project_version)}: {loc.component} "
+                    f"{loc.version}  {', '.join(loc.paths) or '(no path recorded)'}"
                 )
         print(f"  {len(located)} component(s) found", file=sys.stderr)
         for msg in errors:
