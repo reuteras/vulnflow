@@ -185,7 +185,15 @@ clone_or_update() { # url dir ref
     git clone --quiet "$url" "$dir"
   fi
   if [[ -n "$ref" ]]; then
-    "${g[@]}" fetch --quiet --tags origin
+    # Not `fetch --tags`: upstream moves floating tags (DefectDojo's nightly-dev), and git
+    # refuses to clobber them, which failed every rerun. Fetch the branches plus only the
+    # pinned tag; no `+`, so a moved release tag still fails loudly.
+    "${g[@]}" fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*' \
+      || die "git fetch failed in $dir"
+    if "${g[@]}" ls-remote --exit-code --tags origin "refs/tags/$ref" >/dev/null; then
+      "${g[@]}" fetch --quiet --no-tags origin "refs/tags/$ref:refs/tags/$ref" \
+        || die "tag $ref in $url points elsewhere than the local one: upstream moved a release tag? Check before deleting it in $dir"
+    fi
     "${g[@]}" checkout --quiet "$ref"
   fi
   log "$(basename "$dir") at $("${g[@]}" describe --tags --always 2>/dev/null)"
