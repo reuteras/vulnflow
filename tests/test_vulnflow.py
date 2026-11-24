@@ -513,6 +513,11 @@ class FakeDT:
             if method == "GET":
                 return ok({"config": self.osv}) if self.osv is not None else Response(404, b"", {})
             if method == "PUT":
+                # 5.2.2 answers this PUT only as application/problem+json (seen live): an
+                # Accept of just application/json gets 406 before anything is stored
+                accept = headers.get("Accept", "*/*")
+                if not any(a in accept for a in ("application/problem+json", "*/*")):
+                    return Response(406, b'{"title":"Not Acceptable","status":406}', {})
                 cfg = json.loads(body)["config"]
                 if cfg == self.osv:
                     return Response(304, b"", {})

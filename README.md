@@ -770,7 +770,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | Dependency-Track `PUT /api/v1/bom` (JSON + `projectTags`), `/project/tag/{tag}`, FPF export | From DT docs. Paging header handling covers both v4 and v5 |
 | DefectDojo `reimport-scan` with FPF scan type + `auto_create_context` | From DefectDojo docs |
 | DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source; run live against 5.2.2 |
-| DT OSV config (`/api/v2/extension-points/vuln-data-source/extensions/osv/config`, defaults) | Checked against the DT 5.2.2 tag's source; not yet run live |
+| DT OSV config (`/api/v2/extension-points/vuln-data-source/extensions/osv/config`, defaults) | **Run live 2026-11-24 against 5.2.2**: `GET` returns the documented `{"config": {...}}` (OSV disabled, `PyPI, npm, Go, Maven, NuGet`), but the `PUT` answers only as `application/problem+json`, so with `Accept: application/json` it was rejected with 406 and `dt-bootstrap` never enabled OSV (only a warning). Now sent with both types; an unchanged config then returns 304 as expected |
 | DD bootstrap (`DD_ADMIN_PASSWORD` in `complete_initialization`, `api-token-auth`) | Checked against DefectDojo 3.5.201 source and compose file |
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |

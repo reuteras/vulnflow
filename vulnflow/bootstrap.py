@@ -113,7 +113,14 @@ def dt_enable_osv(http: Http, ecosystems: list[str]) -> str:
         wanted = {**current, "enabled": True, "ecosystems": have + added}
         if wanted == current:
             return "unchanged"
-        r = http.put(DT_OSV_PATH, json_body={"config": wanted}, expect_ok=False)
+        # The v2 API answers this PUT only as application/problem+json; with the client's
+        # usual Accept: application/json, DT 5.2.2 rejects it with 406 (seen live 2026-11-24)
+        r = http.put(
+            DT_OSV_PATH,
+            json_body={"config": wanted},
+            headers={"Accept": "application/json, application/problem+json"},
+            expect_ok=False,
+        )
         if r.status == 304:
             return "unchanged"
         if not r.ok:

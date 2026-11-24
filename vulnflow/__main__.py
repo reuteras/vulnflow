@@ -700,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        pres = prune(
+        prune_res = prune(
             inv,
             maint,
             _dojo() if a.apply else None,
@@ -708,21 +708,21 @@ def main(argv: list[str] | None = None) -> int:
             superseded_days=a.superseded_days,
             gone_days=a.gone_days,
         )
-        for line in pres.reactivated:
+        for line in prune_res.reactivated:
             print(f"  reactivate  {line}")
-        for line in pres.deactivated:
+        for line in prune_res.deactivated:
             print(f"  deactivate  {line}")
-        for line in pres.carried:
+        for line in prune_res.carried:
             print(f"  carry       {line}")
         print(
-            f"  {len(pres.carried)} decision(s) carried forward, {len(pres.deactivated)} "
-            f"project(s) deactivated, {len(pres.reactivated)} reactivated"
+            f"  {len(prune_res.carried)} decision(s) carried forward, {len(prune_res.deactivated)} "
+            f"project(s) deactivated, {len(prune_res.reactivated)} reactivated"
             + ("" if a.apply else "; dry run, add --apply"),
             file=sys.stderr,
         )
-        for msg in pres.errors:
+        for msg in prune_res.errors:
             print(f"  error {msg}", file=sys.stderr)
-        return 1 if pres.errors else 0
+        return 1 if prune_res.errors else 0
 
     if a.cmd == "ignore":
         return _ignore(a)
