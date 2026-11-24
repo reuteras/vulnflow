@@ -1,6 +1,6 @@
 """CLI: python -m vulnflow {sync,dt2dojo,serve,enrich,patches,debian,vendor,disputed,
 ignore,unignore,upload-sbom,machines,agent-bundle,agent-revoke,dt-bootstrap,dd-bootstrap,opencve-bootstrap,
-opencve-webhook-input,env-set}"""
+opencve-webhook-input,env-set,check-updates}"""
 
 from __future__ import annotations
 
@@ -525,6 +525,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("env-set", help="read KEY=VALUE lines from stdin into the .env file")
 
+    sub.add_parser(
+        "check-updates",
+        help="newer DefectDojo/OpenCVE/Dependency-Track releases (7-day cooldown) and pinned "
+        "versions not deployed yet",
+    )
+
     a = ap.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if a.verbose else logging.INFO,
@@ -536,6 +542,11 @@ def main(argv: list[str] | None = None) -> int:
         return _env_set(a.env_file)
     if a.cmd == "dd-bootstrap":
         return _dd_bootstrap(a.env_file, a.wait)
+    if a.cmd == "check-updates":
+        from .upstreams import check, report
+
+        print(report(check(Path("."), Path(a.env_file))))
+        return 0
     inv = load_inventory(a.inventory)
     data_dir = Path(a.data_dir)
     if a.cmd in ("sync", "opencve-bootstrap", "suggest-subscriptions"):

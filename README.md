@@ -119,6 +119,26 @@ Stopping and starting later (data is kept in Docker volumes):
 `up` uses the images and configuration from the last `setup`; after changing versions
 (`DD_REF`, `OPENCVE_REF`, image tags) run `./poc.sh setup` instead.
 
+### Updates
+
+`./poc.sh check-updates` (run nightly on the server, output in the cron mail) compares, for
+DefectDojo, OpenCVE and Dependency-Track, the newest upstream GitHub release that is at least
+7 days old, the version pinned in the repository (`DD_REF`/`OPENCVE_REF` in `.env.example`,
+the image tags in `stacks/dependency-track/docker-compose.yml`) and the running one:
+
+```text
+DefectDojo: running 3.5.200, pinned 3.5.201
+  UPDATE 3.5.202 released 2026-11-20: bump DD_REF in .env.example after the AGENTS.md checks
+  READY  3.5.201 is pinned: ./poc.sh upgrade dojo
+  new    3.5.300 (cooldown until 2026-12-01)
+```
+
+- **UPDATE**: bump the pin in the repository (Dependency-Track: Dependabot opens the PR).
+- **READY**: on the server, `git pull` and `./poc.sh upgrade dojo|opencve|dtrack`. It dumps
+  that stack's databases to `data/backups/` (newest 5 kept), sets the version in `.env` and
+  reruns the stack's setup steps (clone/checkout, build, migrations on start, bootstrap).
+  `./poc.sh upgrade dojo 3.5.202 --now` takes a version that is not the reviewed pin.
+
 To start over from scratch, `./poc.sh destroy` deletes all containers, data volumes,
 `upstream/`, `data/` and `.env` (it lists what it will delete and asks you to type
 `destroy`; `--yes` skips that). Docker images are kept, so the next `./poc.sh setup` is

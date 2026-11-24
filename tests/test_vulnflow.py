@@ -2462,3 +2462,106 @@ def test_agent_rejects_bad_config(tmp_path):
         f.write_text(json.dumps(bad), encoding="utf-8")
         with pytest.raises(SystemExit):
             a.load_config(f)
+
+
+# --- check-updates (vulnflow/upstreams.py) ---------------------------------------------
+
+
+def _rel(tag: str, day: str, *, pre: bool = False, draft: bool = False) -> dict[str, Any]:
+    return {"tag_name": tag, "published_at": f"{day}T12:00:00Z", "prerelease": pre, "draft": draft}
+
+
+UPSTREAM_ROUTES: dict[str, object] = {
+    "GET DefectDojo/django-DefectDojo/releases": [
+        _rel("3.5.300", "2026-11-24"),
+        _rel("nightly-dev", "2025-05-24", pre=True),
+        _rel("3.5.202", "2026-11-12"),
+        _rel("3.5.201", "2026-11-10"),
+        _rel("3.5.200", "2026-11-08"),
+    ],
+    "GET opencve/opencve/releases": [_rel("v3.1.0", "2026-08-14"), _rel("v3.0.0", "2026-06-24")],
+    "GET DependencyTrack/dependency-track/releases": [
+        _rel("4.14.9", "2026-11-01"),
+        _rel("5.2.3", "2026-11-22"),
+        _rel("5.2.2", "2026-11-10"),
+        _rel("5.3.0-rc.1", "2026-11-01", pre=True),
+    ],
+}
+
+
+def _upstream_root(tmp_path: Path, running_dd: str) -> tuple[Path, Path]:
+    (tmp_path / "stacks/dependency-track").mkdir(parents=True)
+    (tmp_path / "stacks/dependency-track/docker-compose.yml").write_text(
+        "services:\n  apiserver:\n    image: ghcr.io/dependencytrack/apiserver:5.2.2\n"
+    )
+    (tmp_path / ".env.example").write_text("DD_REF=3.5.201\nOPENCVE_REF=v3.1.0\n")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DD_REF='{running_dd}'\nOPENCVE_REF=v3.1.0\n")
+    return tmp_path, env_file
+
+
+def test_upstream_releases_skip_prereleases_drafts_and_odd_tags() -> None:
+    from vulnflow.upstreams import releases
+
+    t = FakeTransport(
+        {
+            "GET x/y/releases": [
+                _rel("1.2.0", "2026-01-02"),
+                _rel("1.3.0", "2026-01-03", draft=True),
+                _rel("1.4.0-rc1", "2026-01-04", pre=True),
+                _rel("latest", "2026-01-05"),
+                _rel("1.10.0", "2026-01-06"),
+            ]
+        }
+    )
+    assert [r.tag for r in releases("x/y", transport=t)] == ["1.10.0", "1.2.0"]
+    assert t.calls[0][1] == "https://api.github.com/repos/x/y/releases?per_page=50"
+
+
+def test_check_updates_cooldown_ready_and_major_line(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from vulnflow.upstreams import check, report
+
+    root, env_file = _upstream_root(tmp_path, running_dd="3.5.200")
+    now = datetime(2026, 11, 24, 18, 0, tzinfo=UTC)
+    st = {
+        s.component.name: s for s in check(root, env_file, FakeTransport(UPSTREAM_ROUTES), now, "5.2.2")
+    }
+
+    dojo = st["dojo"]
+    assert (dojo.running, dojo.pinned) == ("3.5.200", "3.5.201")
+    assert dojo.upstream and dojo.upstream.tag == "3.5.202"  # 3.5.300 is 0 days old
+    assert dojo.waiting and dojo.waiting.tag == "3.5.300"
+    text = "\n".join(dojo.lines())
+    assert "UPDATE 3.5.202" in text and "bump DD_REF in .env.example" in text
+    assert "READY  3.5.201 is pinned: ./poc.sh upgrade dojo" in text
+    assert "3.5.300 (cooldown until 2026-12-01)" in text
+
+    assert not st["opencve"].actionable  # v3.1.0 everywhere
+    assert st["opencve"].lines() == ["OpenCVE: running v3.1.0, pinned v3.1.0"]
+
+    dt = st["dtrack"]  # 4.x line ignored; 5.2.3 still in the cooldown
+    assert dt.pinned == "5.2.2" and dt.upstream and dt.upstream.tag == "5.2.2"
+    assert dt.waiting and dt.waiting.tag == "5.2.3"
+    assert not dt.actionable
+    assert "Nothing to do." not in report(list(st.values()))
+
+
+def test_check_updates_nothing_to_do_and_errors(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from vulnflow.upstreams import check, report
+
+    root, env_file = _upstream_root(tmp_path, running_dd="3.5.201")
+    (root / ".env.example").write_text("DD_REF=3.5.202\nOPENCVE_REF=v3.1.0\n")
+    env_file.write_text("DD_REF=3.5.202\nOPENCVE_REF=v3.1.0\n")
+    now = datetime(2026, 11, 20, tzinfo=UTC)  # 3.5.202 and 5.2.3 not out of cooldown / released
+    routes = dict(UPSTREAM_ROUTES)
+    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2"))
+    assert out.endswith("Nothing to do."), out
+
+    routes["GET opencve/opencve/releases"] = Response(500, b"boom", {})
+    out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2"))
+    assert "OpenCVE: running v3.1.0, pinned v3.1.0\n  ERROR  release check failed:" in out
+    assert "Nothing to do." not in out
