@@ -12,7 +12,9 @@ that key is what the unattended glue runs with and stays read-only.
 Every write is logged to a ledger (data/ignored.jsonl) with the analysis it replaced, so
 `vulnflow unignore` can put it back. `ignore` does not override a finding somebody has
 already triaged (any state other than unset) unless asked to; `unignore` only reverts a
-finding that is still exactly as vulnflow left it.
+finding that is still exactly as vulnflow left it. A finding somebody changed since stays
+in the ledger (and in every later `unignore` list) until `unignore --forget-changed` drops
+it: the person's decision then stands and vulnflow no longer tracks it.
 
 Dependency-Track API (ASSUMED from memory of the 5.x source; `PUT` and the `GET` fields
 `analysisState`/`isSuppressed` have been run against a real instance, the rest has not):
@@ -254,7 +256,7 @@ def outstanding(ledger: Path) -> list[RevertItem]:
             k = _key(e)
         except (json.JSONDecodeError, KeyError, TypeError) as err:
             raise ReviewFileError(f"{ledger}: line {n} is not a ledger entry ({err})") from err
-        if e.get("op") == "revert":
+        if e.get("op") in ("revert", "forget"):
             live.pop(k, None)
         elif e.get("op") == "ignore":
             live[k] = RevertItem(
@@ -303,10 +305,12 @@ def plan_reverts(
 
 
 def apply_reverts(
-    http: Http, items: list[RevertItem], ledger: Path | None = None
+    http: Http, items: list[RevertItem], ledger: Path | None = None, *, forget_changed: bool = False
 ) -> tuple[list[RevertItem], list[tuple[RevertItem, str]], list[str]]:
     """(reverted, skipped with the reason, errors). Only a finding that is still suppressed
-    and in the state vulnflow set is touched, so a later human decision is never undone."""
+    and in the state vulnflow set is touched, so a later human decision is never undone.
+    With forget_changed, a ledger entry whose finding somebody changed is closed in the
+    ledger (op "forget") instead of being listed again next time."""
     reverted: list[RevertItem] = []
     skipped: list[tuple[RevertItem, str]] = []
     errors: list[str] = []
@@ -316,7 +320,20 @@ def apply_reverts(
             cur_state = str(cur.get("analysisState") or "")
             if not (cur.get("isSuppressed") and cur_state == it.expected_state):
                 now = (cur_state or "NOT_SET") + (", suppressed" if cur.get("isSuppressed") else "")
-                skipped.append((it, f"now {now}: not as vulnflow left it ({it.expected_state})"))
+                why = f"now {now}: not as vulnflow left it ({it.expected_state})"
+                if forget_changed and it.from_ledger and ledger is not None:
+                    _append(
+                        ledger,
+                        {
+                            "op": "forget",
+                            "project_uuid": it.project_uuid,
+                            "component_uuid": it.component_uuid,
+                            "vuln_uuid": it.vuln_uuid,
+                            "found_state": cur_state or "NOT_SET",
+                        },
+                    )
+                    why += "; dropped from the ledger"
+                skipped.append((it, why))
                 continue
             comments = cur.get("analysisComments")
             if not it.from_ledger and isinstance(comments, list):

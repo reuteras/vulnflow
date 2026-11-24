@@ -341,7 +341,7 @@ python3 -m vulnflow debian                  # Debian tracker: urgency, update av
 python3 -m vulnflow vendor --ubuntu --redhat  # Ubuntu / Red Hat verdicts; asks ubuntu.com / access.redhat.com per CVE id (--action update|fixed|wontfix, --json)
 python3 -m vulnflow disputed                 # CVEs NVD tags disputed / unsupported-when-assigned, or rejected (--team, --json, --no-nvd)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
-python3 -m vulnflow unignore                    # undo `ignore` from the ledger (data/ignored.jsonl); dry run, --apply writes; --from review.json for older ones
+python3 -m vulnflow unignore                    # undo `ignore` from the ledger (data/ignored.jsonl); dry run, --apply writes; --from review.json for older ones; --forget-changed drops findings somebody changed since
 python3 -m vulnflow prune                       # what dt2dojo does every round: carry decisions to new versions, deactivate stale ones (dry run; --apply)
 ```
 
@@ -470,6 +470,51 @@ run `./poc.sh glue-up`.
   (or with VEX/analysis in DT, which carries over).
 - **Both:** P1/P2 alerts arrive in chat (when configured) and are marked `to_evaluate` in
   OpenCVE, but only if nobody has triaged them yet.
+
+#### Clearing known-OK findings
+
+Mark each one once: `prune` (every `dt2dojo` round) copies the decision to later versions of
+the same build, and the next round closes the finding in DefectDojo. `ignore` skips findings
+that are already marked, so rerunning a step only adds what is new. It applies every row in
+the file, so read the file first; `unignore` takes any of it back.
+
+1. **Already fixed by Debian.** NVD compares upstream version numbers, and Debian fixes in
+   its own package versions:
+
+   ```bash
+   python3 -m vulnflow debian --action fixed --json > fixed.json     # read it, drop rows you disagree with
+   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT            # dry run
+   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT --apply
+   ```
+
+   Each analysis says which Debian version fixed it and which is installed.
+
+2. **Disputed or rejected in NVD.** The supplier says it is not a vulnerability, or the CVE
+   was withdrawn. Check each reason (the `NOTE:` text in the row) before agreeing:
+
+   ```bash
+   python3 -m vulnflow disputed --json > disputed.json
+   python3 -m vulnflow ignore --from disputed.json --state FALSE_POSITIVE            # dry run, then --apply
+   ```
+
+3. **Anything else you investigated by hand** (e.g. a `pkg:generic/...` binary on a
+   distribution none of the tools cover): write the rows with a `reason`, in the same JSON
+   shape, and run `ignore` with the matching `--justification` (`CODE_NOT_PRESENT` when the
+   fix is in, `CODE_NOT_REACHABLE` when the code is never run with outside input).
+
+Not for `ignore`: `debian --action update` and `patches --osv` list real fixes (update the
+image or package instead), and `debian --action no-fix` lists open issues Debian has not
+fixed (accepting those is a risk decision: DefectDojo's risk acceptance, with an expiry
+date).
+
+#### Recommended routine
+
+| When | What |
+| --- | --- |
+| Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the server's nightly update runs `check-updates` |
+| Weekly | Steps 1-2 above. `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
+| After an image update | Nothing: decisions carry over to the new tag, and the old tag is retired 2 days after its last upload. `python3 -m vulnflow prune` shows what the next round will do |
+| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: has Debian fixed anything you accepted in DefectDojo? `sync --dry-run`: teams without SBOMs |
 
 ## Own machines (push agents)
 
@@ -787,7 +832,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | `vendor` (Ubuntu `ubuntu.com/security/cves/<id>.json`, Red Hat `hydra/rest/securitydata/cve/<id>.json`) | Record shapes **checked against real responses for CVE-2023-31486 on 2026-11-23** (Ubuntu `packages[].statuses[]` with `ignored`/`needed`; Red Hat `package_state`, `affected_release`). **Assumed, not seen:** Ubuntu `released` (description = fixed version), `not-affected`, `DNE`; the RPM purl form syft writes (`pkg:rpm/redhat/...`, `distro=rhel-8.8`, `epoch`); ran 2026-11-24 on an estate with no Ubuntu or RPM components (`findings on vendor packages: none`), so **not yet run on real findings** |
 | `disputed` (NVD yearly feeds, `cveTags`, `vulnStatus`) | **Checked 2026-11-24.** The old `** DISPUTED **` description prefix is gone: NVD's API returns CVE-2018-20225 (pip) with a plain description and `cveTags: [{"tags": ["disputed"]}]`, and DT's copy of the record has neither, so the first live run reported 0 of 2,122 for the wrong reason. Now read from the yearly JSON 2.0 feeds: format, `.meta` sha256 (of the uncompressed JSON) and the 2002 feed holding CVE-1999..2001 checked against real downloads; 2018 has 153 `disputed`, 12 `unsupported-when-assigned`, 1,629 `Rejected`. Streaming the 578 MB 2026 feed takes ~5 s and 113 MB of memory (`json.load` of the 108 MB 2018 feed took 730 MB). **Ran live 2026-11-24**: 22 yearly feeds downloaded in 64 s (12 MB of cached index; a rerun takes 2 s), every CVE id found in a feed, 4 of 2,123 open findings flagged (CVE-2022-32275 and -32276, Grafana, `disputed` in NVD's `cveTags` with a plain description, confirmed against the NVD API) |
 | `ignore` (`PUT /api/v1/analysis`) | **Ran live 2026-11-24, one finding at a time** (issue #40 items 8-13): dry run, `--apply` (`1 written`, logged), and a second `--apply` reading it back (`0 written, 1 already NOT_AFFECTED and suppressed`). `GET /api/v1/analysis` returns `analysisState`, `isSuppressed`, `analysisJustification`, `analysisResponse` and `analysisComments[]` with `comment`; DT adds its own audit comments (`Analysis: NOT_SET → NOT_AFFECTED`, `Suppressed`). The finding left `debian --action fixed` and DefectDojo's count dropped by one after `dt2dojo`. The UI hides suppressed findings unless they are shown explicitly |
-| `unignore`, the ledger, and `ignore` leaving triaged findings alone | **Ran live 2026-11-24** (issue #40 items 14-20): undo from the ledger (`NOT_AFFECTED -> NOT_SET`, DT accepts `NOT_SET` with `isSuppressed` false, the finding is listed again); a finding set to In Triage is kept, `--overwrite` replaces it and `unignore` puts In Triage back; a finding changed to False Positive after `ignore` is left alone; a finding ignored before the ledger is reverted with `--from` (`previous state unknown`, recognised by its `via vulnflow` comment). A left-alone finding stays outstanding in the ledger until it is reverted |
+| `unignore`, the ledger, and `ignore` leaving triaged findings alone | **Ran live 2026-11-24** (issue #40 items 14-20): undo from the ledger (`NOT_AFFECTED -> NOT_SET`, DT accepts `NOT_SET` with `isSuppressed` false, the finding is listed again); a finding set to In Triage is kept, `--overwrite` replaces it and `unignore` puts In Triage back; a finding changed to False Positive after `ignore` is left alone; a finding ignored before the ledger is reverted with `--from` (`previous state unknown`, recognised by its `via vulnflow` comment). A left-alone finding stays outstanding in the ledger until it is reverted, or until `unignore --apply --forget-changed` drops it (the other decision then stands) |
 | `prune` (carry forward, deactivate/reactivate, close in DefectDojo; team `vulnflow-maintenance`) | Permissions and endpoints **checked against the DT 5.2.2 tag** (AnalysisResource `VULNERABILITY_ANALYSIS`, ProjectResource.patchProject `PORTFOLIO_MANAGEMENT`, `/project/tag` lists inactive projects, finding `analysis.state`/`isSuppressed`, the FPF export leaves suppressed findings out). **Ran live 2026-11-24**: `dt-bootstrap` created the team and key; 52 agent projects in 47 groups; four busybox decisions on a SearXNG image tag were carried to the next tag with state, justification and reason, a second run found nothing to do, and DefectDojo showed 0 active findings for both tags after `dt2dojo`. Deactivation, the DefectDojo close and reactivation have not happened live yet (nothing was old enough); offline tests only |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 

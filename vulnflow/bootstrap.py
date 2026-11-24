@@ -15,11 +15,12 @@ Per-host agent teams (agent_key/revoke_agent) use the same calls, checked agains
 BOM_UPLOAD plus PROJECT_CREATION_UPLOAD and applies projectTags to the project it creates;
 changing tags later needs PORTFOLIO_MANAGEMENT(_UPDATE), else DT only logs a warning
 (BomResource.maybeBindTags).
-DT 5.2.2 source (ExtensionsResource, OsvVulnDataSourceFactory), admin JWT (needs
-SYSTEM_CONFIGURATION):
+OSV source config, admin JWT. Not in the hyades-apiserver v5.2.2 tag (no ExtensionsResource
+there), so checked against a running 5.2.2 instead (2026-11-24):
   GET  /api/v2/extension-points/vuln-data-source/extensions/osv/config  -> {"config": {...}}
-  PUT  same path  {"config": {...}}  -> 204, or 304 if unchanged
-  OSV ships disabled, ecosystems Go/Maven/npm/NuGet/PyPI (no Debian); only NVD is on.
+  PUT  same path  {"config": {...}}  -> 204, or 304 if unchanged. It answers only as
+       application/problem+json: with Accept: application/json it is a 406.
+  OSV ships disabled, ecosystems PyPI/npm/Go/Maven/NuGet (no Debian); only NVD is on.
 
 DefectDojo (checked against 3.5.201): the initializer creates the admin with DD_ADMIN_PASSWORD
 (passed in by stacks/defectdojo/override.yml) and
