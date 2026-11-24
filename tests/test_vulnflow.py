@@ -1723,7 +1723,7 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
     now = 1_800_000_000.0
     hours = 3600 * 1000  # lastBomImport is epoch milliseconds
 
-    def proj(uuid, name, version, tags, age_h, active=True):
+    def proj(uuid, name, version, tags, age_h, active=True, inactive_h=None):
         return {
             "uuid": uuid,
             "name": name,
@@ -1731,6 +1731,8 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
             "active": active,
             "tags": [{"name": t} for t in tags],
             "lastBomImport": None if age_h is None else int(now * 1000 - age_h * hours),
+            # DT sets inactiveSince when a project is deactivated
+            "inactiveSince": None if inactive_h is None else int(now * 1000 - inactive_h * hours),
         }
 
     box = "pkg:generic/busybox@1.34.1"
@@ -1746,10 +1748,15 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
     projects = [
         proj("old", "container:searxng", "v1", c, 72),  # superseded for 3 days
         proj("new", "container:searxng", "v2", c, 1),
-        proj("ng1", "container:nginx", "1.30", c, 1, active=False),  # rolled back to
+        proj("ng1", "container:nginx", "1.30", c, 1, active=False, inactive_h=48),  # rolled back to
         proj("ng2", "container:nginx", "1.31", c, 24),  # newer tag, seen yesterday: kept
         # runs next to 1.30, deactivated while the host was offline, uploaded again: back
-        proj("ng0", "container:nginx", "1.29", c, 2, active=False),
+        proj("ng0", "container:nginx", "1.29", c, 2, active=False, inactive_h=30),
+        # retired early (by hand) an hour ago and not uploaded since: stays retired
+        proj("ng9", "container:nginx", "1.28", c, 6, active=False, inactive_h=1),
+        # no inactiveSince (older DT): only the newest of a group comes back
+        proj("rd0", "container:redis", "7", c, 1, active=False),
+        proj("rd1", "container:redis", "8", c, 0.5),
         proj("h2", "host:h2", "debian-13", ["kind-host", "team-sysadm"], 8 * 24),  # gone a week
         proj("man", "manual", "1", ["team-dev"], 500),  # not an agent project: untouched
         proj("nev", "container:never", "1", c, None),  # never uploaded: untouched
@@ -1765,6 +1772,9 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
             f("new", "busybox2", "pkg:generic/busybox@1.37.0", "CVE-1"),  # other build: no
         ],
         "ng0": [],
+        "ng9": [],
+        "rd0": [],
+        "rd1": [],
         "ng1": [],
         "ng2": [],
         "h2": [],
@@ -1802,11 +1812,14 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
     fake.projects["ng1"]["active"] = False
     rep = prune(inv, dt, dojo, apply=True, now=now)
     assert rep.errors == [] and rep.carried == dry.carried
-    keys = ("old", "new", "ng0", "ng1", "ng2", "h2", "man", "nev")
+    keys = ("old", "new", "ng0", "ng9", "rd0", "rd1", "ng1", "ng2", "h2", "man", "nev")
     assert {u: fake.projects[u]["active"] for u in keys} == {
         "old": False,
         "new": True,
         "ng0": True,
+        "ng9": False,
+        "rd0": False,
+        "rd1": True,
         "ng1": True,
         "ng2": True,
         "h2": False,
