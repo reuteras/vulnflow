@@ -1232,15 +1232,34 @@ def _nvd_feed(records: list[dict]) -> tuple[bytes, bytes]:
     return gzip.compress(raw), meta.encode()
 
 
-def _nvd_cve(cid: str, desc: str, status: str = "Modified", tags: list[str] | None = None) -> dict:
+def _nvd_cve(
+    cid: str,
+    desc: str,
+    status: str = "Modified",
+    tags: list[str] | None = None,
+    matches: list[dict] | None = None,
+    published: str = "2010-04-05T16:30:00.000",
+) -> dict:
     cve: dict[str, Any] = {
         "id": cid,
+        "published": published,
         "vulnStatus": status,
         "descriptions": [{"lang": "es", "value": "otro"}, {"lang": "en", "value": desc}],
     }
     if tags:
         cve["cveTags"] = [{"sourceIdentifier": "cve@mitre.org", "tags": tags}]
+    if matches:
+        cve["configurations"] = [{"nodes": [{"operator": "OR", "negate": False, "cpeMatch": matches}]}]
     return {"cve": cve}
+
+
+def _cpe(product: str, version: str = "*", vulnerable: bool = True, **bounds: str) -> dict:
+    vendor, name = product.split(":")
+    return {
+        "vulnerable": vulnerable,
+        "criteria": f"cpe:2.3:a:{vendor}:{name}:{version}:*:*:*:*:*:*:*",
+        **bounds,
+    }
 
 
 def test_nvd_feed_is_read_record_by_record_and_checksummed():
@@ -1258,7 +1277,8 @@ def test_nvd_feed_is_read_record_by_record_and_checksummed():
     body, meta = _nvd_feed(records)
     want = meta.decode().split("sha256:")[1].strip()
     for chunk in (7, 1 << 20):  # 7 bytes: records, keys and the "é" span reads
-        ids, flags, sha = scan_feed(body, chunk=chunk)
+        ids, flags, sha, anyver = scan_feed(body, chunk=chunk)
+        assert anyver == {}  # none of these list a product
         assert sha == want
         assert ids == ["CVE-2018-20225", "CVE-2018-1", "CVE-2018-2", "CVE-2018-3", "CVE-2018-4"]
         assert flags == {
@@ -1321,6 +1341,128 @@ def test_nvd_feeds_download_once_per_year_and_recheck_the_meta(tmp_path):
     stale = NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds")
     assert stale.flag("CVE-2018-20225") == ("DISPUTED", "NOTE: intended.")  # stale beats nothing
     assert len(stale.errors) == 1 and "does not match the .meta file" in stale.errors[0]
+
+
+def test_nvd_any_version_rules_and_the_index_format_upgrade(tmp_path):
+    from vulnflow.disputed import INDEX_FORMAT, NvdFeeds, scan_feed, unbounded_products
+
+    safari_any = _nvd_cve(
+        "CVE-2010-1179",
+        "Safari on iPhone OS 3.1.3 ...",
+        matches=[
+            _cpe("apple:safari"),  # every version: NVD's data error
+            {"vulnerable": False, "criteria": "cpe:2.3:o:apple:iphone_os:3.1.3:*:*:*:*:*:*:*"},
+        ],
+    )
+    assert unbounded_products(safari_any["cve"]) == ["apple:safari"]
+    bounded = [
+        _cpe("apple:safari", versionEndExcluding="4.0.5"),  # a range
+        _cpe("haxx:curl", "7.1.0"),  # an exact version
+        _cpe("gnu:wget", "-"),  # "not applicable", not "every version"
+        _cpe("vim:vim", vulnerable=False),  # not the vulnerable part
+    ]
+    assert unbounded_products(_nvd_cve("CVE-2010-2", "x", matches=bounded)["cve"]) == []
+
+    body, meta = _nvd_feed([safari_any, _nvd_cve("CVE-2010-2", "x", matches=bounded)])
+    _, _, _, anyver = scan_feed(body)
+    assert anyver == {"CVE-2010-1179": ["2010-04-05", ["apple:safari"]]}
+
+    # an index written before ANY-VERSION existed is rebuilt although the feed is unchanged
+    index = tmp_path / "nvd" / "nvdcve-2.0-2010.flags.json"
+    index.parent.mkdir(parents=True)
+    sha = meta.decode().split("sha256:")[1].strip()
+    index.write_text(json.dumps({"sha256": sha, "ids": ["CVE-2010-1179"], "flags": {}}))
+    t = FakeTransport(
+        {
+            "GET /nvdcve-2.0-2010.meta": Response(200, meta, {}),
+            "GET /nvdcve-2.0-2010.json.gz": Response(200, body, {}),
+        }
+    )
+    nvd = NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds")
+    assert nvd.any_version("CVE-2010-1179") == ("2010-04-05", {"apple:safari"})
+    assert nvd.any_version("CVE-2010-2") is None
+    assert [c[1].rsplit("/", 1)[1] for c in t.calls] == [
+        "nvdcve-2.0-2010.meta",
+        "nvdcve-2.0-2010.json.gz",
+    ]
+    assert json.loads(index.read_text())["format"] == INDEX_FORMAT
+
+
+def test_disputed_flags_old_cves_nvd_lists_for_every_version(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.disputed import NvdFeeds, disputed_findings
+
+    def finding(vid, cpe, version="27.2", comp="Safari"):
+        return {
+            "component": {"name": comp, "version": version, "uuid": f"c-{comp}", "cpe": cpe},
+            "vulnerability": {
+                "source": "NVD",
+                "vulnId": vid,
+                "severity": "HIGH",
+                "uuid": f"v-{vid}",
+                "description": "x",
+            },
+            "analysis": {},
+        }
+
+    safari = "cpe:2.3:a:apple:safari:27.2:*:*:*:*:*:*:*"
+    findings = [
+        finding("CVE-2010-1179", safari),  # every version, 2010: flagged
+        finding("CVE-2010-2", safari),  # Safari with a version range: not flagged
+        finding(
+            "CVE-2010-3", "cpe:2.3:a:gnu:wget:1.25:*:*:*:*:*:*:*", "1.25", "wget"
+        ),  # wget not listed
+        finding("CVE-2026-4", safari),  # every version, but recent: not flagged
+    ]
+
+    def dt_route(m, url, h, b):
+        if "/project/tag/team-dev" in url:
+            return Response(
+                200,
+                json.dumps(
+                    [{"uuid": "p1", "name": "host:mbp", "version": "macos-27", "active": True}]
+                ).encode(),
+                {},
+            )
+        if "/project/tag/" in url:
+            return Response(200, b"[]", {})
+        return Response(200, json.dumps(findings).encode(), {})
+
+    b10, m10 = _nvd_feed(
+        [
+            _nvd_cve("CVE-2010-1179", "x", matches=[_cpe("apple:safari")]),
+            _nvd_cve("CVE-2010-2", "x", matches=[_cpe("apple:safari", versionEndExcluding="5.0")]),
+            _nvd_cve("CVE-2010-3", "x", matches=[_cpe("apple:safari")]),
+        ]
+    )
+    b26, m26 = _nvd_feed(
+        [
+            _nvd_cve(
+                "CVE-2026-4", "x", matches=[_cpe("apple:safari")], published="2026-11-01T00:00:00.000"
+            )
+        ]
+    )
+    t = FakeTransport(
+        {
+            "GET /nvdcve-2.0-2010.meta": Response(200, m10, {}),
+            "GET /nvdcve-2.0-2010.json.gz": Response(200, b10, {}),
+            "GET /nvdcve-2.0-2026.meta": Response(200, m26, {}),
+            "GET /nvdcve-2.0-2026.json.gz": Response(200, b26, {}),
+        }
+    )
+    nvd = NvdFeeds(tmp_path, transport=t, url="https://nvd.test/feeds")
+    dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
+    res = disputed_findings(inv, dt, nvd=nvd, today=date(2026, 11, 24))
+    assert res.errors == [] and [(r.vuln_id, r.marker) for r in res.rows] == [
+        ("CVE-2010-1179", "ANY-VERSION")
+    ]
+    assert res.rows[0].reason == (
+        'CVE-2010-1179 is marked ANY-VERSION in NVD: "NVD lists apple:safari as vulnerable in '
+        'every version (no version range); published 2010-04-05, installed 27.2"'
+    )
+    off = disputed_findings(inv, dt, nvd=nvd, any_version_years=0, today=date(2026, 11, 24))
+    assert off.rows == []
 
 
 def test_disputed_uses_nvd_tags_and_counts_what_nvd_cannot_answer(inv, tmp_path):
