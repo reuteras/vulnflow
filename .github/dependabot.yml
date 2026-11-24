@@ -47,12 +47,14 @@ updates:
         patterns:
           - "*"
 
-  # Dependency-Track + postgres images in stacks/dependency-track/docker-compose.yml.
+  # Dependency-Track + postgres images in stacks/dependency-track/docker-compose.yml, and
+  # the redis image the OpenCVE overlay sets (stacks/opencve/docker-compose.override.yaml).
   # DefectDojo and OpenCVE versions are git refs in .env (DD_REF, OPENCVE_REF), which
   # Dependabot can't see; bump those by hand after reading the release notes.
   - package-ecosystem: "docker-compose"
     directories:
       - "/stacks/dependency-track"
+      - "/stacks/opencve"
     schedule:
       interval: "daily"
     cooldown:

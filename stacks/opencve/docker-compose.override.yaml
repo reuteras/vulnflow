@@ -6,12 +6,20 @@
 # code 0, so after a reboot Docker left OpenCVE down (only redis and the scheduler, which
 # happened to exit non-zero, came back). unless-stopped restarts them on boot unless they
 # were stopped on purpose. airflow-init is a one-shot job and keeps upstream's policy.
+#
+# redis: upstream uses redis/redis-stack:latest, which has not been rebuilt since 2025-11-03
+# (old Debian packages in every scan). OpenCVE v3.1.0 needs the JSON module
+# (scheduler/dags/includes/storage.py: redis.json().set/get/objkeys), which Redis 8 has built
+# in; JSON.SET/OBJKEYS/GET checked on redis:8.10.3-trixie. Upstream gives redis no volume
+# (Celery queue and report scratch data only), so switching keeps nothing persistent.
+# Exact tag so Dependabot (docker-compose, /stacks/opencve) can propose updates.
 services:
   webserver:
     restart: unless-stopped
   nginx:
     restart: unless-stopped
   redis:
+    image: docker.io/library/redis:8.10.3-trixie
     restart: unless-stopped
   postgres:
     restart: unless-stopped
