@@ -342,6 +342,7 @@ python3 -m vulnflow vendor --ubuntu --redhat  # Ubuntu / Red Hat verdicts; asks 
 python3 -m vulnflow disputed                 # CVEs NVD tags disputed / unsupported-when-assigned, or rejected (--team, --json, --no-nvd)
 python3 -m vulnflow ignore --from review.json  # dry run; --apply writes NOT_AFFECTED to DT
 python3 -m vulnflow unignore                    # undo `ignore` from the ledger (data/ignored.jsonl); dry run, --apply writes; --from review.json for older ones
+python3 -m vulnflow prune                       # what dt2dojo does every round: carry decisions to new versions, deactivate stale ones (dry run; --apply)
 ```
 
 It turns every component in each team's Dependency-Track projects into NVD vendor:product
@@ -603,6 +604,30 @@ commands print the version for that reason). The same image name *and* tag on tw
 one project, and each host's upload replaces the other's components; for images pulled from
 a registry those are the same anyway.
 
+New versions and old ones (`prune`, run by `dt2dojo` at the start of every round, every 30
+minutes, so shortly after the agents' daily uploads). Dependency-Track keeps a decision per
+project, component and CVE, so a Not Affected on `container:searxng@2026.11.15` would not
+apply to `@2026.11.17`, and nothing retired the old version. Per project name and host
+(`host-<host>` tag):
+
+- **Carried forward:** a Not Affected or False Positive (suppressed) decision on one version
+  is copied to the other active versions for the same component build (identical package
+  URL) and CVE, where nobody has triaged the finding yet. The comment says
+  `Carried forward from <project>@<version>: <original reason>; via vulnflow`, so
+  `unignore --from` reverts a copy.
+- **Deactivated:** a version not uploaded for 2 days while a newer one exists, or the newest
+  one when nothing uploaded it for 7 days (the container or host is gone). Its findings in
+  DefectDojo are closed first, by re-importing an empty list into its test.
+- **Reactivated:** an inactive version that is the newest upload again (a rollback).
+
+It uses its own key, `DT_MAINTENANCE_API_KEY` (team `vulnflow-maintenance`, created by
+`dt-bootstrap`): writing analyses and (de)activating projects needs `VULNERABILITY_ANALYSIS`
+and `PORTFOLIO_MANAGEMENT`, and the latter also allows deleting projects in DT 5.2.2, so the
+glue's own key stays read-only. Without that key `dt2dojo` says `skip prune`. `vulnflow
+prune` shows what the next round would do (`--apply`, `--superseded-days`, `--gone-days`).
+Only projects the agents make (`kind-*` tag) are touched, and never one that was not
+uploaded yet.
+
 Kernels: a host project lists only the kernel that runs (`uname -r`). Kernel packages that
 are installed but not booted (old ones Debian keeps, a new one waiting for a reboot),
 `linux-libc-dev` and syft's `/boot/vmlinuz-*` entries are left out, because every kernel CVE
@@ -745,7 +770,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | Dependency-Track `PUT /api/v1/bom` (JSON + `projectTags`), `/project/tag/{tag}`, FPF export | From DT docs. Paging header handling covers both v4 and v5 |
 | DefectDojo `reimport-scan` with FPF scan type + `auto_create_context` | From DefectDojo docs |
 | DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source; run live against 5.2.2 |
-| DT OSV config (`/api/v2/extension-points/vuln-data-source/extensions/osv/config`, defaults) | Checked against the DT 5.2.2 tag's source; not yet run live |
+| DT OSV config (`/api/v2/extension-points/vuln-data-source/extensions/osv/config`, defaults) | **Run live 2026-11-24 against 5.2.2**: `GET` returns the documented `{"config": {...}}` (OSV disabled, `PyPI, npm, Go, Maven, NuGet`), but the `PUT` answers only as `application/problem+json`, so with `Accept: application/json` it was rejected with 406 and `dt-bootstrap` never enabled OSV (only a warning). Now sent with both types; an unchanged config then returns 304 as expected |
 | DD bootstrap (`DD_ADMIN_PASSWORD` in `complete_initialization`, `api-token-auth`) | Checked against DefectDojo 3.5.201 source and compose file |
 | OpenCVE org/token models | Checked against the v3.1.0 tag; run live |
 | OpenCVE webhook notification + alert automation (models, triggers, action format) | Checked against the v3.1.0 tag; offline test with fake models. Delivery not yet seen live |
@@ -763,6 +788,7 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 | `disputed` (NVD yearly feeds, `cveTags`, `vulnStatus`) | **Checked 2026-11-24.** The old `** DISPUTED **` description prefix is gone: NVD's API returns CVE-2018-20225 (pip) with a plain description and `cveTags: [{"tags": ["disputed"]}]`, and DT's copy of the record has neither, so the first live run reported 0 of 2,122 for the wrong reason. Now read from the yearly JSON 2.0 feeds: format, `.meta` sha256 (of the uncompressed JSON) and the 2002 feed holding CVE-1999..2001 checked against real downloads; 2018 has 153 `disputed`, 12 `unsupported-when-assigned`, 1,629 `Rejected`. Streaming the 578 MB 2026 feed takes ~5 s and 113 MB of memory (`json.load` of the 108 MB 2018 feed took 730 MB). **Ran live 2026-11-24**: 22 yearly feeds downloaded in 64 s (12 MB of cached index; a rerun takes 2 s), every CVE id found in a feed, 4 of 2,123 open findings flagged (CVE-2022-32275 and -32276, Grafana, `disputed` in NVD's `cveTags` with a plain description, confirmed against the NVD API) |
 | `ignore` (`PUT /api/v1/analysis`) | **Ran live 2026-11-24, one finding at a time** (issue #40 items 8-13): dry run, `--apply` (`1 written`, logged), and a second `--apply` reading it back (`0 written, 1 already NOT_AFFECTED and suppressed`). `GET /api/v1/analysis` returns `analysisState`, `isSuppressed`, `analysisJustification`, `analysisResponse` and `analysisComments[]` with `comment`; DT adds its own audit comments (`Analysis: NOT_SET → NOT_AFFECTED`, `Suppressed`). The finding left `debian --action fixed` and DefectDojo's count dropped by one after `dt2dojo`. The UI hides suppressed findings unless they are shown explicitly |
 | `unignore`, the ledger, and `ignore` leaving triaged findings alone | **Ran live 2026-11-24** (issue #40 items 14-20): undo from the ledger (`NOT_AFFECTED -> NOT_SET`, DT accepts `NOT_SET` with `isSuppressed` false, the finding is listed again); a finding set to In Triage is kept, `--overwrite` replaces it and `unignore` puts In Triage back; a finding changed to False Positive after `ignore` is left alone; a finding ignored before the ledger is reverted with `--from` (`previous state unknown`, recognised by its `via vulnflow` comment). A left-alone finding stays outstanding in the ledger until it is reverted |
+| `prune` (carry forward, deactivate/reactivate, close in DefectDojo; team `vulnflow-maintenance`) | Permissions and endpoints **checked against the DT 5.2.2 tag** (AnalysisResource `VULNERABILITY_ANALYSIS`, ProjectResource.patchProject `PORTFOLIO_MANAGEMENT`, `/project/tag` lists inactive projects, finding `analysis.state`/`isSuppressed`, the FPF export leaves suppressed findings out). **Ran live 2026-11-24**: `dt-bootstrap` created the team and key; 52 agent projects in 47 groups; four busybox decisions on a SearXNG image tag were carried to the next tag with state, justification and reason, a second run found nothing to do, and DefectDojo showed 0 active findings for both tags after `dt2dojo`. Deactivation, the DefectDojo close and reactivation have not happened live yet (nothing was old enough); offline tests only |
 | Full stack running together | **Not run here** (no Docker daemon in the build environment). Compose files validate with `docker compose config` |
 
 ## Tests

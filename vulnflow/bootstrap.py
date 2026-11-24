@@ -53,6 +53,18 @@ DT_DEFAULT_ADMIN = ("admin", "admin")
 DT_TEAM_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD", "VIEW_PORTFOLIO", "VIEW_VULNERABILITY")
 # A machine's agent can create projects and upload SBOMs, and read nothing back.
 DT_AGENT_PERMISSIONS = ("BOM_UPLOAD", "PROJECT_CREATION_UPLOAD")
+# `prune` (in the dt2dojo loop): copy analyses (PUT /api/v1/analysis needs
+# VULNERABILITY_ANALYSIS) and (de)activate projects (PATCH /api/v1/project/{uuid} needs
+# PORTFOLIO_MANAGEMENT, which in DT 5.2.2 also covers create/delete: there is no narrower
+# one). Checked against the 5.2.2 tag (AnalysisResource, ProjectResource). Its own team, so
+# the key the glue reads with stays read-only.
+DT_MAINTENANCE_TEAM = "vulnflow-maintenance"
+DT_MAINTENANCE_PERMISSIONS = (
+    "VIEW_PORTFOLIO",
+    "VIEW_VULNERABILITY",
+    "VULNERABILITY_ANALYSIS",
+    "PORTFOLIO_MANAGEMENT",
+)
 DT_AGENT_TEAM_PREFIX = "agent-"
 # DT's login/forceChangePassword are @Produces(TEXT_PLAIN): Accept: application/json -> 406
 FORM = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
@@ -101,7 +113,14 @@ def dt_enable_osv(http: Http, ecosystems: list[str]) -> str:
         wanted = {**current, "enabled": True, "ecosystems": have + added}
         if wanted == current:
             return "unchanged"
-        r = http.put(DT_OSV_PATH, json_body={"config": wanted}, expect_ok=False)
+        # The v2 API answers this PUT only as application/problem+json; with the client's
+        # usual Accept: application/json, DT 5.2.2 rejects it with 406 (seen live 2026-11-24)
+        r = http.put(
+            DT_OSV_PATH,
+            json_body={"config": wanted},
+            headers={"Accept": "application/json, application/problem+json"},
+            expect_ok=False,
+        )
         if r.status == 304:
             return "unchanged"
         if not r.ok:
@@ -267,29 +286,43 @@ def agent_key_team(base_url: str, api_key: str, transport: Transport | None = No
     return str((r.json() or {}).get("name", "")) if r.ok else ""
 
 
-def agent_key(
-    admin: Http, host: str, existing_key: str = "", *, rotate: bool = False
+def team_key(
+    admin: Http, name: str, perms: tuple[str, ...], existing_key: str = "", *, rotate: bool = False
 ) -> tuple[str, bool]:
-    """(API key, new?) for host's agent: its own team agent-<host> with only
-    DT_AGENT_PERMISSIONS. A working key of that team is kept unless rotate; otherwise the
-    team is deleted (taking every old key with it) and created again with one new key."""
-    name = DT_AGENT_TEAM_PREFIX + host
+    """(API key, new?) for a team that holds exactly one key. A working key of that team is
+    kept unless rotate; otherwise the team is deleted (taking every old key with it) and
+    created again with one new key."""
     team = _find_team(admin, name)
     if (
         team is not None
         and not rotate
         and agent_key_team(admin.base_url, existing_key, admin.transport) == name
     ):
-        _grant(admin, team, DT_AGENT_PERMISSIONS)
+        _grant(admin, team, perms)
         return existing_key, False
     if team is not None:
         admin.request("DELETE", "api/v1/team", json_body={"uuid": team["uuid"]})
     team = admin.put("api/v1/team", json_body={"name": name}).json()
-    _grant(admin, team, DT_AGENT_PERMISSIONS)
+    _grant(admin, team, perms)
     key = str((admin.put(f"api/v1/team/{team['uuid']}/key").json() or {}).get("key", ""))
     if agent_key_team(admin.base_url, key, admin.transport) != name:
         raise BootstrapError(f"the new key for {name} did not validate against /api/v1/team/self")
     return key, True
+
+
+def agent_key(
+    admin: Http, host: str, existing_key: str = "", *, rotate: bool = False
+) -> tuple[str, bool]:
+    """(API key, new?) for host's agent: its own team agent-<host> with only
+    DT_AGENT_PERMISSIONS."""
+    return team_key(
+        admin, DT_AGENT_TEAM_PREFIX + host, DT_AGENT_PERMISSIONS, existing_key, rotate=rotate
+    )
+
+
+def maintenance_key(admin: Http, existing_key: str = "") -> tuple[str, bool]:
+    """(API key, new?) of team vulnflow-maintenance, for `prune`."""
+    return team_key(admin, DT_MAINTENANCE_TEAM, DT_MAINTENANCE_PERMISSIONS, existing_key)
 
 
 def revoke_agent(admin: Http, host: str) -> bool:
