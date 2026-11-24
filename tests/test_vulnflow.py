@@ -2981,6 +2981,53 @@ def deb(name: str, version: str, upstream: str = "") -> dict:
     return {"type": "library", "name": name, "version": version, "purl": purl}
 
 
+def test_agent_gives_the_images_own_go_binary_the_image_tag_as_version():
+    a = load_agent()
+
+    def comp(
+        name, version="UNKNOWN", main=None, purl=None, cpe="cpe:2.3:a:grafana:grafana:*:*:*:*:*:*:*:*"
+    ):
+        props = [{"name": "syft:package:type", "value": "go-module"}]
+        if main:
+            props.append({"name": "syft:metadata:mainModule", "value": main})
+        return {
+            "type": "library",
+            "name": name,
+            "version": version,
+            "cpe": cpe,
+            "purl": purl or f"pkg:golang/{name}",
+            "properties": props,
+        }
+
+    grafana = "github.com/grafana/grafana"
+    doc = {
+        "components": [
+            comp(grafana, main=grafana),  # the image's own binary: gets the tag
+            comp(f"{grafana}/apps/advisor", main=grafana),  # a sub-module, not the main one
+            comp("github.com/other/tool", main="github.com/other/tool"),  # another binary
+            comp(grafana, version="v1.0.0", main=grafana),  # already has a version
+            {"type": "library", "name": "grafana", "version": "UNKNOWN", "purl": "pkg:npm/grafana"},
+        ]
+    }
+    out = a.version_from_tag([doc], "docker.io/grafana/grafana", "13.3.1")[0]["components"]
+    assert (out[0]["version"], out[0]["purl"], out[0]["cpe"]) == (
+        "13.3.1",
+        "pkg:golang/github.com/grafana/grafana@13.3.1",
+        "cpe:2.3:a:grafana:grafana:13.3.1:*:*:*:*:*:*:*",
+    )
+    assert {"name": "vulnflow:version-from", "value": "image-tag"} in out[0]["properties"]
+    assert out[1:] == doc["components"][1:]  # nothing else touched
+    assert doc["components"][0]["version"] == "UNKNOWN"  # the input is not modified
+    for tag in ("latest", "trixie", "13.3", "v2.4.1"):  # only release tags count
+        changed = a.version_from_tag([doc], "docker.io/grafana/grafana", tag)[0]["components"][0]
+        assert (changed["version"] != "UNKNOWN") == (tag in ("13.3", "v2.4.1")), tag
+    # qualifiers stay after the version
+    q = comp(grafana, main=grafana, purl=f"pkg:golang/{grafana}?type=module", cpe="")
+    out = a.version_from_tag([{"components": [q]}], "ghcr.io/grafana/grafana", "13.3.1")[0]
+    assert out["components"][0]["purl"] == f"pkg:golang/{grafana}@13.3.1?type=module"
+    assert out["components"][0]["cpe"] == ""
+
+
 def test_agent_tracks_only_the_running_kernel():
     a = load_agent()
     pkgs = [

@@ -514,6 +514,58 @@ def split_image(ref: str) -> tuple[str, str]:
     return name, clean_version(tag or digest[:19] or "latest")
 
 
+# A release tag (13.3.1, v2.4, 1.2.3.4), not latest/trixie/alpine or a digest stand-in
+RELEASE_TAG = re.compile(r"^v?\d+(\.\d+){1,3}$")
+UNVERSIONED = ("", "unknown", "(devel)")
+
+
+def version_from_tag(docs: list[Doc], image: str, tag: str) -> list[Doc]:
+    """Give the image's own Go binary the image's version when syft could not find one.
+
+    A Go main module built with its version only in -ldflags (Grafana) has no version in its
+    build info, so syft writes version UNKNOWN and a CPE with version `*`, and every CVE the
+    product ever had matches (seen: 102 per Grafana image). syft's from-contents guess was
+    wrong (v3.53.4 for Grafana 13.3.1). Narrow on purpose: only the main module
+    (syft:metadata:mainModule) whose last path element is the image's own name
+    (github.com/grafana/grafana in docker.io/grafana/grafana), and only for a release tag.
+    The version, purl and CPE get the tag; a property says where it came from."""
+    if not RELEASE_TAG.match(tag):
+        return docs
+    app = image.rsplit("/", 1)[-1].lower()
+    out = []
+    for d in docs:
+        comps = []
+        for c in d.get("components") or []:
+            props = {p.get("name"): p.get("value") for p in c.get("properties") or []}
+            name = str(c.get("name", ""))
+            purl = str(c.get("purl", ""))
+            if (
+                purl.startswith("pkg:golang/")
+                and str(c.get("version", "")).strip().lower() in UNVERSIONED
+                and props.get("syft:metadata:mainModule") == name
+                and name.rsplit("/", 1)[-1].lower() == app
+            ):
+                base, q, qual = purl.partition("?")
+                cpe = str(c.get("cpe", ""))
+                parts = cpe.split(":")
+                if len(parts) > 5 and parts[5] in ("*", "UNKNOWN", ""):
+                    parts[5] = tag
+                    cpe = ":".join(parts)
+                c = {
+                    **c,
+                    "version": tag,
+                    "purl": base.split("@", 1)[0] + "@" + tag + q + qual,
+                    **({"cpe": cpe} if cpe else {}),
+                    "properties": [
+                        *(c.get("properties") or []),
+                        {"name": "vulnflow:version-from", "value": "image-tag"},
+                    ],
+                }
+            comps.append(c)
+        out.append({**d, "components": comps})
+    return out
+
+
 def is_podman_shim(docker: str) -> bool:
     """podman-docker installs a `docker` that runs podman; its images are podman's."""
     code, out, _ = run([docker, "--version"], timeout=30)
@@ -691,7 +743,7 @@ def collect_containers(cfg: Doc) -> tuple[list[Result], list[str]]:
     for source, ref in images:
         name, version = split_image(ref)
         try:
-            docs = no_kernel_packages(scan_image(source, ref))
+            docs = version_from_tag(no_kernel_packages(scan_image(source, ref)), name, version)
         except ScanError as e:
             errors.append(f"container:{name}: {e}")
             continue
