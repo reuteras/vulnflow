@@ -2166,6 +2166,21 @@ def test_unignore_restores_the_previous_analysis_only_if_unchanged(tmp_path):
     again = {o.component_uuid: o.previous_state for o in outstanding(ledger)}
     assert again == {"C3": "NOT_SET", "C1": "IN_TRIAGE"}
 
+    # --forget-changed: C3's False Positive stands and it leaves the ledger; C1 is reverted
+    api.puts.clear()
+    todo = plan_reverts(ledger)
+    reverted, skipped, errors = apply_reverts(api.http(), todo, ledger, forget_changed=True)
+    assert errors == [] and [r.component_uuid for r in reverted] == ["C1"]
+    assert [(i.component_uuid, why.endswith("; dropped from the ledger")) for i, why in skipped] == [
+        ("C3", True)
+    ]
+    assert "C3" not in {p["component"] for p in api.puts}  # nothing written for it
+    assert outstanding(ledger) == [] and plan_reverts(ledger) == []
+    ops = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [(e["component_uuid"], e["found_state"]) for e in ops if e["op"] == "forget"] == [
+        ("C3", "FALSE_POSITIVE")
+    ]
+
 
 def test_unignore_from_a_review_file_checks_the_vulnflow_comment(tmp_path):
     from vulnflow.triage import apply_ignores, apply_reverts, plan_reverts

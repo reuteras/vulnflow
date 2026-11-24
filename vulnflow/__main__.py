@@ -270,7 +270,7 @@ def _unignore(a: argparse.Namespace) -> int:
     except BootstrapError as e:
         print(f"  error {e}", file=sys.stderr)
         return 1
-    reverted, skipped, errors = apply_reverts(admin, todo, ledger)
+    reverted, skipped, errors = apply_reverts(admin, todo, ledger, forget_changed=a.forget_changed)
     print(f"  {len(reverted)} reverted, {len(skipped)} left alone")
     for it, why in skipped:
         print(f"  left  {it.label}: {it.component} {it.vuln_id}: {why}")
@@ -505,6 +505,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("NOT_AFFECTED", "FALSE_POSITIVE"),
         default="NOT_AFFECTED",
         help="with --from and no ledger entry: the state `ignore` set",
+    )
+    ui.add_argument(
+        "--forget-changed",
+        action="store_true",
+        help="with --apply: drop ledger entries of findings somebody changed since (their "
+        "decision stands), so they stop showing up in every later unignore",
     )
 
     u = sub.add_parser("upload-sbom", help="upload a CycloneDX SBOM to DT, tagged by team")
