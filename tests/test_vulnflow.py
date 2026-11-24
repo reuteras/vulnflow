@@ -369,9 +369,11 @@ def test_dt_to_dojo_routes_by_tag(inv):
                     {"name": "kind-container"},
                     {"name": "x-y"},
                 ],
-            }
+            },
+            # retired by prune: not exported, counted in one line instead of a WARN each
+            {"uuid": f"{tag}-0", "name": f"{tag}-app", "version": "1", "active": False, "tags": []},
         ]
-        return Response(200, json.dumps(rows).encode(), {"X-Total-Count": "1"})
+        return Response(200, json.dumps(rows).encode(), {"X-Total-Count": "2"})
 
     t = FakeTransport(
         {
@@ -383,8 +385,10 @@ def test_dt_to_dojo_routes_by_tag(inv):
     rep = dt_to_dojo(
         inv, DependencyTrack("http://dt", "k", transport=t), DefectDojo("http://dd", "k", transport=t)
     )
-    assert not rep.errors and len(rep.done) == 3
+    assert not rep.errors and not rep.warnings and len(rep.done) == 4
+    assert rep.done[-1] == "3 inactive project(s) skipped (retired versions)"
     posts = [c for c in t.calls if c[0] == "POST"]
+    assert len(posts) == 3
     sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
     assert b"Sysadmin" in sysadm[3]
     fields = _multipart_fields(sysadm[3])
@@ -1595,6 +1599,70 @@ def test_debian_cli_shows_project_version_and_why_debian_has_no_fix(inv, tmp_pat
     assert [it.label for it in load_review(review)] == ["dev/container:nginx@1.31.8"]
 
 
+def test_where_lists_the_file_paths_syft_recorded(tmp_path, monkeypatch, capsys):
+    import secrets
+
+    from vulnflow.__main__ import main
+
+    monkeypatch.setenv("DT_URL", "http://dt.test")
+    monkeypatch.setenv("DT_API_KEY", secrets.token_hex(8))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    projects = {
+        "team-sysadm": [
+            {"uuid": "h1", "name": "host:second", "version": "debian-13", "active": True},
+            {"uuid": "h0", "name": "host:gone", "version": "debian-12", "active": False},
+        ],
+    }
+    comps = {
+        "h1": [
+            {"uuid": "c1", "name": "stdlib", "version": "go1.23.3", "purl": "pkg:golang/stdlib@1.23.3"},
+            {"uuid": "c2", "name": "stdlib", "version": "go1.24.4", "purl": "pkg:golang/stdlib@1.24.4"},
+            {"uuid": "c3", "name": "curl", "version": "8", "purl": "pkg:deb/debian/curl@8"},
+        ],
+    }
+
+    def prop(n, v, group="syft"):
+        return {"groupName": group, "propertyName": f"location:{n}:path", "propertyValue": v}
+
+    props = {
+        "c1": [
+            prop(1, "usr/local/bin/tool"),
+            prop(0, "usr/bin/geoipupdate"),
+            {"groupName": "syft", "propertyName": "location:0:layerID", "propertyValue": "x"},
+            {"groupName": "syft", "propertyName": "package:language", "propertyValue": "go"},
+        ],
+        "c2": [],
+    }
+
+    def route(m, url, h, b):
+        path = url.split("http://dt.test/")[1].split("?")[0]
+        if path.startswith("api/v1/project/tag/"):
+            return Response(200, json.dumps(projects.get(path.rsplit("/", 1)[1], [])).encode(), {})
+        if path.startswith("api/v1/component/project/"):
+            return Response(200, json.dumps(comps[path.rsplit("/", 1)[1]]).encode(), {})
+        if path.endswith("/property"):
+            return Response(200, json.dumps(props[path.split("/")[-2]]).encode(), {})
+        raise AssertionError(f"unexpected {m} {url}")
+
+    t = FakeTransport({"GET ": route})
+    monkeypatch.setattr("vulnflow.net.urllib_transport", t)
+    args = ["--env-file", str(env_file), "--inventory", str(INV), "--data-dir", str(tmp_path)]
+    assert main([*args, "where", "STDLIB"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "sysadm/host:second@debian-13: stdlib go1.23.3  /usr/bin/geoipupdate, /usr/local/bin/tool",
+        "sysadm/host:second@debian-13: stdlib go1.24.4  (no path recorded)",
+    ]
+    assert not any("/component/project/h0" in c[1] for c in t.calls)  # inactive: not read
+
+    assert main([*args, "where", "stdlib", "--version", "go1.23.3", "--json"]) == 0
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["paths"] == ["/usr/bin/geoipupdate", "/usr/local/bin/tool"]
+    assert row["project"] == "host:second" and row["purl"] == "pkg:golang/stdlib@1.23.3"
+    assert main([*args, "where", "stdlib", "--project", "nomatch", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
 class FakePortfolio:
     """Stateful fake of the DT endpoints `prune` uses: projects by tag, findings (with and
     without suppressed), analysis GET/PUT, project PATCH and the FPF export."""
@@ -1680,6 +1748,8 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
         proj("new", "container:searxng", "v2", c, 1),
         proj("ng1", "container:nginx", "1.30", c, 1, active=False),  # rolled back to
         proj("ng2", "container:nginx", "1.31", c, 24),  # newer tag, seen yesterday: kept
+        # runs next to 1.30, deactivated while the host was offline, uploaded again: back
+        proj("ng0", "container:nginx", "1.29", c, 2, active=False),
         proj("h2", "host:h2", "debian-13", ["kind-host", "team-sysadm"], 8 * 24),  # gone a week
         proj("man", "manual", "1", ["team-dev"], 500),  # not an agent project: untouched
         proj("nev", "container:never", "1", c, None),  # never uploaded: untouched
@@ -1694,6 +1764,7 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
             f("new", "busybox", box, "CVE-2"),
             f("new", "busybox2", "pkg:generic/busybox@1.37.0", "CVE-1"),  # other build: no
         ],
+        "ng0": [],
         "ng1": [],
         "ng2": [],
         "h2": [],
@@ -1715,7 +1786,7 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
 
     dry = prune(inv, dt, now=now)
     assert [c for c in fake.calls if c[0] != "GET"] == []  # a dry run writes nothing
-    assert dry.reactivated == ["dev/container:nginx@1.30"]
+    assert dry.reactivated == ["dev/container:nginx@1.29", "dev/container:nginx@1.30"]
     assert dry.deactivated == [
         "dev/container:searxng@v1 (newer version uploaded; last 3.0 days ago)",
         "sysadm/host:h2@debian-13 (no upload; last 8.0 days ago)",
@@ -1731,9 +1802,11 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
     fake.projects["ng1"]["active"] = False
     rep = prune(inv, dt, dojo, apply=True, now=now)
     assert rep.errors == [] and rep.carried == dry.carried
-    assert {u: fake.projects[u]["active"] for u in ("old", "new", "ng1", "ng2", "h2", "man", "nev")} == {
+    keys = ("old", "new", "ng0", "ng1", "ng2", "h2", "man", "nev")
+    assert {u: fake.projects[u]["active"] for u in keys} == {
         "old": False,
         "new": True,
+        "ng0": True,
         "ng1": True,
         "ng2": True,
         "h2": False,
@@ -2811,6 +2884,41 @@ def test_last_pushes_and_stale_report(tmp_path, capsys):
     assert "web1" in out and "ok last push 0.0 days ago" in out
     assert "STALE never pushed" in out
     assert report(m, None, stale_days=2) == 0  # DT not asked: list only
+
+
+def test_agent_merge_keeps_every_file_location():
+    a = load_agent()
+
+    def stdlib(*paths):
+        props = [{"name": "syft:package:foundBy", "value": "go-module-binary-cataloger"}]
+        for i, p in enumerate(paths):
+            props += [
+                {"name": f"syft:location:{i}:path", "value": p},
+                {"name": f"syft:location:{i}:layerID", "value": f"sha256:{i}"},
+            ]
+        return {"type": "library", "name": "stdlib", "version": "go1.24.4", "properties": props}
+
+    docs = [
+        {"specVersion": "1.6", "components": [stdlib("/usr/bin/podman")]},
+        {"specVersion": "1.6", "components": [stdlib("/usr/bin/buildah", "/usr/bin/podman")]},
+        {"specVersion": "1.6", "components": [stdlib("/usr/bin/skopeo")]},
+    ]
+    (c,) = a.merge_boms(docs)["components"]
+    locs = {p["name"]: p["value"] for p in c["properties"] if p["name"].startswith("syft:location:")}
+    assert locs == {
+        "syft:location:0:path": "/usr/bin/podman",
+        "syft:location:0:layerID": "sha256:0",
+        "syft:location:1:path": "/usr/bin/buildah",  # renumbered after the kept one
+        "syft:location:1:layerID": "sha256:0",
+        "syft:location:2:path": "/usr/bin/skopeo",  # podman again was not repeated
+        "syft:location:2:layerID": "sha256:0",
+    }
+    assert len(docs[0]["components"][0]["properties"]) == 3  # the input was not changed
+
+    many = [{"specVersion": "1.6", "components": [stdlib(f"/bin/b{i}")]} for i in range(40)]
+    (c,) = a.merge_boms(many)["components"]
+    paths = [p for p in c["properties"] if p["name"].endswith(":path")]
+    assert len(paths) == a.MAX_LOCATIONS
 
 
 def test_agent_merge_brew_apps_and_images():

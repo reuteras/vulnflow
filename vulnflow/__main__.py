@@ -491,6 +491,17 @@ def main(argv: list[str] | None = None) -> int:
         "is older than this (default 2; 0 = off)",
     )
 
+    wh = sub.add_parser(
+        "where",
+        help="where a component is on disk: the file paths syft recorded, per project "
+        "(e.g. which binaries carry `stdlib go1.23.3`)",
+    )
+    wh.add_argument("name", help="component name as in Dependency-Track (case-insensitive)")
+    wh.add_argument("--version", default=None, help="only this exact version")
+    wh.add_argument("--project", default=None, help="only projects whose name contains this")
+    wh.add_argument("--team", default=None, help="only this team (default: all)")
+    wh.add_argument("--json", action="store_true")
+
     ig = sub.add_parser(
         "ignore",
         help="mark reviewed findings (a file edited down from `debian --json` or "
@@ -835,6 +846,29 @@ def main(argv: list[str] | None = None) -> int:
         for msg in vres.errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if vres.errors else 0
+
+    if a.cmd == "where":
+        from .where import locate
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        located, errors = locate(inv, dt, a.name, a.version, a.project, a.team)
+        if a.json:
+            print(json.dumps([asdict(r) for r in located], indent=2))
+        else:
+            for r in located:
+                print(
+                    f"{r.team}/{project_label(r.project, r.project_version)}: {r.component} "
+                    f"{r.version}  {', '.join(r.paths) or '(no path recorded)'}"
+                )
+        print(f"  {len(located)} component(s) found", file=sys.stderr)
+        for msg in errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if errors else 0
 
     if a.cmd == "disputed":
         from .disputed import NvdFeeds, disputed_findings

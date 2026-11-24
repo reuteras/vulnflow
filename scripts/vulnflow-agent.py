@@ -268,14 +268,55 @@ def _spec_key(doc: Doc) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", str(doc.get("specVersion", "1.5"))))
 
 
+# syft's per-file properties: syft:location:<n>:path, syft:location:<n>:layerID
+LOCATION_RE = re.compile(r"^syft:location:(\d+):(.+)$")
+MAX_LOCATIONS = 25  # a Go module can be in hundreds of binaries; enough to find them
+
+
+def _locations(c: Doc) -> list[list[Doc]]:
+    """The component's syft location properties, one list per location index."""
+    by: dict[int, list[Doc]] = {}
+    for p in c.get("properties") or []:
+        m = LOCATION_RE.match(str(p.get("name", "")))
+        if m:
+            by.setdefault(int(m.group(1)), []).append(p)
+    return [by[i] for i in sorted(by)]
+
+
+def add_locations(kept: Doc, dup: Doc) -> None:
+    """Copy the file locations of a dropped duplicate onto the component that stays, so
+    Dependency-Track keeps every path (`vulnflow where`): stdlib go1.24.4 is one component
+    for podman, buildah and skopeo alike."""
+    have = _locations(kept)
+
+    def path_of(loc: list[Doc]) -> str:
+        return next((str(p.get("value", "")) for p in loc if str(p["name"]).endswith(":path")), "")
+
+    paths = {path_of(loc) for loc in have}
+    props = list(kept.get("properties") or [])
+    n = 1 + max((int(str(loc[0]["name"]).split(":")[2]) for loc in have), default=-1)
+    for loc in _locations(dup):
+        if n >= MAX_LOCATIONS:
+            break
+        path = path_of(loc)
+        if not path or path in paths:
+            continue
+        paths.add(path)
+        for p in loc:
+            field = str(p["name"]).split(":", 3)[3]  # syft:location:<i>:<field>
+            props.append({**p, "name": f"syft:location:{n}:{field}"})
+        n += 1
+    kept["properties"] = props
+
+
 def merge_boms(docs: list[Doc]) -> Doc:
     """The union of all components, duplicates and `file` entries dropped, in one CycloneDX
-    document.
+    document. A duplicate's file locations are kept on the component that stays.
 
     Metadata and the dependency graph are dropped (not needed for matching); specVersion is
     the highest of the inputs so newer syft fields stay valid."""
     spec = max((_spec_key(d) for d in docs), default=(1, 5))
-    seen = set()
+    seen: dict[tuple[Any, ...], Doc] = {}
     comps: list[Doc] = []
     for n, d in enumerate(docs):
         for c in d.get("components") or []:
@@ -283,9 +324,11 @@ def merge_boms(docs: list[Doc]) -> Doc:
                 continue
             key = (c.get("purl", ""), c.get("name", ""), c.get("version", ""), c.get("type", ""))
             if key in seen:
+                add_locations(seen[key], c)
                 continue
-            seen.add(key)
-            comps.append({**c, "bom-ref": f"s{n}:{c.get('bom-ref') or len(comps)}"})
+            kept = {**c, "bom-ref": f"s{n}:{c.get('bom-ref') or len(comps)}"}
+            seen[key] = kept
+            comps.append(kept)
     return {
         "bomFormat": "CycloneDX",
         "specVersion": ".".join(str(x) for x in spec),

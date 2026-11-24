@@ -195,6 +195,13 @@ class DependencyTrack:
                 return out
             page += 1
 
+    def component_properties(self, component_uuid: str) -> list[dict[str, Any]]:
+        """The component's properties (groupName, propertyName, propertyValue). A syft
+        property `syft:location:0:path` arrives as group `syft`, name `location:0:path`
+        (seen live on DT 5.2.2, 2026-11-24); the component list leaves properties out."""
+        r = self.http.get(f"api/v1/component/{component_uuid}/property")
+        return list(r.json() or [])
+
     def findings(self, project_uuid: str, suppressed: bool = False) -> list[dict[str, Any]]:
         """Findings of a project (component, vulnerability, analysis {state, isSuppressed}),
         paginated; suppressed ones only when asked."""
