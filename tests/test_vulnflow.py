@@ -2917,6 +2917,21 @@ def test_agent_drops_files_and_handles_podman(monkeypatch):
         a.collect_containers({"host": "h1", "containers": {"tags": []}})
 
 
+def test_agent_skips_every_forgejo_runner_container():
+    a = load_agent()
+    h = "ab" * 32
+    runner = [
+        f"FORGEJO-ACTIONS-TASK-7_WORKFLOW-{h}_JOB-build",  # job
+        f"FORGEJO-ACTIONS-TASK-7-WORKFLOW-{h}-JOB-megalinter_STEP-lint",  # docker action step
+        "FORGEJO-ACTIONS-TASK-7-WORKFLOW-abababababababababababababababababababa-" + h,  # service
+        "GITEA-ACTIONS-TASK-3_WORKFLOW-x",
+        f"WORKFLOW-{h}_JOB-test",  # plain act, no prefix
+    ]
+    kept = ["searxng", "paperless-db-dumper", "my-WORKFLOW-app", f"x{h}", "forgejo-runner"]
+    assert [n for n in runner if not a.RUNNER_JOB_RE.search(n)] == []
+    assert [n for n in kept if a.RUNNER_JOB_RE.search(n)] == []
+
+
 def test_agent_rootless_podman_and_runner_jobs(tmp_path, monkeypatch):
     a = load_agent()
     pw = pwd.struct_passwd(("alice", "x", 1000, 1000, "", "/home/alice", "/bin/bash"))

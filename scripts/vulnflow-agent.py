@@ -99,9 +99,13 @@ SYFT_ENV = {"SYFT_FILE_METADATA_SELECTION": "none"}
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 LOG_PREFIX_RE = re.compile(r"^\[\d+\]\s+(?:ERROR|WARN)\s+")
 PODMAN_SOCKET_HINT = "is the podman socket on? (systemctl enable --now podman.socket)"
-# Forgejo/act runner job containers (`<prefix>_WORKFLOW-<sha256>_JOB-<name>`) only live while
-# a workflow runs; they are not part of the host
-RUNNER_JOB_RE = re.compile(r"(^|_)WORKFLOW-[0-9a-f]{64}(_|$)")
+# Forgejo/Gitea runner containers only live while a workflow runs; they are not part of the
+# host. forgejo-runner v13.2.1 (act/runner/run_context.go) names them from the prefix
+# FORGEJO-ACTIONS-TASK-<id>: the job `<prefix>_WORKFLOW-<sha256>_JOB-<job>`, a docker
+# action's step `<prefix>-WORKFLOW-<sha256>-JOB-<job>_STEP-<step>` (underscores in the job
+# name become dashes), a service the joined name cut to 63 characters plus `-<sha256>`.
+# Without a prefix (plain act), the WORKFLOW-<sha256> part is still recognised.
+RUNNER_JOB_RE = re.compile(r"^(FORGEJO|GITEA)-ACTIONS-TASK-|(^|[_-])WORKFLOW-[0-9a-f]{64}([_-]|$)")
 # syft's TMPDIR (it unpacks a docker/podman image there) and rootless podman's image
 # archives; on disk, because /tmp is often a tmpfs smaller than a large image (Debian 13)
 ARCHIVE_DIR = "/var/tmp"  # noqa: S108 - only as mkdtemp() parent (private 700 dir)

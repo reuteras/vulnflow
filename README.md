@@ -632,8 +632,11 @@ the largest image), which root then scans. syft itself unpacks every image under
 directory in `/var/tmp` (its `TMPDIR`), not `/tmp`, which is often a tmpfs smaller than a
 large image (Debian 13: half the RAM). Podman never gets a path: rootless podman runs in
 the user's mount namespace, which can't see the unit's private `/var/tmp`. Forgejo runner
-job containers (`…_WORKFLOW-<sha256>_JOB-…`) only live while a workflow runs and are
-skipped. The system scan skips home directories, caches (`/var/cache`, `/root/.cache`),
+containers only live while a workflow runs and are skipped: the job (`…_WORKFLOW-<sha256>_JOB-…`),
+a docker action's step (`FORGEJO-ACTIONS-TASK-<n>-WORKFLOW-…_STEP-…`, e.g. MegaLinter) and
+services. Before 2026-11-24 the step containers were scanned (MegaLinter showed up as
+`container:ghcr.io/oxsecurity/megalinter-python`); `prune` retires that project once it
+stops being uploaded. The system scan skips home directories, caches (`/var/cache`, `/root/.cache`),
 container storage (docker, containerd, podman) and kernel modules (`ProtectKernelModules`
 hides them from the unit anyway; the kernel itself comes from `/boot` and dpkg), and no SBOM carries
 syft's per-file entries (`SYFT_FILE_METADATA_SELECTION=none`): on a Debian server those are

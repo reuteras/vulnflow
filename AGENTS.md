@@ -142,6 +142,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   upstream's compose file where `docker compose` loads it by itself). One-shot jobs
   (DefectDojo `initializer`, OpenCVE `airflow-init`) keep none. When bumping a stack, check
   that new long-running services get the policy.
+- The OpenCVE overlay also replaces upstream's `redis/redis-stack:latest` (not rebuilt since
+  2025-11) with an exact `redis:8.x` tag. OpenCVE needs the JSON module, built into Redis 8.
+  When bumping `OPENCVE_REF`, check the redis service and any new Redis module commands
+  (`json()`, `ft()`, `ts()`) in upstream's code.
 - Exposure: every published port binds to 127.0.0.1, and the target server is reachable
   only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
   `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.
