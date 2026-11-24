@@ -2861,6 +2861,15 @@ def test_agent_merge_brew_apps_and_images():
     assert app["purl"] == "pkg:generic/com.google.Chrome@130.0.1"
     assert app["cpe"].startswith("cpe:2.3:a:google:chrome:130.0.1:")
     assert a.app_entry({"CFBundleIdentifier": "com.x.y", "CFBundleName": "Y"}, {}) is None
+    docker = a.app_entry(
+        {
+            "CFBundleIdentifier": "com.docker.docker",
+            "CFBundleName": "Docker",
+            "CFBundleShortVersionString": "4.100.0",
+        },
+        {},
+    )
+    assert docker["cpe"].startswith("cpe:2.3:a:docker:desktop:4.100.0:")  # not docker:docker (Engine)
 
     assert a.split_image("ghcr.io/o/app:1.2") == ("ghcr.io/o/app", "1.2")
     assert a.split_image("localhost:5000/app") == ("localhost:5000/app", "latest")

@@ -120,6 +120,10 @@ APP_DIRS = ("/Applications", "~/Applications")
 # formula/cask/bundle name -> "vendor:product" as NVD spells it, where they differ
 CPE_VENDORS = {
     "bash": "gnu:bash",
+    # Docker Desktop: the bundle-id guess (docker:docker) is Docker Engine, whose 17.x-20.x
+    # ranges matched Desktop 4.x (seen: 16 findings, CVE-2018-10892 ... CVE-2021-21285).
+    # NVD lists Desktop's own CVEs as docker:desktop (checked: CVE-2024-8695).
+    "com.docker.docker": "docker:desktop",
     "coreutils": "gnu:coreutils",
     "curl": "haxx:curl",
     "git": "git-scm:git",
