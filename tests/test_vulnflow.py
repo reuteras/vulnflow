@@ -3043,6 +3043,53 @@ def test_agent_gives_the_images_own_go_binary_the_image_tag_as_version():
     assert out["components"][0]["cpe"] == ""
 
 
+def test_agent_drops_pypi_copies_of_apt_python_packages():
+    a = load_agent()
+
+    def comp(purl, *paths):
+        props = [{"name": f"syft:location:{i}:path", "value": p} for i, p in enumerate(paths)]
+        return {
+            "type": "library",
+            "name": purl.split("/")[-1].split("@")[0],
+            "purl": purl,
+            "properties": props,
+        }
+
+    apt = "/usr/lib/python3/dist-packages/urllib3-2.3.0.dist-info/METADATA"
+    doc = {
+        "components": [
+            comp("pkg:pypi/urllib3@2.3.0", apt),  # apt's python3-urllib3, seen as PyPI: dropped
+            comp(
+                "pkg:deb/debian/python3-urllib3@2.3.0-3%2Bdeb13u2?distro=debian-13",
+                "/var/lib/dpkg/status",
+            ),
+            comp(
+                "pkg:pypi/requests@2.32.5",
+                "/usr/local/lib/python3.13/dist-packages/requests-2.32.5.dist-info/METADATA",
+            ),
+            comp(
+                "pkg:pypi/rich@14.0.0",
+                "/opt/app/.venv/lib/python3.13/site-packages/rich-14.0.0.dist-info/METADATA",
+            ),
+            comp(
+                "pkg:pypi/idna@3.10",
+                apt.replace("urllib3-2.3.0", "idna-3.10"),
+                "/opt/app/vendor/idna/METADATA",
+            ),
+            comp("pkg:pypi/nolocation@1.0"),  # no path: kept
+        ]
+    }
+    kept = [c["purl"] for c in a.no_apt_python_copies([doc])[0]["components"]]
+    assert kept == [
+        "pkg:deb/debian/python3-urllib3@2.3.0-3%2Bdeb13u2?distro=debian-13",
+        "pkg:pypi/requests@2.32.5",  # pip as root on Debian
+        "pkg:pypi/rich@14.0.0",  # a venv
+        "pkg:pypi/idna@3.10",  # also found outside apt's directory
+        "pkg:pypi/nolocation@1.0",
+    ]
+    assert len(doc["components"]) == 6  # the input is not modified
+
+
 def test_agent_tracks_only_the_running_kernel():
     a = load_agent()
     pkgs = [

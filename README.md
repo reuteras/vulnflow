@@ -693,6 +693,13 @@ prune` shows what the next round would do (`--apply`, `--superseded-days`, `--go
 Only projects the agents make (`kind-*` tag) are touched, and never one that was not
 uploaded yet.
 
+Python packages installed with apt (`python3-urllib3` and so on) are listed once, as the
+Debian package. syft also reads their `dist-info` under `/usr/lib/python3/dist-packages/` and
+reports them a second time as `pkg:pypi/...` with the upstream version, which matches every
+CVE Debian has backported a fix for (47 findings on four Debian hosts on 2026-11-24, all
+such copies). The agent drops a PyPI component whose every location is in that directory;
+packages pip installed (`/usr/local/...`, a venv's `site-packages`) stay.
+
 An image's own Go binary without a version gets the image tag. Some projects put their
 version only into the linker flags (Grafana does), so the binary's build info has none, and
 syft reports the main module as `UNKNOWN` with a CPE whose version is `*`: every CVE the
