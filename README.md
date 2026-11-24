@@ -35,6 +35,7 @@ A proof of concept for three-layer vulnerability tracking, all self-hosted:
 - [Verified vs assumed](#verified-vs-assumed)
 - [Tests](#tests)
 - [Licences to be aware of](#licences-to-be-aware-of)
+- [External servers](#external-servers)
 
 ## How it fits together
 
@@ -776,3 +777,53 @@ OpenCVE's self-hosted edition is under the **Business Source License**, which is
 OSI open source. Internal use by an authority is normally fine, but have the licence text
 reviewed before you rely on it long term. Dependency-Track is Apache-2.0, DefectDojo BSD-3,
 Vulnerability-Lookup AGPL-3.0, and vulnflow is yours.
+
+## External servers
+
+Everything vulnflow and the three stacks contact outside your own network. Own machines
+(push agents, CI) only talk to Dependency-Track over the tailnet; nothing on the internet
+connects in.
+
+### Installation and upgrades
+
+| Server | What | When |
+| --- | --- | --- |
+| `github.com` | Clones of OpenCVE (`OPENCVE_REF`) and DefectDojo (`DD_REF`); syft releases (manual install, section 4) | `setup`, `upgrade` |
+| `ghcr.io` | Dependency-Track `apiserver` and `frontend` images | `setup`, `upgrade` |
+| `registry.defectdojo.com` | DefectDojo `django` and `nginx` images | `setup`, `upgrade` |
+| Docker Hub | `postgres`, `valkey`, `nginx`, `redis/redis-stack`, the Airflow base image, `python` (glue and OpenCVE web images) | `setup`, `upgrade` |
+| PyPI | Python packages for OpenCVE's locally built images (vulnflow itself has no runtime dependencies) | OpenCVE build |
+| `api.github.com` | Newest releases of DefectDojo, OpenCVE and Dependency-Track (anonymous, three requests per run; sends nothing about you) | `./poc.sh check-updates` (nightly) |
+
+### Vulnerability data, while running
+
+| Server | Who asks | What leaves the machine | Turn off |
+| --- | --- | --- | --- |
+| NVD (`nist.gov`) | Dependency-Track's NVD mirror (on by default) | nothing about you: it downloads the whole feed | DT UI, Administration |
+| `storage.googleapis.com/osv-vulnerabilities` | Dependency-Track's OSV mirror, for `DT_OSV_ECOSYSTEMS` | nothing about you: it downloads per-ecosystem archives | `DT_OSV_ECOSYSTEMS=` empty before bootstrap, or DT UI |
+| GitHub Advisories | Dependency-Track, only if you enable it with a GitHub token (section 2) | the token | off by default |
+| `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
+| `www.cisa.gov` | receiver enrichment: CISA KEV list (cached 6 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
+| `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
+| `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
+| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`) | the alert text: CVE, tier, team, links | leave it empty |
+| Tailscale | `tailscaled` (coordination server and DERP relays) | node metadata, as for any tailnet member | — |
+
+The `enrich` command uses the same three enrichment sources as the receiver.
+
+### On-demand triage commands
+
+These run only when you start them; nothing is scheduled. `ignore`/`unignore` only talk to
+Dependency-Track.
+
+| Command | Server | What leaves the machine |
+| --- | --- | --- |
+| `debian` | `security-tracker.debian.org` | nothing about you: one public JSON file, downloaded and cached |
+| `vendor --ubuntu` | `ubuntu.com` (`/security/cves/<id>.json`) | the CVE ids of open findings on `pkg:deb/ubuntu/...` components, one request each, cached 24 h |
+| `vendor --redhat` | `access.redhat.com` (`/hydra/rest/securitydata/cve/<id>.json`) | the CVE ids of open findings on `pkg:rpm/redhat/...` components, one request each, cached 24 h |
+| `patches --osv` | `api.osv.dev` (`/v1/query`) | the package URL and version of each component with an open finding DT has no fix for |
+
+`vendor` and `patches --osv` reveal which CVEs or packages you have, not only what you are
+interested in: unlike the Debian file and the DT mirrors, the request itself is your
+inventory. That's why they are opt-in flags. `vendor` says what it is about to send before it
+sends it.
