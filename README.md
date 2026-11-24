@@ -761,12 +761,44 @@ Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 
 ## Where status and comments live
 
-- **CVE level** ("does Fortinet CVE-X matter to us?"): OpenCVE project status
-  (`to_evaluate … risk_accepted`), assignee, tags, saved views per team.
-- **Finding level** ("CVE-X in component Y in system Z"): DefectDojo. Notes, owner, SLA,
-  risk acceptance with an expiry date, Jira link. `dt2dojo` re-imports with
-  `close_old_findings`, so fixing the component in DT closes the finding in Dojo.
-- VEX/analysis decisions made in Dependency-Track travel into DefectDojo inside the FPF export.
+Rule of thumb: **"is this a vulnerability here?" is answered in Dependency-Track; "what do
+we do about it, who, and by when?" in DefectDojo.** CVEs for products without an SBOM are
+followed in OpenCVE.
+
+| Tool | Holds | Why there |
+| --- | --- | --- |
+| OpenCVE | CVE level ("does Fortinet CVE-X matter to us?"): project status (`to_evaluate … risk_accepted`), assignee, tags, saved views per team | Vendors/products you follow by subscription, appliances and SaaS that have no SBOM |
+| Dependency-Track | What is installed where; matching against NVD, OSV, GitHub; **applicability**: Not Affected / False Positive with a justification (`ignore`, from `debian`, `disputed` or your own review) | `prune` carries these to new versions of the same build, they leave DefectDojo through the FPF export (suppressed findings are not exported), and they are VEX |
+| DefectDojo | The work on what *is* a problem: owner, priority, SLA, notes, Jira link, risk acceptance with an expiry date; reports and metrics per team/product; findings from other tools later (pentests, DAST) | Built for workflow and reporting; `dt2dojo` re-imports with `close_old_findings`, so a component fixed in DT closes its finding here |
+
+How it is laid out in DefectDojo: a **product type** per team, a **product** per DT project
+name (`container:nginx`), one **engagement** `Dependency-Track` per product for the
+continuous import, and a **test** per version (`Dependency-Track 1.31.8`). `prune` closes a
+version's test once that version is no longer uploaded.
+
+Things that follow from that layout:
+
+- **Decisions in DefectDojo stay with one version.** A finding belongs to its version's
+  test; the next image tag is a new test with new findings (checked 2026-11-24: no
+  deduplication across the tests). Notes, an owner or a risk acceptance on
+  `container:x@1.2` do not move to `@1.3`. Host projects are stable (their version is the OS
+  release, e.g. `debian-13`), so a DefectDojo risk acceptance on a host finding lasts until
+  the next release; on a container it lasts until the next update. Anything that should
+  survive updates belongs in Dependency-Track.
+- **One test per image name and host would not fix that**: several versions of the same
+  image often run side by side on one host (one postgres per application), and they would
+  overwrite each other's findings on every import. DT has no project per container to key
+  on.
+- **The same CVE shows once per running version** (two postgres versions, two findings).
+  That is right while both run; after an update the old version's findings close 2 days
+  after its last upload.
+- **Engagements:** keep the one `Dependency-Track` engagement for the continuous import;
+  create your own engagement (with start and end date) for time-boxed work: a pentest, a
+  quarterly review, a migration. Do not create one per version or per run; the tests do
+  that.
+- **Endpoints** are for network findings (host:port, URL) from tools such as ZAP or nuclei.
+  Component findings have none, so they are not used; they become worth it once a network
+  or web scanner feeds DefectDojo.
 
 ## Security and OPSEC notes
 
