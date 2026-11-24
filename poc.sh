@@ -23,6 +23,9 @@
 #   down              stop everything; volumes (data) are kept
 #   destroy [--yes]   delete all containers, data volumes, upstream/ and .env (asks first)
 #   status            show containers and health endpoints
+#   check-updates     newer upstream releases (7-day cooldown) and pinned versions not deployed
+#   upgrade C [V] [--now]  back up C's database, then deploy C (dojo|opencve|dtrack) at the
+#                     version pinned in the repo, or at V (--now: V is not the reviewed pin)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -706,6 +709,99 @@ EOF
   log "Done. ./poc.sh setup installs from scratch."
 }
 
+dt_compose() { docker compose --env-file .env -f stacks/dependency-track/docker-compose.yml "$@"; }
+
+# Dump all databases of a stack's "postgres" service (all three upstreams name it so and set
+# POSTGRES_USER, a superuser, in the container) to data/backups/<name>-<UTC>.sql.gz. Keeps the
+# newest BACKUP_KEEP dumps per stack. Restore into a fresh volume with
+#   gunzip -c <file> | <compose> exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres'
+BACKUP_KEEP=5
+backup_pg() { # name compose-function
+  local name="$1" compose="$2" dir="$ROOT/data/backups" f
+  [[ -n "$("$compose" ps -q --status running postgres 2>/dev/null)" ]] \
+    || die "$name: postgres is not running (./poc.sh up first); nothing changed"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  f="$dir/$name-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+  log "$name: database dump to $f"
+  # shellcheck disable=SC2016 # expanded inside the container
+  if ! "$compose" exec -T postgres sh -c 'pg_dumpall -U "$POSTGRES_USER"' | gzip >"$f" \
+    || [[ "$(gzip -dc "$f" | head -c 1 | wc -c)" -eq 0 ]]; then
+    rm -f "$f"
+    die "$name: database dump failed; nothing changed"
+  fi
+  chmod 600 "$f"
+  # The glob sorts by the UTC timestamp in the name: oldest first
+  local dumps=("$dir/$name-"*.sql.gz)
+  if ((${#dumps[@]} > BACKUP_KEEP)); then
+    rm -f -- "${dumps[@]:0:${#dumps[@]}-BACKUP_KEEP}"
+  fi
+}
+
+cmd_check_updates() {
+  load_env
+  vulnflow check-updates
+}
+
+# Upgrade one stack: database dump first, then the same steps as setup, which are safe to
+# rerun. dojo/opencve: version = DD_REF/OPENCVE_REF in .env.example (reviewed in the repo,
+# AGENTS.md "Bootstrap invariants"), or an explicit one with --now. dtrack: the image tags in
+# stacks/dependency-track/docker-compose.yml (Dependabot PRs), so git pull first.
+cmd_upgrade() {
+  local comp="${1:-}" ver="" now=0 key="" cur pinned a
+  [[ $# -gt 0 ]] && shift
+  for a in "$@"; do
+    case "$a" in
+      --now) now=1 ;;
+      -*) die "unknown option $a" ;;
+      *) ver="$a" ;;
+    esac
+  done
+  load_env
+  case "$comp" in
+    dojo) key=DD_REF ;;
+    opencve) key=OPENCVE_REF ;;
+    dtrack)
+      [[ -z "$ver" ]] || die "dtrack follows the image tags in $ROOT/stacks/dependency-track/docker-compose.yml: merge the Dependabot PR and git pull"
+      backup_pg dtrack dt_compose
+      cmd_dtrack_up
+      cmd_status
+      return
+      ;;
+    *) die "usage: ./poc.sh upgrade dojo|opencve|dtrack [version] [--now]" ;;
+  esac
+  cur="${!key:-}"
+  pinned="$(sed -n "s/^$key=//p" .env.example | tr -d "'\"")"
+  if [[ -z "$ver" ]]; then
+    ver="$pinned"
+  elif [[ "$ver" != "$pinned" && "$now" != 1 ]]; then
+    die "$ver is not the reviewed $key in .env.example ($pinned); bump it there after the AGENTS.md checks, or pass --now"
+  fi
+  [[ "$ver" =~ ^[A-Za-z0-9._-]+$ ]] || die "odd version '$ver'"
+  [[ "$ver" != "$cur" ]] || {
+    log "$comp already at $ver"
+    return
+  }
+  log "Upgrading $comp: $cur -> $ver"
+  case "$comp" in
+    dojo) backup_pg dojo dojo_compose ;;
+    opencve) backup_pg opencve opencve_compose ;;
+  esac
+  printf '%s=%s\n' "$key" "$ver" | vulnflow env-set
+  export "$key=$ver"
+  case "$comp" in
+    dojo) cmd_dojo_up ;;
+    opencve)
+      cmd_opencve_prepare
+      cmd_opencve_start
+      # the receiver is attached to OpenCVE's network
+      cmd_glue_up
+      ;;
+  esac
+  cmd_status
+  log "$comp at $ver. Back out: $key=$cur in .env, the dump in $ROOT/data/backups, ./poc.sh setup"
+}
+
 cmd_setup() {
   local t0=$SECONDS
   cmd_init
@@ -755,11 +851,16 @@ case "${1:-}" in
     cmd_glue_up
     ;;
   status) cmd_status ;;
+  check-updates) cmd_check_updates ;;
+  upgrade)
+    shift
+    cmd_upgrade "$@"
+    ;;
   up) cmd_up ;;
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,25p' "$0"
+    sed -n '2,28p' "$0"
     exit 1
     ;;
 esac
