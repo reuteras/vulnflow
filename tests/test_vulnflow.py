@@ -357,7 +357,20 @@ def test_sync_inventory_dry_run_and_missing_project(inv):
 def test_dt_to_dojo_routes_by_tag(inv):
     def tag_route(m, url, h, b):
         tag = url.split("/tag/")[1].split("?")[0]
-        rows = [{"uuid": f"{tag}-1", "name": f"{tag}-app", "version": "2", "active": True}]
+        rows = [
+            {
+                "uuid": f"{tag}-1",
+                "name": f"{tag}-app",
+                "version": "2",
+                "active": True,
+                "tags": [
+                    {"name": tag},
+                    {"name": "host-h1"},
+                    {"name": "kind-container"},
+                    {"name": "x-y"},
+                ],
+            }
+        ]
         return Response(200, json.dumps(rows).encode(), {"X-Total-Count": "1"})
 
     t = FakeTransport(
@@ -374,6 +387,20 @@ def test_dt_to_dojo_routes_by_tag(inv):
     posts = [c for c in t.calls if c[0] == "POST"]
     sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
     assert b"Sysadmin" in sysadm[3]
+    fields = _multipart_fields(sysadm[3])
+    assert fields["tags"] == ["team-sysadm", "source-dtrack", "host-h1", "kind-container"]  # not x-y
+    assert fields["version"] == ["2"] and fields["apply_tags_to_findings"] == ["true"]
+    assert fields["test_title"] == ["Dependency-Track 2"]
+
+
+def _multipart_fields(body: bytes) -> dict[str, list[str]]:
+    """name -> values of the plain (non-file) fields of a multipart body."""
+    import re
+
+    out: dict[str, list[str]] = {}
+    for name, value in re.findall(rb'name="([^"]+)"\r\n\r\n(.*?)\r\n--', body, re.S):
+        out.setdefault(name.decode(), []).append(value.decode())
+    return out
 
 
 def test_opencve_paths_match_schema():
@@ -1469,6 +1496,7 @@ class FakePortfolio:
             self.analyses[k] = {
                 "analysisState": b["analysisState"],
                 "analysisJustification": b.get("analysisJustification"),
+                "analysisResponse": b.get("analysisResponse"),
                 "isSuppressed": b["isSuppressed"],
                 "analysisComments": [{"comment": b["comment"]}],
             }
@@ -1589,6 +1617,137 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
 
     again = prune(inv, dt, dojo, apply=True, now=now)  # idempotent: nothing left to do
     assert not again.changed and again.errors == []
+
+
+def test_prune_carries_accepted_risks_and_lifts_them_after_the_review_date(inv):
+    from vulnflow.prune import prune
+
+    now = 1_800_000_000.0  # 2027-01-15
+    c = [{"name": t} for t in ("kind-container", "team-dev", "host-h1")]
+    projects = [
+        {
+            "uuid": u,
+            "name": "container:app",
+            "version": v,
+            "active": True,
+            "tags": c,
+            "lastBomImport": int(now * 1000 - h * 3600 * 1000),
+        }
+        for u, v, h in (("v1", "1", 2), ("v2", "2", 1))
+    ]
+
+    def f(p, cve, state="", suppressed=False):
+        return {
+            "component": {
+                "uuid": f"{p}-lib",
+                "name": "lib",
+                "version": "1",
+                "purl": "pkg:generic/lib@1",
+            },
+            "vulnerability": {"uuid": f"V-{cve}", "vulnId": cve},
+            "analysis": {"state": state, "isSuppressed": suppressed} if state else {},
+        }
+
+    fake = FakePortfolio(
+        projects,
+        {
+            "v1": [
+                f("v1", "CVE-A", "EXPLOITABLE", True),  # accepted risk, review in 2099: carried
+                f("v1", "CVE-B", "EXPLOITABLE", True),  # exploitable, response UPDATE: no
+                f("v1", "CVE-C", "NOT_AFFECTED", True),  # review date passed: shown again
+            ],
+            "v2": [f("v2", "CVE-A"), f("v2", "CVE-B"), f("v2", "CVE-C")],
+        },
+    )
+
+    def analysis(state, response, comment):
+        return {
+            "analysisState": state,
+            "analysisResponse": response,
+            "analysisJustification": None,
+            "isSuppressed": True,
+            "analysisComments": [{"comment": "Analysis: NOT_SET → " + state}, {"comment": comment}],
+        }
+
+    fake.analyses[("v1", "v1-lib", "V-CVE-A")] = analysis(
+        "EXPLOITABLE",
+        "WILL_NOT_FIX",
+        "No upstream fix; review by 2099-01-01; reviewed 2027-01-10 via vulnflow",
+    )
+    fake.analyses[("v1", "v1-lib", "V-CVE-B")] = analysis("EXPLOITABLE", "UPDATE", "update next week")
+    fake.analyses[("v1", "v1-lib", "V-CVE-C")] = analysis(
+        "NOT_AFFECTED", None, "Not used; review by 2026-12-31; reviewed 2026-06-01 via vulnflow"
+    )
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+
+    dry = prune(inv, dt, now=now)
+    assert [m for m, _ in fake.calls if m != "GET"] == []
+    assert dry.carried == [
+        "dev/container:app@2: pkg:generic/lib@1 CVE-A <- EXPLOITABLE/WILL_NOT_FIX from container:app@1"
+    ]
+    assert dry.reopened == [
+        "dev/container:app@1: pkg:generic/lib@1 CVE-C (NOT_AFFECTED, review by 2026-12-31)"
+    ]
+
+    rep = prune(inv, dt, apply=True, now=now)
+    assert rep.errors == [] and rep.carried == dry.carried and rep.reopened == dry.reopened
+    copy = fake.analyses[("v2", "v2-lib", "V-CVE-A")]
+    assert (copy["analysisState"], copy["analysisResponse"], copy["isSuppressed"]) == (
+        "EXPLOITABLE",
+        "WILL_NOT_FIX",
+        True,
+    )
+    assert copy["analysisComments"][0]["comment"] == (
+        "Carried forward from container:app@1: No upstream fix; review by 2099-01-01; "
+        "reviewed 2027-01-10; via vulnflow"
+    )
+    reopened = fake.analyses[("v1", "v1-lib", "V-CVE-C")]
+    assert (reopened["analysisState"], reopened["isSuppressed"]) == ("NOT_AFFECTED", False)
+    assert reopened["analysisComments"][-1]["comment"] == (
+        "Review date 2026-12-31 passed: shown again; via vulnflow"
+    )
+    assert ("v2", "v2-lib", "V-CVE-B") not in fake.analyses
+    assert ("v2", "v2-lib", "V-CVE-C") not in fake.analyses  # an expired decision is not carried
+    assert not prune(inv, dt, apply=True, now=now).changed
+
+
+def test_ignore_records_accepted_risks_with_a_review_date(tmp_path):
+    from datetime import date
+
+    from vulnflow.net import Http
+    from vulnflow.triage import apply_ignores, load_review, review_date
+
+    row = {
+        "team": "dev",
+        "project": "app",
+        "project_uuid": "P1",
+        "component": "lib",
+        "component_uuid": "C1",
+        "vuln_id": "CVE-1",
+        "vuln_uuid": "V1",
+        "reason": "No fix upstream, not reachable from outside",
+    }
+    f = tmp_path / "review.json"
+    f.write_text(json.dumps([row]), encoding="utf-8")
+    items = load_review(f, today=date(2026, 11, 24), review_by=date(2027, 3, 1))
+    assert items[0].comment == (
+        "No fix upstream, not reachable from outside; review by 2027-03-01; "
+        "reviewed 2026-11-24 via vulnflow"
+    )
+    assert review_date(items[0].comment) == date(2027, 3, 1) and review_date("no date") is None
+
+    t = FakeTransport({"GET /api/v1/analysis": Response(404, b"{}", {}), "PUT /api/v1/analysis": {}})
+    http = Http("http://dt", transport=t)
+    with pytest.raises(ValueError, match="accepted risk"):
+        apply_ignores(http, items, "EXPLOITABLE")  # an accepted risk needs a response
+    written, _, _, errs = apply_ignores(http, items, "EXPLOITABLE", response="WILL_NOT_FIX")
+    assert errs == [] and len(written) == 1
+    body = json.loads(next(c for c in t.calls if c[0] == "PUT")[3])
+    assert (body["analysisState"], body["analysisResponse"], body["isSuppressed"]) == (
+        "EXPLOITABLE",
+        "WILL_NOT_FIX",
+        True,
+    )
 
 
 def test_debian_version_order_matches_dpkg():

@@ -502,10 +502,22 @@ the file, so read the file first; `unignore` takes any of it back.
    shape, and run `ignore` with the matching `--justification` (`CODE_NOT_PRESENT` when the
    fix is in, `CODE_NOT_REACHABLE` when the code is never run with outside input).
 
+4. **Accepted risks** (it is affected, and you decide to live with it for now, e.g. a
+   `debian --action no-fix` row Debian calls minor): record it in Dependency-Track with a
+   review date, so it carries over to new versions and comes back by itself:
+
+   ```bash
+   python3 -m vulnflow ignore --from accept.json --state EXPLOITABLE --response WILL_NOT_FIX \
+       --review-by 2027-03-01            # dry run, then --apply; CAN_NOT_FIX when there is no fix
+   ```
+
+   The finding is suppressed (gone from the lists and DefectDojo) until the review date; the
+   first `dt2dojo` round after it lifts the suppression and it shows up again, with a
+   comment saying why. `--review-by` works with the other states too, for a Not Affected
+   you want to look at again.
+
 Not for `ignore`: `debian --action update` and `patches --osv` list real fixes (update the
-image or package instead), and `debian --action no-fix` lists open issues Debian has not
-fixed (accepting those is a risk decision: DefectDojo's risk acceptance, with an expiry
-date).
+image or package instead).
 
 #### Recommended routine
 
@@ -514,7 +526,7 @@ date).
 | Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the server's nightly update runs `check-updates` |
 | Weekly | Steps 1-2 above. `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
 | After an image update | Nothing: decisions carry over to the new tag, and the old tag is retired 2 days after its last upload. `python3 -m vulnflow prune` shows what the next round will do |
-| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: has Debian fixed anything you accepted in DefectDojo? `sync --dry-run`: teams without SBOMs |
+| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: anything new to accept (step 4) or that Debian has fixed since? `sync --dry-run`: teams without SBOMs |
 
 ## Own machines (push agents)
 
@@ -655,11 +667,16 @@ project, component and CVE, so a Not Affected on `container:searxng@2026.11.15` 
 apply to `@2026.11.17`, and nothing retired the old version. Per project name and host
 (`host-<host>` tag):
 
-- **Carried forward:** a Not Affected or False Positive (suppressed) decision on one version
-  is copied to the other active versions for the same component build (identical package
-  URL) and CVE, where nobody has triaged the finding yet. The comment says
-  `Carried forward from <project>@<version>: <original reason>; via vulnflow`, so
-  `unignore --from` reverts a copy.
+- **Carried forward:** a suppressed decision on one version (Not Affected, False Positive,
+  or an accepted risk: Exploitable with response Will Not Fix / Can Not Fix) is copied to
+  the other active versions for the same component build (identical package URL) and CVE,
+  where nobody has triaged the finding yet, with its justification and response. The
+  comment says `Carried forward from <project>@<version>: <original reason>; via vulnflow`,
+  so `unignore --from` reverts a copy.
+- **Shown again after the review date:** a suppressed decision whose comment says `review
+  by YYYY-MM-DD` (`ignore --review-by`) is unsuppressed after that day, keeping its state:
+  it is back in the lists and in DefectDojo. Copies keep the date, so all versions come
+  back together.
 - **Deactivated:** a version not uploaded for 2 days while a newer one exists, or the newest
   one when nothing uploaded it for 7 days (the container or host is gone). Its findings in
   DefectDojo are closed first, by re-importing an empty list into its test.
@@ -768,8 +785,8 @@ followed in OpenCVE.
 | Tool | Holds | Why there |
 | --- | --- | --- |
 | OpenCVE | CVE level ("does Fortinet CVE-X matter to us?"): project status (`to_evaluate … risk_accepted`), assignee, tags, saved views per team | Vendors/products you follow by subscription, appliances and SaaS that have no SBOM |
-| Dependency-Track | What is installed where; matching against NVD, OSV, GitHub; **applicability**: Not Affected / False Positive with a justification (`ignore`, from `debian`, `disputed` or your own review) | `prune` carries these to new versions of the same build, they leave DefectDojo through the FPF export (suppressed findings are not exported), and they are VEX |
-| DefectDojo | The work on what *is* a problem: owner, priority, SLA, notes, Jira link, risk acceptance with an expiry date; reports and metrics per team/product; findings from other tools later (pentests, DAST) | Built for workflow and reporting; `dt2dojo` re-imports with `close_old_findings`, so a component fixed in DT closes its finding here |
+| Dependency-Track | What is installed where; matching against NVD, OSV, GitHub; **decisions that must survive updates**: Not Affected / False Positive with a justification, and accepted risks (Exploitable + Will Not Fix / Can Not Fix) with a review date (`ignore`, from `debian`, `disputed` or your own review) | `prune` carries these to new versions of the same build and brings a decision back after its review date; suppressed findings leave DefectDojo through the FPF export; they are VEX |
+| DefectDojo | The work on what *is* a problem: owner, priority, SLA, notes, Jira link; reports and metrics per team/product; findings from other tools later (pentests, DAST). Filter by host or kind with the `host-*` / `kind-*` / `group-*` tags `dt2dojo` puts on each test and its findings | Built for workflow and reporting; `dt2dojo` re-imports with `close_old_findings`, so a component fixed in DT closes its finding here |
 
 How it is laid out in DefectDojo: a **product type** per team, a **product** per DT project
 name (`container:nginx`), one **engagement** `Dependency-Track` per product for the
@@ -784,7 +801,10 @@ Things that follow from that layout:
   `container:x@1.2` do not move to `@1.3`. Host projects are stable (their version is the OS
   release, e.g. `debian-13`), so a DefectDojo risk acceptance on a host finding lasts until
   the next release; on a container it lasts until the next update. Anything that should
-  survive updates belongs in Dependency-Track.
+  survive updates belongs in Dependency-Track: accepted risks too (`ignore --state
+  EXPLOITABLE --response WILL_NOT_FIX --review-by <date>`, see "Clearing known-OK
+  findings"). DefectDojo's importer only maps DT's False Positive; the other decisions
+  reach it as suppressed (so: not exported, closed).
 - **One test per image name and host would not fix that**: several versions of the same
   image often run side by side on one host (one postgres per application), and they would
   overwrite each other's findings on every import. DT has no project per container to key

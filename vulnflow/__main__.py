@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE, project_label
@@ -191,8 +192,18 @@ def _ignore(a: argparse.Namespace) -> int:
     from .bootstrap import BootstrapError, dt_admin_http
     from .triage import ReviewFileError, apply_ignores, load_review
 
+    if a.state == "EXPLOITABLE" and not a.response:
+        print(
+            "  error --state EXPLOITABLE records an accepted risk: add --response WILL_NOT_FIX or "
+            "CAN_NOT_FIX (and --review-by)",
+            file=sys.stderr,
+        )
+        return 2
+    if a.review_by is not None and a.review_by <= date.today():
+        print(f"  error --review-by {a.review_by} is not in the future", file=sys.stderr)
+        return 2
     try:
-        items = load_review(a.review)
+        items = load_review(a.review, review_by=a.review_by)
     except ReviewFileError as e:
         print(f"  error {e}", file=sys.stderr)
         return 2
@@ -218,6 +229,7 @@ def _ignore(a: argparse.Namespace) -> int:
         a.justification,
         overwrite=a.overwrite,
         ledger=Path(a.data_dir) / "ignored.jsonl",
+        response=a.response,
     )
     print(f"  {len(written)} written, {len(skipped)} already {a.state} and suppressed")
     for k in kept:
@@ -477,7 +489,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     ig.add_argument("--from", dest="review", required=True, type=Path, metavar="FILE")
     ig.add_argument("--apply", action="store_true", help="write to Dependency-Track")
-    ig.add_argument("--state", choices=("NOT_AFFECTED", "FALSE_POSITIVE"), default="NOT_AFFECTED")
+    ig.add_argument(
+        "--state",
+        choices=("NOT_AFFECTED", "FALSE_POSITIVE", "EXPLOITABLE"),
+        default="NOT_AFFECTED",
+        help="EXPLOITABLE = an accepted risk; needs --response",
+    )
+    ig.add_argument(
+        "--response",
+        choices=("WILL_NOT_FIX", "CAN_NOT_FIX"),
+        default=None,
+        help="DT analysisResponse, for --state EXPLOITABLE",
+    )
+    ig.add_argument(
+        "--review-by",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="adds 'review by <date>' to the comment; after that day `prune` (dt2dojo) lifts the "
+        "suppression, so the finding shows up again (also in DefectDojo)",
+    )
     ig.add_argument("--justification", default=None, help="DT analysisJustification, optional")
     ig.add_argument(
         "--overwrite",
@@ -502,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     ui.add_argument("--apply", action="store_true", help="write to Dependency-Track")
     ui.add_argument(
         "--state",
-        choices=("NOT_AFFECTED", "FALSE_POSITIVE"),
+        choices=("NOT_AFFECTED", "FALSE_POSITIVE", "EXPLOITABLE"),
         default="NOT_AFFECTED",
         help="with --from and no ledger entry: the state `ignore` set",
     )
@@ -716,13 +747,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         for line in prune_res.reactivated:
             print(f"  reactivate  {line}")
+        for line in prune_res.reopened:
+            print(f"  reopen      {line}")
         for line in prune_res.deactivated:
             print(f"  deactivate  {line}")
         for line in prune_res.carried:
             print(f"  carry       {line}")
         print(
             f"  {len(prune_res.carried)} decision(s) carried forward, {len(prune_res.deactivated)} "
-            f"project(s) deactivated, {len(prune_res.reactivated)} reactivated"
+            f"project(s) deactivated, {len(prune_res.reactivated)} reactivated, "
+            f"{len(prune_res.reopened)} past their review date"
             + ("" if a.apply else "; dry run, add --apply"),
             file=sys.stderr,
         )

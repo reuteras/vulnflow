@@ -11,6 +11,9 @@ from .config import Inventory, Team
 
 log = logging.getLogger(__name__)
 
+# DT project tags copied to DefectDojo (the agent sets them; team-* is there already)
+DOJO_TAG_PREFIXES = ("host-", "kind-", "group-")
+
 
 @dataclass
 class Report:
@@ -98,7 +101,10 @@ def sync_inventory(
 def reimport_project(
     dojo: DefectDojo, team: Team, p: DTProject, fpf: bytes, engagement: str
 ) -> dict[str, Any]:
-    """One DT project's FPF into its DefectDojo product/test (one test per version)."""
+    """One DT project's FPF into its DefectDojo product/test (one test per version). The
+    project's host-/kind-/group- tags go on the test and its findings, so DefectDojo can
+    filter by host or kind (a product such as container:nginx spans hosts)."""
+    extra = sorted(t for t in p.tags if t.startswith(DOJO_TAG_PREFIXES))
     return dojo.reimport(
         scan_type=DefectDojo.FPF_SCAN_TYPE,
         report=fpf,
@@ -106,8 +112,10 @@ def reimport_project(
         product_name=p.name,
         product_type=team.defectdojo_product_type,
         engagement=engagement,
-        tags=[team.dtrack_tag, "source-dtrack"],
+        tags=[team.dtrack_tag, "source-dtrack", *extra],
         test_title=f"Dependency-Track {p.version}".strip(),
+        version=p.version,
+        apply_tags_to_findings=True,
     )
 
 
@@ -136,6 +144,7 @@ def dt_to_dojo(
         rep.done += [f"{tag}prune: carried {line}" for line in pr.carried]
         rep.done += [f"{tag}prune: deactivated {line}" for line in pr.deactivated]
         rep.done += [f"{tag}prune: reactivated {line}" for line in pr.reactivated]
+        rep.done += [f"{tag}prune: review date passed, shown again: {line}" for line in pr.reopened]
         rep.errors += [f"prune: {e}" for e in pr.errors]
     for team in inv.teams.values():
         try:

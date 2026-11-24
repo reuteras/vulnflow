@@ -332,7 +332,12 @@ class DefectDojo:
         engagement: str,
         tags: list[str],
         test_title: str = "",
+        version: str = "",
+        apply_tags_to_findings: bool = False,
     ) -> dict[str, Any]:
+        """POST reimport-scan/. `tags` replace the test's tags (DefectDojo 3.5.201
+        ReImportScanSerializer); with apply_tags_to_findings they go on its findings too.
+        `version` is set on the test."""
         fields: dict[str, str | list[str]] = {
             "scan_type": scan_type,
             "product_name": product_name,
@@ -346,6 +351,10 @@ class DefectDojo:
         }
         if test_title:
             fields["test_title"] = test_title
+        if version:
+            fields["version"] = version
+        if apply_tags_to_findings:
+            fields["apply_tags_to_findings"] = "true"
         body, ctype = multipart(fields, {"file": (filename, report, "application/json")})
         r = self.http.post("reimport-scan/", body=body, headers={"Content-Type": ctype})
         return r.json() or {}
