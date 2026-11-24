@@ -471,6 +471,51 @@ run `./poc.sh glue-up`.
 - **Both:** P1/P2 alerts arrive in chat (when configured) and are marked `to_evaluate` in
   OpenCVE, but only if nobody has triaged them yet.
 
+#### Clearing known-OK findings
+
+Mark each one once: `prune` (every `dt2dojo` round) copies the decision to later versions of
+the same build, and the next round closes the finding in DefectDojo. `ignore` skips findings
+that are already marked, so rerunning a step only adds what is new. It applies every row in
+the file, so read the file first; `unignore` takes any of it back.
+
+1. **Already fixed by Debian.** NVD compares upstream version numbers, and Debian fixes in
+   its own package versions:
+
+   ```bash
+   python3 -m vulnflow debian --action fixed --json > fixed.json     # read it, drop rows you disagree with
+   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT            # dry run
+   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT --apply
+   ```
+
+   Each analysis says which Debian version fixed it and which is installed.
+
+2. **Disputed or rejected in NVD.** The supplier says it is not a vulnerability, or the CVE
+   was withdrawn. Check each reason (the `NOTE:` text in the row) before agreeing:
+
+   ```bash
+   python3 -m vulnflow disputed --json > disputed.json
+   python3 -m vulnflow ignore --from disputed.json --state FALSE_POSITIVE            # dry run, then --apply
+   ```
+
+3. **Anything else you investigated by hand** (e.g. a `pkg:generic/...` binary on a
+   distribution none of the tools cover): write the rows with a `reason`, in the same JSON
+   shape, and run `ignore` with the matching `--justification` (`CODE_NOT_PRESENT` when the
+   fix is in, `CODE_NOT_REACHABLE` when the code is never run with outside input).
+
+Not for `ignore`: `debian --action update` and `patches --osv` list real fixes (update the
+image or package instead), and `debian --action no-fix` lists open issues Debian has not
+fixed (accepting those is a risk decision: DefectDojo's risk acceptance, with an expiry
+date).
+
+#### Recommended routine
+
+| When | What |
+| --- | --- |
+| Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the server's nightly update runs `check-updates` |
+| Weekly | Steps 1-2 above. `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
+| After an image update | Nothing: decisions carry over to the new tag, and the old tag is retired 2 days after its last upload. `python3 -m vulnflow prune` shows what the next round will do |
+| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: has Debian fixed anything you accepted in DefectDojo? `sync --dry-run`: teams without SBOMs |
+
 ## Own machines (push agents)
 
 The vulnflow server is always on and every machine **pushes** to it; nothing connects to
