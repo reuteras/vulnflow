@@ -5,12 +5,17 @@ Old CVEs on Debian-based images (and hosts) are often ones Debian has triaged as
 still shows the upstream range as vulnerable. NVD-only scanners flag them anyway.
 
 Source: https://security-tracker.debian.org/tracker/data/json, one public file, downloaded
-and cached; nothing about your components is sent. Shape (ASSUMED from memory, not checked
-against a download in this repo):
+and cached; nothing about your components is sent. Shape (checked against a download,
+2026-11-24):
 
     {source_package: {"CVE-YYYY-N": {"releases": {codename: {"status": "open|resolved|
      undetermined", "urgency": "unimportant|low|medium|high|end-of-life|not yet assigned",
-     "fixed_version": "..."}}}}}
+     "fixed_version": "...", "repositories": {suite: version},
+     "nodsa": "Minor issue", "nodsa_reason": "|postponed|ignored",
+     "next_point_update": true}}}}}
+
+`nodsa`, `nodsa_reason` and `next_point_update` appear only on some entries; they say why an
+open entry has no security update (`note` on the row).
 
 Each match also gets an `action`, by comparing the installed version with the tracker's
 `fixed_version` (Debian version order, vulnflow/debver.py):
@@ -23,8 +28,10 @@ Each match also gets an `action`, by comparing the installed version with the tr
     unknown  cannot compare safely (resolved without a version, or only one side has an epoch)
 
 The installed version is the *source* version from the purl's `upstream=` when present (the
-tracker works on source packages), else the component version. fixed_version semantics and
-the epoch handling are ASSUMED, not checked against real tracker data.
+tracker works on source packages), else the component version. The verdicts were checked by
+hand against the tracker for 17 rows of 5 packages on bookworm and trixie (2026-11-24),
+including epochs, `~debNNuN` and `+debNNuN`. Not yet seen on real findings: fixed_version
+"0" and a purl `upstream=` that carries a version.
 
 The tracker is keyed by *source* package. A finding is matched on its CVE id plus the
 component's own deb name or the `upstream=` source name in its purl (syft writes it), and the
@@ -63,6 +70,20 @@ class DebianInfo:
     status: str
     urgency: str
     fixed: str
+    note: str = ""
+
+
+def tracker_note(rel: dict[str, Any]) -> str:
+    """Debian's reason an entry has no security update yet, from `nodsa`, `nodsa_reason` and
+    `next_point_update`; "" when the tracker gives none."""
+    parts = []
+    if rel.get("next_point_update"):
+        parts.append("fix queued for the next point release")
+    nodsa = str(rel.get("nodsa") or "").strip()
+    if nodsa:
+        why = str(rel.get("nodsa_reason") or "").strip()
+        parts.append(f"no DSA: {nodsa}" + (f" [{why}]" if why else ""))
+    return "; ".join(parts)
 
 
 @dataclass
@@ -84,6 +105,8 @@ class DebianFinding:
     vuln_uuid: str = ""
     installed: str = ""  # the version that was compared with `fixed`
     action: str = "unknown"  # update | fixed | no-fix | unknown
+    note: str = ""  # why Debian has no fix yet (no-dsa, next point release), when it says
+    project_version: str = ""
 
 
 class DebianTracker:
@@ -133,6 +156,7 @@ class DebianTracker:
                     status=str(rel.get("status") or ""),
                     urgency=str(rel.get("urgency") or ""),
                     fixed=str(rel.get("fixed_version") or ""),
+                    note=tracker_note(rel),
                 )
         return None
 
@@ -210,6 +234,7 @@ def debian_findings(
             DebianFinding(
                 team=key,
                 project=proj.name,
+                project_version=proj.version,
                 component=c.get("name", ""),
                 version=c.get("version", ""),
                 vuln_id=vid,
@@ -219,6 +244,7 @@ def debian_findings(
                 status=info.status,
                 urgency=info.urgency,
                 fixed=info.fixed,
+                note=info.note,
                 project_uuid=proj.uuid,
                 component_uuid=str(c.get("uuid") or ""),
                 vuln_uuid=str(v.get("uuid") or ""),

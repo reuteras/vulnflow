@@ -31,6 +31,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from .clients import project_label
 from .net import Http
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,11 @@ class IgnoreItem:
     vuln_id: str
     vuln_uuid: str
     comment: str
+    project_version: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.team}/{project_label(self.project, self.project_version)}"
 
 
 def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
@@ -119,6 +125,7 @@ def load_review(path: Path, today: date | None = None) -> list[IgnoreItem]:
             vuln_id=str(row["vuln_id"]),
             vuln_uuid=str(row["vuln_uuid"]),
             comment=comment,
+            project_version=str(row.get("project_version") or ""),
         )
         items[(item.project_uuid, item.component_uuid, item.vuln_uuid)] = item
     return list(items.values())
@@ -197,7 +204,7 @@ def apply_ignores(
                     },
                 )
         except Exception as e:
-            errors.append(f"{it.team}/{it.project}: {it.component} {it.vuln_id}: {e}")
+            errors.append(f"{it.label}: {it.component} {it.vuln_id}: {e}")
     return written, skipped, kept, errors
 
 
@@ -215,6 +222,11 @@ class RevertItem:
     previous_state: str = "NOT_SET"  # what to put back
     previous_suppressed: bool = False
     from_ledger: bool = False
+    project_version: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.team}/{project_label(self.project, self.project_version)}"
 
 
 def _append(ledger: Path, entry: dict[str, Any]) -> None:
@@ -257,6 +269,7 @@ def outstanding(ledger: Path) -> list[RevertItem]:
                 previous_state=str(e.get("previous_state") or "NOT_SET"),
                 previous_suppressed=bool(e.get("previous_suppressed")),
                 from_ledger=True,
+                project_version=str(e.get("project_version") or ""),
             )
     return list(live.values())
 
@@ -283,6 +296,7 @@ def plan_reverts(
                 it.vuln_id,
                 it.vuln_uuid,
                 expected_state=state,
+                project_version=it.project_version,
             )
         )
     return out
@@ -328,5 +342,5 @@ def apply_reverts(
                     },
                 )
         except Exception as e:
-            errors.append(f"{it.team}/{it.project}: {it.component} {it.vuln_id}: {e}")
+            errors.append(f"{it.label}: {it.component} {it.vuln_id}: {e}")
     return reverted, skipped, errors

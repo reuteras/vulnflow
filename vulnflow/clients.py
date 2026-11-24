@@ -129,6 +129,12 @@ class DTProject:
     last_bom_import: float | None = None  # epoch seconds
 
 
+def project_label(name: str, version: str = "") -> str:
+    """How a project is shown: `container:nginx@1.31` — two hosts can run the same image name
+    at different tags, which are separate projects that would otherwise look like one."""
+    return f"{name}@{version}" if version else name
+
+
 def _epoch(value: Any) -> float | None:
     """DT dates come as epoch milliseconds (Jackson default); accept ISO-8601 too."""
     if isinstance(value, int | float):
