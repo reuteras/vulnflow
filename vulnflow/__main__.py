@@ -471,8 +471,9 @@ def main(argv: list[str] | None = None) -> int:
 
     dp = sub.add_parser(
         "disputed",
-        help="open findings NVD marks disputed, rejected or unsupported-when-assigned "
-        "(downloads NVD's yearly feeds for the years of your CVE ids, cached)",
+        help="open findings NVD marks disputed, rejected or unsupported-when-assigned, or that "
+        "match only because NVD lists every version (downloads NVD's yearly feeds for the "
+        "years of your CVE ids, cached)",
     )
     dp.add_argument("--team", default=None, help="only this team (default: all)")
     dp.add_argument("--json", action="store_true")
@@ -480,6 +481,14 @@ def main(argv: list[str] | None = None) -> int:
         "--no-nvd",
         action="store_true",
         help="do not download NVD feeds; only the old ** DISPUTED ** description prefix is checked",
+    )
+    dp.add_argument(
+        "--any-version-years",
+        type=float,
+        default=2,
+        metavar="YEARS",
+        help="flag ANY-VERSION: NVD lists the product for every version (no range) and the CVE "
+        "is older than this (default 2; 0 = off)",
     )
 
     ig = sub.add_parser(
@@ -839,7 +848,7 @@ def main(argv: list[str] | None = None) -> int:
         nvd = None
         if not a.no_nvd:
             nvd = NvdFeeds(data_dir, notify=lambda msg: print(f"  {msg}", file=sys.stderr))
-        res = disputed_findings(inv, dt, a.team, nvd=nvd)
+        res = disputed_findings(inv, dt, a.team, nvd=nvd, any_version_years=a.any_version_years)
         if a.json:
             print(json.dumps([asdict(x) for x in res.rows], indent=2))
         else:
@@ -849,8 +858,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"{x.component} {x.version} {x.reason}"
                 )
         print(
-            f"  {len(res.rows)} of {res.checked} open finding(s) are marked disputed, rejected or "
-            "unsupported (a marker is a reason to review, not a verdict)"
+            f"  {len(res.rows)} of {res.checked} open finding(s) are marked disputed, rejected, "
+            "unsupported or any-version (a marker is a reason to review, not a verdict)"
             + (
                 "; NVD feeds skipped (--no-nvd): only the old description prefix was checked, "
                 "which current NVD records no longer carry"

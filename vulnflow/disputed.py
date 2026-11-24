@@ -17,6 +17,12 @@ The old description prefix is still recognised, for records that carry it:
     ** DISPUTED ** An issue was discovered in ...
     ** REJECT ** DO NOT USE THIS CANDIDATE NUMBER. ...
 
+ANY-VERSION: NVD's configuration lists the finding's product (vendor:product of the
+component's CPE) as vulnerable with version `*` and no version range, so every version ever
+made matches; for a CVE older than `any_version_years` (2) that is almost always an NVD data
+error (seen: cpe:2.3:a:apple:safari:* on 72 Safari CVEs from 2005-2012, matching Safari 27.2).
+Recent ones are not flagged: "every version, no fix yet" can be true.
+
 A marker is a signal for review, not a verdict. Who disputes it varies (sometimes the
 maintainer says "working as intended", sometimes a vendor disputes a researcher). The rows
 use the same shape as `vulnflow debian --json`, so after review `vulnflow ignore` can apply
@@ -36,6 +42,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +60,8 @@ FEED_URL = "https://nvd.nist.gov/feeds/json/cve/2.0"
 # NVD cveTags worth a review; `exclusively-hosted-service` cannot be in an SBOM
 NVD_TAGS = {"disputed": "DISPUTED", "unsupported-when-assigned": "UNSUPPORTED"}
 _CVE = re.compile(r"CVE-(\d{4})-\d+$")
-_ORDER = {"REJECT": 0, "DISPUTED": 1, "UNSUPPORTED": 2}
+_ORDER = {"REJECT": 0, "DISPUTED": 1, "UNSUPPORTED": 2, "ANY-VERSION": 3}
+INDEX_FORMAT = 2  # bump when the cached per-year index gains fields; old ones are rebuilt
 
 
 @dataclass
@@ -97,14 +105,36 @@ def record_flag(cve: dict[str, Any]) -> tuple[str, str] | None:
     return disputed_marker(desc)
 
 
-def scan_feed(gz_body: bytes, chunk: int = 1 << 20) -> tuple[list[str], dict[str, list[str]], str]:
+def unbounded_products(cve: dict[str, Any]) -> list[str]:
+    """vendor:product of every vulnerable CPE match with version `*` and no version range."""
+    out = set()
+    for conf in cve.get("configurations") or []:
+        for node in conf.get("nodes") or []:
+            for m in node.get("cpeMatch") or []:
+                parts = str(m.get("criteria", "")).split(":")
+                if (
+                    m.get("vulnerable")
+                    and len(parts) > 5
+                    and parts[5] == "*"
+                    and not any(k.startswith("version") for k in m)
+                ):
+                    out.add(f"{parts[3]}:{parts[4]}")
+    return sorted(out)
+
+
+def scan_feed(
+    gz_body: bytes, chunk: int = 1 << 20
+) -> tuple[list[str], dict[str, list[str]], str, dict[str, list[Any]]]:
     """(every CVE id in the feed, {id: [marker, explanation]} for the flagged ones, sha256 of
-    the uncompressed JSON). Reads one record at a time: json.load of a year needs gigabytes."""
+    the uncompressed JSON, {id: [published, [vendor:product, ...]]} for the CVEs that list a
+    product for every version). Reads one record at a time: json.load of a year needs
+    gigabytes."""
     dec = json.JSONDecoder()
     text = codecs.getincrementaldecoder("utf-8")()
     digest = hashlib.sha256()
     ids: list[str] = []
     flags: dict[str, list[str]] = {}
+    anyver: dict[str, list[Any]] = {}
     with gzip.GzipFile(fileobj=io.BytesIO(gz_body)) as gz:
         buf, pos, eof = "", 0, False
 
@@ -152,10 +182,13 @@ def scan_feed(gz_body: bytes, chunk: int = 1 << 20) -> tuple[list[str], dict[str
                 flag = record_flag(cve)
                 if flag:
                     flags[cid] = [flag[0], flag[1][:600]]
+                products = unbounded_products(cve)
+                if products:
+                    anyver[cid] = [str(cve.get("published") or "")[:10], products]
         while not eof:  # the rest only for the checksum
             more()
             buf, pos = "", 0
-    return ids, flags, digest.hexdigest().upper()
+    return ids, flags, digest.hexdigest().upper(), anyver
 
 
 def _meta_sha256(body: bytes) -> str:
@@ -181,7 +214,7 @@ class NvdFeeds:
         self.ttl = ttl_seconds
         self.http = Http(url, transport=transport, timeout=600)
         self.notify = notify or (lambda msg: None)
-        self._years: dict[int, tuple[set[str], dict[str, list[str]]] | None] = {}
+        self._years: dict[int, _YearIndex | None] = {}
         self.errors: list[str] = []
 
     @staticmethod
@@ -189,7 +222,7 @@ class NvdFeeds:
         m = _CVE.match(cve_id.upper())
         return max(int(m.group(1)), 2002) if m else None
 
-    def _year(self, year: int) -> tuple[set[str], dict[str, list[str]]] | None:
+    def _year(self, year: int) -> _YearIndex | None:
         if year in self._years:
             return self._years[year]
         index = self.dir / f"nvdcve-2.0-{year}.flags.json"
@@ -199,29 +232,36 @@ class NvdFeeds:
                 cached = json.loads(index.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 cached = None
-        loaded: tuple[set[str], dict[str, list[str]]] | None = None
+        current = bool(cached) and (cached or {}).get("format") == INDEX_FORMAT
+        loaded: _YearIndex | None = None
         try:
-            if cached and time.time() - index.stat().st_mtime < self.ttl:
-                loaded = set(cached["ids"]), cached["flags"]
+            if current and cached and time.time() - index.stat().st_mtime < self.ttl:
+                loaded = _YearIndex.of(cached)
             else:
                 want = _meta_sha256(self.http.get(f"nvdcve-2.0-{year}.meta").body)
-                if cached and cached.get("sha256") == want:
+                if current and cached and cached.get("sha256") == want:
                     os.utime(index)  # unchanged upstream: fresh for another day
                 else:
                     self.notify(f"downloading NVD feed {year}")
-                    ids, flags, got = scan_feed(self.http.get(f"nvdcve-2.0-{year}.json.gz").body)
+                    ids, flags, got, anyver = scan_feed(self.http.get(f"nvdcve-2.0-{year}.json.gz").body)
                     if got != want:
                         raise ValueError(f"sha256 {got} does not match the .meta file ({want})")
-                    cached = {"sha256": got, "ids": ids, "flags": flags}
+                    cached = {
+                        "format": INDEX_FORMAT,
+                        "sha256": got,
+                        "ids": ids,
+                        "flags": flags,
+                        "anyver": anyver,
+                    }
                     self.dir.mkdir(parents=True, exist_ok=True)
                     tmp = index.with_suffix(".tmp")
                     tmp.write_text(json.dumps(cached), encoding="utf-8")
                     tmp.replace(index)
-                loaded = set(cached["ids"]), cached["flags"]
+                loaded = _YearIndex.of(cached)
         except Exception as e:
             self.errors.append(f"NVD feed {year}: {e}")
             if cached:  # stale beats nothing; the error says it is stale
-                loaded = set(cached["ids"]), cached["flags"]
+                loaded = _YearIndex.of(cached)
         self._years[year] = loaded
         return loaded
 
@@ -229,14 +269,32 @@ class NvdFeeds:
         """False when NVD could not answer: not a CVE id, feed unavailable, or too new."""
         year = self.feed_year(cve_id)
         data = self._year(year) if year else None
-        return data is not None and cve_id.upper() in data[0]
+        return data is not None and cve_id.upper() in data.ids
 
     def flag(self, cve_id: str) -> tuple[str, str] | None:
         """(marker, explanation) when NVD flags the CVE."""
         year = self.feed_year(cve_id)
         data = self._year(year) if year else None
-        got = data[1].get(cve_id.upper()) if data else None
+        got = data.flags.get(cve_id.upper()) if data else None
         return (got[0], got[1]) if got else None
+
+    def any_version(self, cve_id: str) -> tuple[str, set[str]] | None:
+        """(published YYYY-MM-DD, {vendor:product}) when NVD lists products for every version."""
+        year = self.feed_year(cve_id)
+        data = self._year(year) if year else None
+        got = data.anyver.get(cve_id.upper()) if data else None
+        return (str(got[0]), set(got[1])) if got else None
+
+
+@dataclass
+class _YearIndex:
+    ids: set[str]
+    flags: dict[str, list[str]]
+    anyver: dict[str, list[Any]]
+
+    @classmethod
+    def of(cls, cached: dict[str, Any]) -> _YearIndex:
+        return cls(set(cached["ids"]), cached["flags"], cached.get("anyver") or {})
 
 
 def _reason(vuln_id: str, marker: str, text: str, where: str) -> str:
@@ -254,11 +312,23 @@ class DisputedResult:
     errors: list[str]
 
 
+def _cpe_product(cpe: str) -> str:
+    parts = cpe.split(":")
+    return f"{parts[3]}:{parts[4]}" if cpe.startswith("cpe:2.3:") and len(parts) > 5 else ""
+
+
 def disputed_findings(
-    inv: Inventory, dt: DependencyTrack, team: str | None = None, nvd: NvdFeeds | None = None
+    inv: Inventory,
+    dt: DependencyTrack,
+    team: str | None = None,
+    nvd: NvdFeeds | None = None,
+    *,
+    any_version_years: float = 2,
+    today: date | None = None,
 ) -> DisputedResult:
     """Open findings with a marker. Without `nvd` only the description prefix is checked,
-    which current NVD records no longer carry."""
+    which current NVD records no longer carry. any_version_years 0 turns ANY-VERSION off."""
+    cutoff = (today or date.today()) - timedelta(days=round(any_version_years * 365.25))
     rows: list[DisputedFinding] = []
     errors: list[str] = []
     checked = unchecked = 0
@@ -288,10 +358,20 @@ def disputed_findings(
                 desc = records[(src, vid)]
             hit = disputed_marker(desc)
             where = "in its CVE record"
+        c: dict[str, Any] = f.get("component") or {}
+        if hit is None and nvd is not None and any_version_years > 0 and vid.startswith("CVE-"):
+            product = _cpe_product(str(c.get("cpe") or ""))
+            av = nvd.any_version(vid) if product else None
+            if av and product in av[1] and av[0] and av[0] < cutoff.isoformat():
+                where = "in NVD"
+                hit = (
+                    "ANY-VERSION",
+                    f"NVD lists {product} as vulnerable in every version (no version range); "
+                    f"published {av[0]}, installed {c.get('version', '?')}",
+                )
         if hit is None:
             continue
         marker, text = hit
-        c: dict[str, Any] = f.get("component") or {}
         rows.append(
             DisputedFinding(
                 team=key,
