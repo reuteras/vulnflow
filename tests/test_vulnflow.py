@@ -4188,3 +4188,189 @@ def test_bootstrap_mattermost_creates_admin_team_channel_hook_and_reruns_cleanly
             admin_password=secrets.token_hex(12),
             transport=mm,
         )
+
+
+# ---- tui ------------------------------------------------------------------------------------
+
+
+class FakeScreen:
+    """Enough of a curses window for vulnflow.tui: records what is drawn, plays keys."""
+
+    def __init__(self, keys: list[int | str], size: tuple[int, int] = (20, 120)):
+        self.keys = [ord(k) if isinstance(k, str) else k for k in keys]
+        self.size = size
+        self.lines: dict[int, str] = {}
+
+    def addnstr(self, y, x, s, n, attr=0):
+        self.lines[y] = s[:n]
+
+    def getmaxyx(self):
+        return self.size
+
+    def erase(self):
+        self.lines = {}
+
+    def refresh(self):
+        pass
+
+    def getch(self):
+        assert self.keys, "the UI asked for more keys than the test gave"
+        return self.keys.pop(0)
+
+    def text(self) -> str:
+        return "\n".join(self.lines[k] for k in sorted(self.lines))
+
+
+def _typed(s: str) -> list[int | str]:
+    return [*s, 10]
+
+
+def test_tui_filters_and_decision_rules(inv):
+    from datetime import date
+
+    from vulnflow import tui
+
+    dt = DependencyTrack("http://dt", "k", transport=_report_portfolio())
+    rows = tui.load_findings(inv, dt, {"CVE-2026-0004"}, [])
+    # KEV first, then severity
+    assert [r.vuln_id for r in rows] == ["CVE-2026-0004", "CVE-2026-0001", "CVE-2026-0002"]
+    assert (
+        rows[0].kev and rows[0].component_uuid == "c-grafana" and rows[0].vuln_uuid == "v-CVE-2026-0004"
+    )
+    assert [r.vuln_id for r in tui.filter_rows(rows, team="sysadm")] == [
+        "CVE-2026-0001",
+        "CVE-2026-0002",
+    ]
+    assert [r.vuln_id for r in tui.filter_rows(rows, min_sev="HIGH")] == ["CVE-2026-0001"]
+    assert [r.vuln_id for r in tui.filter_rows(rows, text="CURL")] == ["CVE-2026-0002"]
+    assert tui.finding_line(rows[0], 200).startswith("  MEDI KEV CVE-2026-0004")
+
+    today = date(2026, 11, 25)
+    ok = tui.Decision(
+        "EXPLOITABLE", "no fix upstream", response="WILL_NOT_FIX", review_by=date(2027, 3, 1)
+    )
+    assert ok.problems(today) == []
+    assert tui.Decision("EXPLOITABLE", "x", response="WILL_NOT_FIX").problems(today) == [
+        "an accepted risk needs a review date"
+    ]
+    assert tui.Decision("FALSE_POSITIVE", " ").problems(today) == ["a reason is required"]
+    assert (
+        "must be in the future" in tui.Decision("NOT_AFFECTED", "x", review_by=today).problems(today)[0]
+    )
+    item = tui.ignore_item(rows[1], ok, today)
+    assert item.comment == "no fix upstream; review by 2027-03-01; reviewed 2026-11-25 via vulnflow tui"
+
+
+def test_tui_marks_a_finding_false_positive_with_confirmation(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow import tui
+    from vulnflow.net import Http
+
+    fake = _report_portfolio()
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+    ledger = tmp_path / "ignored.jsonl"
+    writer = tui.make_writer(
+        lambda: Http("http://dt", transport=fake), ledger, lambda: date(2026, 11, 25)
+    )
+    app = tui.App(
+        tui.Sources(
+            findings=lambda: (tui.load_findings(inv, dt, set(), []), []),
+            alerts=lambda: [],
+            hosts=lambda w: [],
+            updates=lambda: [],
+            details=lambda r: tui.finding_details(r, None),
+            write=writer,
+        ),
+        today=date(2026, 11, 25),
+    )
+    app.reload()
+    assert app.status == "3 open findings"
+
+    # filter to curl, cancel once at the confirmation, then mark it False Positive
+    scr = FakeScreen(["/", *_typed("curl"), "m", "2", *_typed("other curl"), 10, "n"])
+    for _ in range(2):
+        app.draw(scr)
+        assert app.handle(scr, scr.getch())
+    assert app.status == "cancelled, nothing written" and not ledger.exists()
+
+    scr = FakeScreen(["m", "2", *_typed("libcurl is not linked"), 10, "y"])
+    app.draw(scr)
+    assert app.handle(scr, scr.getch())
+    assert app.status == "1 written, 0 already FALSE_POSITIVE"
+    ((key, analysis),) = fake.analyses.items()
+    assert key == ("p1", "c-curl", "v-CVE-2026-0002")
+    assert analysis["analysisState"] == "FALSE_POSITIVE" and analysis["isSuppressed"] is True
+    assert analysis["analysisComments"][0]["comment"] == (
+        "libcurl is not linked; reviewed 2026-11-25 via vulnflow tui"
+    )
+    assert json.loads(ledger.read_text())["vuln_id"] == "CVE-2026-0002"  # unignore can undo it
+    assert [r.vuln_id for r in app.rows] == ["CVE-2026-0001", "CVE-2026-0004"]
+
+    # an accepted risk without a review date is refused before anything is asked to confirm
+    app.text = ""
+    scr = FakeScreen(["m", "3", *_typed("later"), 10])
+    app.draw(scr)
+    app.handle(scr, scr.getch())
+    assert app.status == "not written: an accepted risk needs a review date"
+    assert len(fake.analyses) == 1
+
+    # read-only without DT_ADMIN_PASSWORD
+    app.src.write = None
+    scr = FakeScreen(["m"])
+    app.handle(scr, scr.getch())
+    assert app.status.startswith("read-only")
+
+
+def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
+    from vulnflow import tui
+
+    first = {
+        "received_at": "2026-11-24T10:00:00Z",
+        "cve": "CVE-1",
+        "tier_name": "P2 Attend",
+        "team": "dev",
+    }
+    second: dict[str, Any] = {
+        "received_at": "2026-11-25T10:00:00Z",
+        "cve": "CVE-2",
+        "tier_name": "P1 Act",
+    }
+    second |= {"team": "sysadm", "kev": True, "epss": 0.9}
+    log_lines = [json.dumps(first), json.dumps(second), "garbage"]
+    lines = tui.alert_lines(log_lines, 100)
+    assert lines[0].startswith("2026-11-25T10:00 P1 Act     KEV CVE-2") and "EPSS 0.900" in lines[0]
+    assert lines[1].startswith("2026-11-24T10:00 P2 Attend")
+    assert tui.alert_lines(tui.read_alerts(tmp_path / "gone.jsonl"), 100)[0].startswith("(cannot read")
+
+    mf = tmp_path / "machines.toml"
+    mf.write_text('[hosts.web01]\nteam = "sysadm"\nscans = ["system"]\n')
+    machines = load_machines(mf, inv.teams)
+    assert tui.host_lines(machines, {}, 100, 0)[0].endswith("never pushed")
+
+    asked: list[str] = []
+
+    def updates() -> list[str]:
+        asked.append("updates")
+        return ["Nothing to do."]
+
+    app = tui.App(
+        tui.Sources(
+            findings=lambda: ([], ["DT down"]),
+            alerts=lambda: log_lines,
+            hosts=lambda w: ["host line"],
+            updates=updates,
+            details=lambda r: [],
+            write=None,
+        )
+    )
+    app.reload()
+    assert app.status == "0 open findings; 1 error(s): DT down"
+    scr = FakeScreen(["2", "4", "4", "q"])
+    for want in ("CVE-2", "Nothing to do."):
+        assert app.handle(scr, scr.getch())
+        app.draw(scr)
+        assert want in scr.text()
+    assert app.handle(scr, scr.getch())
+    assert asked == ["updates"]  # GitHub is asked once, when the tab is first opened
+    assert app.handle(scr, scr.getch()) is False

@@ -27,6 +27,7 @@
 #   check-updates     newer upstream releases (7-day cooldown) and pinned versions not deployed
 #   upgrade C [V] [--now]  back up C's database, then deploy C (dojo|opencve|dtrack) at the
 #                     version pinned in the repo, or at V (--now: V is not the reviewed pin)
+#   tui               terminal UI: findings (filter, details, mark), alerts, hosts, updates
 #   report K [--always]  K = daily|weekly digest, mailed to VULNFLOW_REPORT_TO with sendmail
 #   schedule A        A = install|remove|status: systemd timers for the daily/weekly reports
 set -euo pipefail
@@ -822,6 +823,29 @@ cmd_check_updates() {
   vulnflow check-updates
 }
 
+# The receiver's alert log lives in its volume: copy it to a temp file and print its name.
+# A stopped receiver leaves no file (report and tui show that as an error); no alerts yet
+# is an empty file.
+fetch_alerts() {
+  local f
+  f="$(mktemp)"
+  if ! glue_compose exec -T receiver sh -c 'cat /app/data/alerts.jsonl 2>/dev/null || true' \
+    >"$f" 2>/dev/null; then
+    rm -f "$f"
+  fi
+  echo "$f"
+}
+
+# Terminal UI (vulnflow/tui.py) with the receiver's alert log.
+cmd_tui() {
+  local alerts rc=0
+  load_env
+  alerts="$(fetch_alerts)"
+  vulnflow tui --alerts "$alerts" || rc=$?
+  rm -f "$alerts"
+  return "$rc"
+}
+
 # sendmail is in /usr/sbin on Debian, which a user's PATH (ssh, cron) leaves out.
 find_sendmail() { PATH="$PATH:/usr/sbin:/sbin" command -v sendmail || true; }
 
@@ -840,13 +864,7 @@ cmd_report() {
   fi
   # A whole message (Markdown text part + HTML part) when mailing, Markdown when printing.
   [[ -n "${VULNFLOW_REPORT_TO:-}" ]] && mail=(--mime --to "$VULNFLOW_REPORT_TO")
-  # The receiver's alert log lives in its volume. A stopped receiver leaves no file, which
-  # the report shows as an error; no alerts yet is an empty file.
-  alerts="$(mktemp)"
-  if ! glue_compose exec -T receiver sh -c 'cat /app/data/alerts.jsonl 2>/dev/null || true' \
-    >"$alerts" 2>/dev/null; then
-    rm -f "$alerts"
-  fi
+  alerts="$(fetch_alerts)"
   out="$(vulnflow report "$kind" --alerts "$alerts" ${quiet:+--quiet} ${mail[@]+"${mail[@]}"})" || rc=$?
   rm -f "$alerts"
   [[ -n "$out" ]] || return "$rc"
@@ -1003,6 +1021,7 @@ case "${1:-}" in
   status) cmd_status ;;
   check-updates) cmd_check_updates ;;
   report) cmd_report "${2:-}" "${3:-}" ;;
+  tui) cmd_tui ;;
   schedule) cmd_schedule "${2:-}" ;;
   upgrade)
     shift
@@ -1012,7 +1031,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,31p' "$0"
+    sed -n '2,32p' "$0"
     exit 1
     ;;
 esac

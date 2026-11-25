@@ -51,6 +51,24 @@ new critical/high/KEV findings, hosts that stopped uploading, and versions to de
 Dependency-Track analyses new SBOMs within minutes; DefectDojo follows at the next
 `dt2dojo` round (`python3 -m vulnflow dt2dojo` runs one now).
 
+## In the terminal: `./poc.sh tui`
+
+The same data without a browser, on the server (over ssh):
+
+| Key | Does |
+| --- | --- |
+| `1`-`4` | tabs: Findings, Alerts (the receiver's log, newest first), Hosts (last SBOM upload), Updates (`check-updates`) |
+| `j`/`k`, arrows, PgUp/PgDn | move |
+| `/`, `t`, `s` | filter findings by text (CVE, component, project), team, minimum severity |
+| Enter | the finding: project, component, purl, description, KEV, where on disk |
+| space | select several findings |
+| `m` | mark the selected (or current) findings: Not Affected with a justification, False Positive, or an accepted risk with a review date; asks for a reason and a `y` first |
+| `r`, `q` | reload, quit |
+
+Marking writes the same Dependency-Track analysis as `ignore` (and to the same ledger, so
+`unignore` takes it back), so it needs `DT_ADMIN_PASSWORD` in `.env`; without it the TUI is
+read-only. A finding somebody else already triaged is left alone and stays in the list.
+
 ## Sysadmin: common tasks
 
 ### A P1/P2 alert arrives
