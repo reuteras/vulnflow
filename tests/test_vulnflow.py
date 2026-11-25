@@ -3402,8 +3402,13 @@ def test_agent_reports_a_container_whose_image_was_removed(monkeypatch):
     ):
         with pytest.raises(a.ScanError, match="recreate the container"):
             a.scan_image("docker", ref)
-    seen = []
-    monkeypatch.setattr(a, "syft", lambda target, *x: seen.append(target) or [])
+    seen: list[str] = []
+
+    def fake_syft(target, *extra):
+        seen.append(target)
+        return []
+
+    monkeypatch.setattr(a, "syft", fake_syft)
     a.scan_image("docker", "opencve-airflow-worker:latest")  # a name, even an odd one: scanned
     a.scan_image("docker", "deadbeefcafe/app:1")
     assert seen == ["docker:opencve-airflow-worker:latest", "docker:deadbeefcafe/app:1"]
