@@ -223,4 +223,27 @@ sha256sum --ignore-missing -c "syft_${V}_checksums.txt"
 sudo apt install "./syft_${V}_linux_amd64.deb"
 ```
 
+### 5. Check the alert path
+
+Once setup has finished, check that the receiver works: send it a fake OpenCVE webhook (Log4Shell, which is in CISA KEV, so it should
+come out as **P1**). The token goes in on stdin, not on the command line:
+
+```bash
+set -a; . ./.env; set +a
+cat >/tmp/vf-test.json <<'EOF'
+{"organization": "test", "project": "sysadm",
+ "changes": [{"cve": {"cve_id": "CVE-2021-44228", "cvss31": 10.0,
+                      "description": "smoke test"},
+              "events": [{"type": "first_time"}]}]}
+EOF
+curl -s -H @- --json @/tmp/vf-test.json "http://127.0.0.1:${VULNFLOW_PORT:-8380}/opencve" \
+  <<<"X-Vulnflow-Token: $VULNFLOW_WEBHOOK_TOKEN"
+docker exec vulnflow-glue-receiver-1 tail -n 1 /app/data/alerts.jsonl
+```
+
+The reply is `{"accepted": 1}`, and the last line of `alerts.jsonl` shows the P1 alert. A
+log warning that the OpenCVE write-back failed for this CVE is expected: Log4j isn't in
+`sysadm`'s subscriptions. To get alerts in chat, set `VULNFLOW_CHAT_WEBHOOK` in `.env` and
+run `./poc.sh glue-up`. How alerts flow in normal use: [Daily usage](operations.md#how-findings-and-alerts-reach-you).
+
 Next: get SBOMs into Dependency-Track, see [SBOMs](sboms.md).

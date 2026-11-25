@@ -14,9 +14,9 @@ A proof of concept for three-layer vulnerability tracking, all self-hosted:
 | Page | What is in it |
 | --- | --- |
 | This README | What it is, install, basic run, daily usage in short |
-| [Installation](docs/install.md) | The setup steps one by one, what the bootstraps do, first steps: reaching the UIs, OSV, describing what you run, syft |
+| [Installation](docs/install.md) | The setup steps one by one, what the bootstraps do, first steps: reaching the UIs, OSV, describing what you run, syft, checking the alert path |
 | [SBOMs](docs/sboms.md) | Feeding SBOMs by hand and from CI, and the push agents on your own servers and laptops |
-| [Daily usage](docs/operations.md) | Results, the alert smoke test, clearing known-OK findings, the recommended routine, email reports, updates and upgrades |
+| [Daily usage](docs/operations.md) | How alerts and findings reach you, sysadmin and developer tasks, false positives, the routine, email reports, updates |
 | [Teams, tiers and where things live](docs/concepts.md) | How teams map onto the three tools, priority tiers P1-P4, where status and comments are kept |
 | [Security](docs/security.md) | OPSEC notes, licences, every external server contacted |
 | [Development](docs/development.md) | Tests and checks, what is verified against upstream and what is assumed |
