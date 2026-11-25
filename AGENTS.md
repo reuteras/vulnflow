@@ -112,6 +112,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   (`opencve_pin_celery` in `poc.sh`; Celery 5.7 breaks Airflow 2.10.4, opencve/opencve#810).
   It restores the file before each checkout and skips itself once upstream's
   `requirements.txt` pins celery. Remove it when an `OPENCVE_REF` with the fix is adopted.
+- `opencve-prepare` also patches upstream's `web/Dockerfile` to upgrade Django to the latest
+  5.2 LTS patch release after the requirements install (`opencve_pin_django`; v3.1.0 pins
+  5.2.11). It skips itself once upstream pins that version or newer. Bump
+  `OPENCVE_DJANGO_PIN` for new 5.2.x releases; remove it when `OPENCVE_REF` catches up.
 - `opencve-prepare` also replaces upstream's shared Airflow Fernet key and webserver
   `secret_key` and binds OpenCVE's ports to 127.0.0.1 (`opencve_harden_airflow`). A key
   change on an existing install needs `opencve_reset_airflow_connections` (SQL delete of the
