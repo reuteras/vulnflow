@@ -17,6 +17,7 @@
 #   dojo-up           clone + start DefectDojo and bootstrap it (admin pw, API key)
 #   dd-bootstrap      only the DefectDojo bootstrap step (rerunnable)
 #   glue-up           build + start vulnflow receiver and dt2dojo loop
+#   chat-up           optional local chat (Mattermost) for the P1/P2 alerts (rerunnable)
 #   tailscale         apply VULNFLOW_TS_HOST: tailnet URLs in .env + tailscale serve (or undo)
 #   all               dtrack-up, dojo-up, glue-up (no OpenCVE; use setup for everything)
 #   up                start everything again after down or a reboot (no rebuild/bootstrap)
@@ -33,6 +34,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UP="$ROOT/upstream"
 OPENCVE_NET=opencve_default # upstream compose project "opencve", default network
+CHAT_NET=vulnflow-chat_default # stacks/mattermost (optional local chat)
 cd "$ROOT"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -54,7 +56,8 @@ vulnflow() { python3 -m vulnflow --env-file .env "$@"; }
 
 # Secrets poc.sh generates when empty: NAME:random-bytes
 SECRETS=(DT_DB_PASSWORD:24 DT_ADMIN_PASSWORD:24 DD_ADMIN_PASSWORD:24 DD_SECRET_KEY:32
-  DD_CREDENTIAL_AES_256_KEY:16 OPENCVE_ADMIN_PASSWORD:24 VULNFLOW_WEBHOOK_TOKEN:32)
+  DD_CREDENTIAL_AES_256_KEY:16 OPENCVE_ADMIN_PASSWORD:24 VULNFLOW_WEBHOOK_TOKEN:32
+  MM_ADMIN_PASSWORD:24 MM_DB_PASSWORD:24)
 
 cmd_init() {
   if [[ -f .env ]]; then
@@ -487,6 +490,9 @@ glue_compose() {
   if docker network inspect "$OPENCVE_NET" >/dev/null 2>&1; then
     files+=(-f deploy/docker-compose.glue-opencve.yml)
   fi
+  if docker network inspect "$CHAT_NET" >/dev/null 2>&1; then
+    files+=(-f deploy/docker-compose.glue-chat.yml)
+  fi
   docker compose --env-file .env "${files[@]}" "$@"
 }
 
@@ -498,6 +504,32 @@ cmd_glue_up() {
   if docker network inspect "$OPENCVE_NET" >/dev/null 2>&1; then
     log "  and http://vulnflow-receiver:${VULNFLOW_PORT:-8380}/opencve on $OPENCVE_NET"
   fi
+}
+
+# ---- Optional local chat (stacks/mattermost) ------------------------------------
+# Mattermost Team Edition, so the P1/P2 alerts can be seen without an outside chat
+# service. chat-up starts it, has `vulnflow mm-bootstrap` create the admin, team
+# `vulnflow`, channel `alerts` and an incoming webhook (VULNFLOW_CHAT_WEBHOOK in .env),
+# and recreates the receiver on the chat network. Not part of setup; rerunnable.
+chat_compose() { docker compose --env-file .env -f stacks/mattermost/docker-compose.yml "$@"; }
+chat_installed() { docker volume inspect vulnflow-chat_mattermost-data >/dev/null 2>&1; }
+chat_url() {
+  if [[ -n "$TS_HOST" ]]; then echo "https://$TS_HOST:${MM_PORT:-8065}"; else echo "http://localhost:${MM_PORT:-8065}"; fi
+}
+
+cmd_chat_up() {
+  cmd_init # MM_* secrets on an install from before the chat
+  load_env
+  ts_prepare || warn "cannot resolve VULNFLOW_TS_HOST=$VULNFLOW_TS_HOST; chat stays on localhost"
+  load_env
+  log "Mattermost (local chat)"
+  chat_compose up -d
+  vulnflow mm-bootstrap
+  load_env # VULNFLOW_CHAT_WEBHOOK
+  log "Receiver on the chat network"
+  glue_compose up -d --force-recreate receiver
+  if [[ -n "$TS_HOST" ]]; then ts_serve on; fi
+  log "Chat: $(chat_url)  ${MM_ADMIN_USER:-admin} / MM_ADMIN_PASSWORD, team vulnflow, channel alerts"
 }
 
 # ---- Tailscale -------------------------------------------------------------------
@@ -531,6 +563,7 @@ ts_resolve() {
 ts_ports() { # tailnet-port:local-port
   printf '%s\n' "443:$OPENCVE_LOCAL_PORT" "${DT_UI_PORT:-8181}:${DT_UI_PORT:-8181}" \
     "${DT_API_PORT:-8180}:${DT_API_PORT:-8180}" "${DD_PORT:-8280}:${DD_PORT:-8280}"
+  if chat_installed; then echo "${MM_PORT:-8065}:${MM_PORT:-8065}"; fi
 }
 
 ts_serve() { # on|off
@@ -556,10 +589,12 @@ ts_env_values() {
     printf '%s\n' "DT_PUBLIC_API_URL=https://$1:${DT_API_PORT:-8180}" \
       "DD_SITE_URL=https://$1:${DD_PORT:-8280}" \
       "DD_CSRF_TRUSTED_ORIGINS=https://$1:${DD_PORT:-8280},$dd" \
-      "OPENCVE_URL=https://$1" "OPENCVE_API_URL=${OPENCVE_API_URL:-http://localhost}"
+      "OPENCVE_URL=https://$1" "OPENCVE_API_URL=${OPENCVE_API_URL:-http://localhost}" \
+      "MM_SITE_URL=https://$1:${MM_PORT:-8065}"
   else
     printf '%s\n' "DT_PUBLIC_API_URL=http://localhost:${DT_API_PORT:-8180}" "DD_SITE_URL=$dd" \
-      "DD_CSRF_TRUSTED_ORIGINS=$dd" "OPENCVE_URL=http://localhost"
+      "DD_CSRF_TRUSTED_ORIGINS=$dd" "OPENCVE_URL=http://localhost" \
+      "MM_SITE_URL=http://localhost:${MM_PORT:-8065}"
   fi
 }
 
@@ -613,6 +648,9 @@ print_logins() {
   log "  Dependency-Track $dt  admin / DT_ADMIN_PASSWORD"
   log "  DefectDojo       $dd  ${DD_ADMIN_USER:-admin} / DD_ADMIN_PASSWORD"
   log "  OpenCVE          $oc  ${OPENCVE_ADMIN_USER:-admin} / OPENCVE_ADMIN_PASSWORD"
+  if chat_installed; then
+    log "  Mattermost       $(chat_url)  ${MM_ADMIN_USER:-admin} / MM_ADMIN_PASSWORD"
+  fi
 }
 
 cmd_tailscale() {
@@ -639,12 +677,13 @@ cmd_tailscale() {
 cmd_status() {
   load_env
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
-    | grep -Ei 'NAMES|opencve|airflow|dtrack|defectdojo|django|nginx|vulnflow|postgres|redis' || true
-  local u
-  for u in "http://localhost:${DT_API_PORT:-8180}/health" \
-    "http://localhost:${DD_PORT:-8280}/login" \
-    "http://localhost:${VULNFLOW_PORT:-8380}/healthz" \
-    "$(opencve_local_url)/"; do
+    | grep -Ei 'NAMES|opencve|airflow|dtrack|defectdojo|django|nginx|vulnflow|postgres|redis|mattermost' || true
+  local u urls=("http://localhost:${DT_API_PORT:-8180}/health"
+    "http://localhost:${DD_PORT:-8280}/login"
+    "http://localhost:${VULNFLOW_PORT:-8380}/healthz"
+    "$(opencve_local_url)/")
+  if chat_installed; then urls+=("http://localhost:${MM_PORT:-8065}/api/v4/system/ping"); fi
+  for u in "${urls[@]}"; do
     printf '  %-45s %s\n' "$u" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u" || echo down)"
   done
   check_exposure
@@ -663,6 +702,7 @@ cmd_down() {
   # Glue first: the receiver is attached to OpenCVE's network, which can't be removed
   # while a container still uses it.
   glue_compose down || true
+  if chat_installed; then chat_compose down || true; fi
   if [[ -f "$UP/opencve/docker/.env" ]]; then opencve_compose down || true; fi
   docker compose --env-file .env -f stacks/dependency-track/docker-compose.yml down || true
   if [[ -d "$UP/defectdojo" ]]; then dojo_compose down || true; fi
@@ -687,6 +727,10 @@ cmd_up() {
   opencve_compose up -d
   # settings.py is a bind mount: a running webserver only sees a change after a restart
   if ((OPENCVE_SETTINGS_CHANGED)); then opencve_compose restart webserver; fi
+  if chat_installed; then
+    log "Mattermost"
+    chat_compose up -d
+  fi
   log "vulnflow glue"
   cmd_glue_up
   log "Waiting for the services to answer"
@@ -702,9 +746,10 @@ cmd_up() {
   print_logins
 }
 
-# Compose projects of the four stacks (DefectDojo's compose has no name:, so it's the
-# directory name of the clone). Glue first: it is attached to OpenCVE's network.
-COMPOSE_PROJECTS=(vulnflow-glue opencve vulnflow-dtrack defectdojo)
+# Compose projects of the stacks (DefectDojo's compose has no name:, so it's the
+# directory name of the clone). Glue first: it is attached to OpenCVE's and the chat's
+# networks.
+COMPOSE_PROJECTS=(vulnflow-glue vulnflow-chat opencve vulnflow-dtrack defectdojo)
 
 # Remove everything setup created, for a clean reinstall. Works from Docker labels, so it
 # also cleans up when .env or the clones are already gone. Keeps the Docker images.
@@ -948,6 +993,7 @@ case "${1:-}" in
   dojo-up) cmd_dojo_up ;;
   dd-bootstrap) load_env && vulnflow dd-bootstrap ;;
   glue-up) cmd_glue_up ;;
+  chat-up) cmd_chat_up ;;
   tailscale) cmd_tailscale ;;
   all)
     cmd_dtrack_up
@@ -966,7 +1012,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,30p' "$0"
+    sed -n '2,31p' "$0"
     exit 1
     ;;
 esac

@@ -1,0 +1,69 @@
+# Optional local chat for the PoC: Mattermost Team Edition, so P1/P2 alerts from the
+# receiver have somewhere to go without an outside chat service. `./poc.sh chat-up` starts
+# it, creates the admin, team `vulnflow`, channel `alerts` and an incoming webhook, and
+# points VULNFLOW_CHAT_WEBHOOK at it (vulnflow/bootstrap.py, bootstrap_mattermost).
+#   - Mattermost 12.1 needs PostgreSQL 15+
+#   - bound to 127.0.0.1; on the tailnet through `tailscale serve` like the other UIs
+#   - phone-home off: diagnostics, security-fix alerts, product notices, the plugin
+#     marketplace, push notifications through Mattermost's proxy, link previews (setting
+#     names checked against the v12.1.0 tag, server/public/model/config.go; see
+#     docs/security.md)
+#   - image tags (with digest) written out so Dependabot can update them
+name: vulnflow-chat
+
+services:
+  mattermost:
+    image: mattermost/mattermost-team-edition:12.1.0@sha256:35927b9c535a9eb74f0e45385d3fe5d8308b16e0464031f157a834da8af3ee73
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TZ: "UTC"
+      MM_SQLSETTINGS_DRIVERNAME: "postgres"
+      MM_SQLSETTINGS_DATASOURCE: "postgres://mattermost:${MM_DB_PASSWORD:?set MM_DB_PASSWORD in .env (./poc.sh init)}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10"
+      MM_SERVICESETTINGS_SITEURL: "${MM_SITE_URL:-http://localhost:8065}"
+      MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS: "true"
+      MM_SERVICESETTINGS_ENABLESECURITYFIXALERT: "false"
+      # the first account (the bootstrap's admin) may always sign up; nobody else can
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "false"
+      MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
+      MM_PLUGINSETTINGS_ENABLEMARKETPLACE: "false"
+      MM_PLUGINSETTINGS_ENABLEREMOTEMARKETPLACE: "false"
+      MM_EMAILSETTINGS_SENDPUSHNOTIFICATIONS: "false"
+      # product notices are fetched from Mattermost's servers every hour
+      MM_ANNOUNCEMENTSETTINGS_ADMINNOTICESENABLED: "false"
+      MM_ANNOUNCEMENTSETTINGS_USERNOTICESENABLED: "false"
+      # link previews would make the server fetch every URL in an alert (on by default)
+      MM_SERVICESETTINGS_ENABLELINKPREVIEWS: "false"
+    ports:
+      - "127.0.0.1:${MM_PORT:-8065}:8065"
+    volumes:
+      - "mattermost-config:/mattermost/config"
+      - "mattermost-data:/mattermost/data"
+      - "mattermost-logs:/mattermost/logs"
+      - "mattermost-plugins:/mattermost/plugins"
+      - "mattermost-client-plugins:/mattermost/client/plugins"
+
+  postgres:
+    image: postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "mattermost"
+      POSTGRES_USER: "mattermost"
+      POSTGRES_PASSWORD: "${MM_DB_PASSWORD:?set MM_DB_PASSWORD in .env (./poc.sh init)}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - "postgres-data:/var/lib/postgresql"
+
+volumes:
+  mattermost-config: {}
+  mattermost-data: {}
+  mattermost-logs: {}
+  mattermost-plugins: {}
+  mattermost-client-plugins: {}
+  postgres-data: {}

@@ -4069,3 +4069,122 @@ def test_report_command_saves_state_and_daily_is_quiet_without_news(tmp_path, mo
     assert vf.main([*args, "weekly", "--alerts", str(tmp_path / "gone.jsonl")]) == 1
     out = capsys.readouterr().out
     assert "## OpenCVE alerts (ERROR)" in out and "baseline of 4 open findings" in out
+
+
+# ---- local chat (Mattermost) ---------------------------------------------------------------
+
+
+class FakeMattermost:
+    """Stateful fake of the Mattermost v4 endpoints bootstrap_mattermost uses (v12.1.0:
+    first signup allowed while open signup is off, later ones 403; Token header on login)."""
+
+    def __init__(self) -> None:
+        self.users: dict[str, dict] = {}
+        self.teams: dict[str, dict] = {}
+        self.channels: dict[str, dict] = {}
+        self.hooks: dict[str, dict] = {}
+        self.calls: list[tuple[str, str]] = []
+        self.n = 0
+
+    def _id(self) -> str:
+        self.n += 1
+        return f"id{self.n:024d}"
+
+    def __call__(self, method, url, headers, body, timeout):
+        from urllib.parse import parse_qs, urlsplit
+
+        u = urlsplit(url)
+        assert u.netloc == "localhost:8065", url
+        path, q = u.path.removeprefix("/api/v4/"), {k: v[0] for k, v in parse_qs(u.query).items()}
+        self.calls.append((method, path))
+        data = json.loads(body) if body else {}
+
+        def ok(obj, status=200, hdrs=None):
+            return Response(status, json.dumps(obj).encode(), hdrs or {})
+
+        if path == "system/ping":
+            return ok({"status": "OK"})
+        if path == "users/login":
+            user = self.users.get(data["login_id"])
+            if not user or user["password"] != data["password"]:
+                return ok({"id": "api.user.login.invalid_credentials"}, 401)
+            return ok({"id": user["id"]}, hdrs={"Token": f"session-{user['id']}"})
+        if path == "users" and method == "POST":
+            if self.users:
+                return ok({"id": "api.user.create_user.no_open_server"}, 403)
+            assert data["email"] == data["email"].lower() and "@" in data["email"]
+            self.users[data["username"]] = {
+                **data,
+                "id": self._id(),
+                "roles": "system_admin system_user",
+            }
+            return ok({"id": self.users[data["username"]]["id"]}, 201)
+        session = headers.get("Authorization", "").removeprefix("Bearer ")
+        assert any(session == f"session-{x['id']}" for x in self.users.values()), path
+        if path.startswith("teams/name/"):
+            t = next((t for t in self.teams.values() if t["name"] == path.rsplit("/", 1)[1]), None)
+            return ok(t) if t else ok({}, 404)
+        if path == "teams" and method == "POST":
+            tid = self._id()
+            self.teams[tid] = {**data, "id": tid}
+            return ok(self.teams[tid], 201)
+        if "/channels/name/" in path:
+            tid, name = path.split("/")[1], path.rsplit("/", 1)[1]
+            c = next(
+                (c for c in self.channels.values() if (c["team_id"], c["name"]) == (tid, name)), None
+            )
+            return ok(c) if c else ok({}, 404)
+        if path == "channels" and method == "POST":
+            cid = self._id()
+            self.channels[cid] = {**data, "id": cid}
+            return ok(self.channels[cid], 201)
+        if path == "hooks/incoming" and method == "GET":
+            return ok(
+                [
+                    h
+                    for h in self.hooks.values()
+                    if self.channels[h["channel_id"]]["team_id"] == q["team_id"]
+                ]
+            )
+        if path == "hooks/incoming" and method == "POST":
+            hid = self._id()
+            self.hooks[hid] = {**data, "id": hid}
+            return ok(self.hooks[hid], 201)
+        raise AssertionError(f"unexpected {method} {url}")
+
+
+def test_bootstrap_mattermost_creates_admin_team_channel_hook_and_reruns_cleanly():
+    from vulnflow.bootstrap import BootstrapError, bootstrap_mattermost
+
+    mm = FakeMattermost()
+    pw = secrets.token_hex(12)
+    url = bootstrap_mattermost(
+        "http://localhost:8065", admin_user="admin", admin_password=pw, transport=mm
+    )
+    (hook_id,) = mm.hooks
+    assert url == f"http://mattermost:8065/hooks/{hook_id}"
+    assert mm.users["admin"]["email"] == "admin@vulnflow.invalid"
+    (team,) = mm.teams.values()
+    assert (team["name"], team["type"]) == ("vulnflow", "I")
+    (chan,) = mm.channels.values()
+    assert (chan["name"], chan["type"], chan["team_id"]) == ("alerts", "O", team["id"])
+    assert mm.hooks[hook_id]["display_name"] == "vulnflow"
+
+    # rerun: logs in, finds everything, creates nothing, same URL
+    mm.calls.clear()
+    assert (
+        bootstrap_mattermost(
+            "http://localhost:8065", admin_user="admin", admin_password=pw, transport=mm
+        )
+        == url
+    )
+    assert [c for c in mm.calls if c[0] == "POST"] == [("POST", "users/login")]
+
+    # someone else's install: the admin exists with another password, signup is closed
+    with pytest.raises(BootstrapError, match=r"put the real password in \.env"):
+        bootstrap_mattermost(
+            "http://localhost:8065",
+            admin_user="admin",
+            admin_password=secrets.token_hex(12),
+            transport=mm,
+        )

@@ -22,8 +22,9 @@ the server. The receiver then:
 1. looks the CVE up in CISA KEV, FIRST EPSS and CIRCL sightings, and ranks it P1 to P4
    ([Priority tiers](concepts.md#priority-tiers));
 2. appends every alert to `alerts.jsonl` in its data volume (for the SIEM and the reports);
-3. for P1 and P2: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`),
-   and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one.
+3. for P1 and P2: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`:
+   your own Mattermost, Slack or Teams webhook, or the PoC's local Mattermost from
+   `./poc.sh chat-up`, channel `alerts`), and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one.
 
 **Match: a CVE is found in something you run (Dependency-Track).** The push agents (daily)
 and CI (per release) upload SBOMs; Dependency-Track matches every component against NVD,

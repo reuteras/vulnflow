@@ -1,0 +1,13 @@
+# Overlay for docker-compose.glue.yml, added by poc.sh when the local chat's network exists
+# (./poc.sh chat-up, stacks/mattermost). The receiver posts P1/P2 alerts to
+# http://mattermost:8065/hooks/<id> (VULNFLOW_CHAT_WEBHOOK) on that network.
+services:
+  receiver:
+    networks:
+      default: {}
+      chat: {}
+
+networks:
+  chat:
+    name: vulnflow-chat_default
+    external: true

@@ -244,6 +244,25 @@ docker exec vulnflow-glue-receiver-1 tail -n 1 /app/data/alerts.jsonl
 The reply is `{"accepted": 1}`, and the last line of `alerts.jsonl` shows the P1 alert. A
 log warning that the OpenCVE write-back failed for this CVE is expected: Log4j isn't in
 `sysadm`'s subscriptions. To get alerts in chat, set `VULNFLOW_CHAT_WEBHOOK` in `.env` and
-run `./poc.sh glue-up`. How alerts flow in normal use: [Daily usage](operations.md#how-findings-and-alerts-reach-you).
+run `./poc.sh glue-up`, or use the local chat below. How alerts flow in normal use: [Daily usage](operations.md#how-findings-and-alerts-reach-you).
+
+### 6. Local chat (optional)
+
+If you have no chat server for the alerts, the PoC can run its own: Mattermost Team
+Edition, bound to 127.0.0.1 and served on the tailnet like the other UIs.
+
+```bash
+./poc.sh chat-up
+```
+
+It starts Mattermost and its Postgres (`stacks/mattermost`), creates the admin
+`MM_ADMIN_USER` (password `MM_ADMIN_PASSWORD` in `.env`), team `vulnflow`, channel `alerts`
+and an incoming webhook, writes the webhook to `VULNFLOW_CHAT_WEBHOOK`, and recreates the
+receiver on the chat's network. Log in at `http://localhost:8065` (or
+`https://<host>:8065` with `VULNFLOW_TS_HOST`), and rerun the check above: the P1 alert
+appears in `alerts`. Invite the others from the System Console (Users) or with an invite
+link; open signup is off. Mattermost's phone-home features are switched off
+([Security](security.md#external-servers)). It needs about 1 GB of RAM more; `up`, `down`,
+`status` and `destroy` include it once it is installed.
 
 Next: get SBOMs into Dependency-Track, see [SBOMs](sboms.md).

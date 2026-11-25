@@ -45,7 +45,8 @@
 OpenCVE's self-hosted edition is under the **Business Source License**, which is not
 OSI open source. Internal use by an authority is normally fine, but have the licence text
 reviewed before you rely on it long term. Dependency-Track is Apache-2.0, DefectDojo BSD-3,
-Vulnerability-Lookup AGPL-3.0, and vulnflow is yours.
+Vulnerability-Lookup AGPL-3.0, Mattermost Team Edition MIT (the compiled release; its
+source is AGPL-3.0), and vulnflow is yours.
 
 ## External servers
 
@@ -60,7 +61,7 @@ connects in.
 | `github.com` | Clones of OpenCVE (`OPENCVE_REF`) and DefectDojo (`DD_REF`); syft releases (manual install, [Install syft](install.md#4-install-syft)) | `setup`, `upgrade` |
 | `ghcr.io` | Dependency-Track `apiserver` and `frontend` images | `setup`, `upgrade` |
 | `registry.defectdojo.com` | DefectDojo `django` and `nginx` images | `setup`, `upgrade` |
-| Docker Hub | `postgres`, `valkey`, `nginx`, `redis/redis-stack`, the Airflow base image, `python` (glue and OpenCVE web images) | `setup`, `upgrade` |
+| Docker Hub | `postgres`, `valkey`, `nginx`, `redis/redis-stack`, the Airflow base image, `python` (glue and OpenCVE web images), `mattermost/mattermost-team-edition` (local chat) | `setup`, `upgrade`, `chat-up` |
 | PyPI | Python packages for OpenCVE's locally built images (vulnflow itself has no runtime dependencies) | OpenCVE build |
 | `api.github.com` | Newest releases of DefectDojo, OpenCVE, Dependency-Track and Valkey (anonymous, four requests per run; sends nothing about you) | `./poc.sh check-updates`, the email reports |
 
@@ -75,7 +76,8 @@ connects in.
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
-| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`) | the alert text: CVE, tier, team, links | leave it empty |
+| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`) | the alert text: CVE, tier, team, links | leave it empty, or use the local Mattermost |
+| Mattermost's own servers | the local chat, **switched off** in `stacks/mattermost/docker-compose.yml`: diagnostics, security-fix alerts, product notices, plugin marketplace, push notification proxy; link previews (the server fetching URLs in posts) off too | nothing while those stay off | — |
 | Tailscale | `tailscaled` (coordination server and DERP relays) | node metadata, as for any tailnet member | — |
 
 The `enrich` command uses the same three enrichment sources as the receiver.
