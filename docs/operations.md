@@ -130,6 +130,7 @@ Set the recipient and install the timers once, as the user that runs `./poc.sh`:
 python3 -m vulnflow env-set <<<'VULNFLOW_REPORT_TO=you@example.org'
 ./poc.sh schedule install    # systemd timers from deploy/timers/ (sudo); remove | status
 ./poc.sh report weekly       # send one now
+./poc.sh report daily --always   # a daily even when there is nothing to act on
 ```
 
 "New" is since the last report of the same kind, so the weekly covers the whole week. The

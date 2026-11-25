@@ -26,7 +26,7 @@
 #   check-updates     newer upstream releases (7-day cooldown) and pinned versions not deployed
 #   upgrade C [V] [--now]  back up C's database, then deploy C (dojo|opencve|dtrack) at the
 #                     version pinned in the repo, or at V (--now: V is not the reviewed pin)
-#   report K          K = daily|weekly digest, mailed to VULNFLOW_REPORT_TO with sendmail
+#   report K [--always]  K = daily|weekly digest, mailed to VULNFLOW_REPORT_TO with sendmail
 #   schedule A        A = install|remove|status: systemd timers for the daily/weekly reports
 set -euo pipefail
 
@@ -777,15 +777,20 @@ cmd_check_updates() {
   vulnflow check-updates
 }
 
+# sendmail is in /usr/sbin on Debian, which a user's PATH (ssh, cron) leaves out.
+find_sendmail() { PATH="$PATH:/usr/sbin:/sbin" command -v sendmail || true; }
+
 # Digest from `vulnflow report` (vulnflow/report.py), mailed with the host's own sendmail
-# (postfix, msmtp-mta, nullmailer...). daily: only when something needs action; weekly:
-# always. VULNFLOW_REPORT_TO empty: printed instead (the journal, under the timer).
+# (postfix, msmtp-mta, nullmailer...). daily: only when something needs action (--always:
+# anyway, e.g. to test the mail); weekly: always. VULNFLOW_REPORT_TO empty: printed instead
+# (the journal, under the timer).
 cmd_report() {
-  local kind="${1:-}" alerts out rc=0 quiet="" subject
-  [[ "$kind" == daily || "$kind" == weekly ]] || die "usage: ./poc.sh report daily|weekly"
+  local kind="${1:-}" alerts out rc=0 quiet="" subject sendmail
+  [[ "$kind" == daily || "$kind" == weekly ]] || die "usage: ./poc.sh report daily|weekly [--always]"
   load_env
-  [[ "$kind" == daily ]] && quiet=1
-  if [[ -n "${VULNFLOW_REPORT_TO:-}" ]] && ! command -v sendmail >/dev/null; then
+  [[ "$kind" == daily && "${2:-}" != --always ]] && quiet=1
+  sendmail="$(find_sendmail)"
+  if [[ -n "${VULNFLOW_REPORT_TO:-}" && -z "$sendmail" ]]; then
     die "no sendmail: install a mail transfer agent (postfix, msmtp-mta, nullmailer) or empty VULNFLOW_REPORT_TO"
   fi
   # The receiver's alert log lives in its volume. A stopped receiver leaves no file, which
@@ -808,7 +813,7 @@ cmd_report() {
     printf 'To: %s\nSubject: %s\nContent-Type: text/plain; charset=utf-8\n\n' \
       "$VULNFLOW_REPORT_TO" "$subject"
     printf '%s\n' "$out"
-  } | sendmail -t -oi
+  } | "$sendmail" -t -oi
   log "$kind report mailed to $VULNFLOW_REPORT_TO"
   return "$rc"
 }
@@ -825,7 +830,7 @@ cmd_schedule() {
       load_env
       [[ -n "${VULNFLOW_REPORT_TO:-}" ]] ||
         warn "VULNFLOW_REPORT_TO is empty in .env: reports only go to the journal"
-      command -v sendmail >/dev/null ||
+      [[ -n "$(find_sendmail)" ]] ||
         warn "no sendmail: install a mail transfer agent (postfix, msmtp-mta, nullmailer)"
       for u in "${REPORT_UNITS[@]}"; do
         sed -e "s|@ROOT@|$ROOT|g" -e "s|@USER@|$(id -un)|g" "deploy/timers/$u" |
@@ -955,7 +960,7 @@ case "${1:-}" in
     ;;
   status) cmd_status ;;
   check-updates) cmd_check_updates ;;
-  report) cmd_report "${2:-}" ;;
+  report) cmd_report "${2:-}" "${3:-}" ;;
   schedule) cmd_schedule "${2:-}" ;;
   upgrade)
     shift
