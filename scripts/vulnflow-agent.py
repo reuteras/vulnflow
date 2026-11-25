@@ -732,6 +732,12 @@ def running_images() -> tuple[list[tuple[str, str]], list[str]]:
     return sorted((src, ref) for ref, src in images.items()), errors
 
 
+# `docker ps` shows the image ID instead of a name once the container's image has lost its
+# tag (rebuilt or retagged while the container ran) and was then removed (`docker system
+# prune`); syft would try to pull the ID as a repository (seen 2026-11-25).
+IMAGE_ID_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{12}(?:[0-9a-f]{52})?$")
+
+
 def scan_image(source: str, ref: str) -> list[Doc]:
     """syft reads docker's and root's podman's images through their sockets; a user's
     rootless image is exported by that user as an OCI archive on stdout into a file of
@@ -739,6 +745,11 @@ def scan_image(source: str, ref: str) -> list[Doc]:
     podman runs in the user's own mount namespace, which doesn't see the systemd unit's
     private /tmp and /var/tmp."""
     runtime, _, user = source.partition("@")
+    if IMAGE_ID_RE.match(ref):
+        raise ScanError(
+            f"the container runs image {ref}, which has no name any more (rebuilt or "
+            "retagged, then removed); recreate the container"
+        )
     if not user:
         try:
             return syft(f"{runtime}:{ref}")

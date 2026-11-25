@@ -701,12 +701,15 @@ apply to `@2026.11.17`, and nothing retired the old version. Per project name an
   by YYYY-MM-DD` (`ignore --review-by`) is unsuppressed after that day, keeping its state:
   it is back in the lists and in DefectDojo. Copies keep the date, so all versions come
   back together.
-- **Deactivated:** a version not uploaded for 2 days while a newer one exists, or the newest
-  one when nothing uploaded it for 7 days (the container or host is gone). Its findings in
-  DefectDojo are closed first, by re-importing an empty list into its test.
-- **Reactivated:** an inactive version uploaded again within those 2 days: a rollback, or
-  a version that runs next to a newer one (two postgres containers on one host) and was
-  deactivated while its host was offline.
+- **Deactivated:** a container or code project its host's last agent run did not upload
+  (the host's own `host:<host>` project is an hour or more newer): the container was
+  removed, or its scan failed (the agent log says which). Otherwise a version not uploaded
+  for 2 days while a newer one exists, or the newest one when nothing uploaded it for 7
+  days (the host is gone). Its findings in DefectDojo are closed first, by re-importing an
+  empty list into its test.
+- **Reactivated:** an inactive version uploaded again after it was deactivated: a
+  rollback, a container whose scan works again, or a version that runs next to a newer one
+  (two postgres containers on one host) and was deactivated while its host was offline.
 
 It uses its own key, `DT_MAINTENANCE_API_KEY` (team `vulnflow-maintenance`, created by
 `dt-bootstrap`): writing analyses and (de)activating projects needs `VULNERABILITY_ANALYSIS`
