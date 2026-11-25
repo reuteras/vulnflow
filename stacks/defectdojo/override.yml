@@ -11,7 +11,13 @@
 x-restart: &restart
   restart: unless-stopped
 services:
-  postgres: *restart
+  # Upstream 3.5.300 pins postgres 18.6; pinned here ahead of it at 18.7 (2026-11-12),
+  # which fixes 53 CVEs and index-corruption bugs (release notes: REINDEX the indexes its
+  # changelog names). A minor update: same data directory, no dump. Bumped by hand like
+  # valkey; when bumping DD_REF, drop this if upstream's pin is as new.
+  postgres:
+    <<: *restart
+    image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
   # Upstream pins valkey with DD_REF; pinned here ahead of it (9.2.0, 2026-11-19, taken
   # inside the cooldown at the owner's request; 9.1.4 before it fixed CVE-2026-130822).
   # Bumped by hand: Dependabot does not watch this file (the name is not a compose file
