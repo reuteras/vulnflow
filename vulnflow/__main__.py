@@ -363,6 +363,9 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
     from .machines import last_pushes
     from .upstreams import check
 
+    if a.mime and not a.to:
+        print("report --mime needs --to", file=sys.stderr)
+        return 2
     weekly = a.kind == "weekly"
     state_file = Path(a.data_dir) / "report-state.json"
     state = rp.load_state(state_file)
@@ -382,7 +385,9 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         else:
             sec, newest = rp.alerts_section(text.splitlines(), str(mine.get("alerts_since", "")))
             if "alerts_since" not in mine:
-                sec = rp.Section(sec.title, ["First report: alerts are listed from the next one."])
+                sec = rp.Section(
+                    sec.title, [rp.Para("First report: alerts are listed from the next one.")]
+                )
             sections.append(sec)
             mine["alerts_since"] = newest
 
@@ -418,7 +423,13 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         rp.save_state(state_file, state)
     if a.quiet and not any(s.notable for s in sections):
         return 0
-    print(rp.render(a.kind, sections), end="")
+    if a.mime:
+        import socket
+
+        host = socket.gethostname().split(".")[0]
+        sys.stdout.write(rp.mime_message(a.kind, sections, a.to, host).as_string())
+    else:
+        print(rp.render_markdown(a.kind, sections), end="")
     return 1 if any(s.error for s in sections) else 0
 
 
@@ -708,6 +719,12 @@ def main(argv: list[str] | None = None) -> int:
         "--quiet", action="store_true", help="print nothing when there is nothing to act on"
     )
     rpt.add_argument("--no-save", action="store_true", help="do not record this run (a preview)")
+    rpt.add_argument(
+        "--mime",
+        action="store_true",
+        help="print a whole mail for `sendmail -t` (text/plain Markdown + text/html); needs --to",
+    )
+    rpt.add_argument("--to", default="", help="recipient(s) for --mime, comma-separated")
 
     sub.add_parser(
         "check-updates",
