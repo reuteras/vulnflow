@@ -93,11 +93,14 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
 - Dependabot covers uv, GitHub Actions, pre-commit, `deploy/Dockerfile` and the
   Dependency-Track images (tags are written out in
   `stacks/dependency-track/docker-compose.yml` on purpose; `${VAR}` tags are invisible to
-  Dependabot). `DD_REF` and `OPENCVE_REF` in `.env.example`, and the valkey image pinned ahead
-  of `DD_REF` in `stacks/defectdojo/override.yml`, are bumped by hand. `vulnflow check-updates`
-  (`vulnflow/upstreams.py`, nightly from the server's update) reports when one is due;
+  Dependabot). `DD_REF` and `OPENCVE_REF` in `.env.example`, and the valkey and postgres
+  images pinned ahead of `DD_REF` in `stacks/defectdojo/override.yml`, are bumped by hand
+  (keep postgres at the same tag as the Dependency-Track and Mattermost stacks, which
+  Dependabot bumps). `vulnflow check-updates`
+  (`vulnflow/upstreams.py`, from the daily email report) reports when one is due;
   `./poc.sh upgrade` deploys a merged pin after a database dump.
-- Container images use exact tags, never floating ones: `deploy/Dockerfile` is
+- Container images use exact tags (with a digest where Dependabot can keep it), never
+  floating ones such as `postgres:18-alpine`: `deploy/Dockerfile` is
   `python:X.Y.Z-slim-<debian>` (not `X.Y-slim`), so builds are reproducible and every
   bump arrives as a reviewable Dependabot PR.
 - Actions are pinned by commit SHA with a `# vX.Y.Z` comment. For annotated tags, resolve
