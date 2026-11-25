@@ -356,6 +356,72 @@ def _machines(a: argparse.Namespace, inv: Inventory) -> int:
     return 1 if stale else 0
 
 
+def _report(a: argparse.Namespace, inv: Inventory) -> int:
+    """`report daily|weekly`: the digest poc.sh mails (see vulnflow/report.py)."""
+    from . import report as rp
+    from .intel import KevCache
+    from .machines import last_pushes
+    from .upstreams import check
+
+    weekly = a.kind == "weekly"
+    state_file = Path(a.data_dir) / "report-state.json"
+    state = rp.load_state(state_file)
+    mine: dict = dict(state.get(a.kind) or {})
+    sections: list[rp.Section] = []
+
+    try:
+        sections.append(rp.updates_section(check(Path("."), Path(a.env_file)), everything=weekly))
+    except Exception as e:  # a report must still go out
+        sections.append(rp.error_section("Upstream updates", f"check failed: {e}"))
+
+    if a.alerts is not None:
+        try:
+            text = a.alerts.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            sections.append(rp.error_section("OpenCVE alerts", f"cannot read {a.alerts}: {e}"))
+        else:
+            sec, newest = rp.alerts_section(text.splitlines(), str(mine.get("alerts_since", "")))
+            if "alerts_since" not in mine:
+                sec = rp.Section(sec.title, ["First report: alerts are listed from the next one."])
+            sections.append(sec)
+            mine["alerts_since"] = newest
+
+    dt = None
+    if env("DT_API_KEY"):
+        dt = DependencyTrack(env("DT_URL", "http://localhost:8180"), env("DT_API_KEY"))
+    else:
+        sections.append(rp.error_section("Dependency-Track findings", "DT_API_KEY not set"))
+    if dt is not None:
+        errors: list[str] = []
+        current = rp.collect_findings(inv, dt, errors)
+        if errors:  # a partial list would report everything it missed as resolved
+            sections.append(rp.error_section("Dependency-Track findings", "; ".join(errors)[:500]))
+        else:
+            kev: set[str] = set()
+            if env_flag("VULNFLOW_ENRICH_KEV"):
+                try:
+                    kev = set(KevCache(Path(a.data_dir)).index())
+                except Exception as e:
+                    logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
+            sections.append(rp.findings_section(mine.get("findings"), current, kev, weekly=weekly))
+            mine["findings"] = {k: f.to_json() for k, f in current.items()}
+
+    machines = load_machines(a.machines, inv.teams)
+    if machines.hosts and dt is not None:
+        try:
+            sections.append(rp.machines_section(machines, last_pushes(dt), a.stale_days))
+        except Exception as e:
+            sections.append(rp.error_section("Hosts", f"Dependency-Track: {e}"))
+
+    if not a.no_save:
+        state[a.kind] = mine
+        rp.save_state(state_file, state)
+    if a.quiet and not any(s.notable for s in sections):
+        return 0
+    print(rp.render(a.kind, sections), end="")
+    return 1 if any(s.error for s in sections) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vulnflow", description=__doc__)
     ap.add_argument("--env-file", default=".env")
@@ -627,6 +693,21 @@ def main(argv: list[str] | None = None) -> int:
     owi.add_argument("--webhook-url", default=None, help="default: $VULNFLOW_WEBHOOK_URL")
 
     sub.add_parser("env-set", help="read KEY=VALUE lines from stdin into the .env file")
+
+    rpt = sub.add_parser(
+        "report",
+        help="daily/weekly digest: updates, new P1/P2 alerts, new and resolved findings, "
+        "stale hosts (./poc.sh report mails it)",
+    )
+    rpt.add_argument("kind", choices=("daily", "weekly"))
+    rpt.add_argument(
+        "--alerts", type=Path, default=None, metavar="FILE", help="the receiver's alerts.jsonl"
+    )
+    rpt.add_argument("--stale-days", type=float, default=2.0, metavar="DAYS")
+    rpt.add_argument(
+        "--quiet", action="store_true", help="print nothing when there is nothing to act on"
+    )
+    rpt.add_argument("--no-save", action="store_true", help="do not record this run (a preview)")
 
     sub.add_parser(
         "check-updates",
@@ -1014,6 +1095,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "machines":
         return _machines(a, inv)
+
+    if a.cmd == "report":
+        return _report(a, inv)
 
     if a.cmd == "agent-bundle":
         return _agent_bundle(a, inv)

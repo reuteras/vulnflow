@@ -3793,3 +3793,193 @@ def test_check_updates_nothing_to_do_and_errors(tmp_path: Path) -> None:
     out = report(check(root, env_file, FakeTransport(routes), now, "5.2.2", vk))
     assert "OpenCVE: running v3.1.0, pinned v3.1.0\n  ERROR  release check failed:" in out
     assert "Nothing to do." not in out
+
+
+# ---- report ------------------------------------------------------------------------------
+
+
+def _dt_finding(comp: str, version: str, vuln: str, severity: str, suppressed: bool = False) -> dict:
+    return {
+        "component": {"uuid": f"c-{comp}", "name": comp, "version": version},
+        "vulnerability": {"uuid": f"v-{vuln}", "vulnId": vuln, "source": "NVD", "severity": severity},
+        "analysis": {"isSuppressed": suppressed},
+    }
+
+
+def _report_portfolio() -> FakePortfolio:
+    def proj(uuid, name, version, tag, active=True):
+        return {
+            "uuid": uuid,
+            "name": name,
+            "version": version,
+            "active": active,
+            "tags": [{"name": tag}, {"name": "kind-host"}],
+            "lastBomImport": 1_800_000_000_000,
+        }
+
+    return FakePortfolio(
+        [
+            proj("p1", "host:web01", "debian-13", "team-sysadm"),
+            proj("p2", "container:grafana", "13.3.1", "team-dev"),
+            proj("p3", "container:grafana", "13.3.0", "team-dev", active=False),
+        ],
+        {
+            "p1": [
+                _dt_finding("openssl", "3.5.1", "CVE-2026-0001", "HIGH"),
+                _dt_finding("curl", "8.14.1", "CVE-2026-0002", "LOW"),
+                _dt_finding("perl", "5.40", "CVE-2026-0003", "CRITICAL", suppressed=True),
+            ],
+            "p2": [_dt_finding("grafana", "13.3.1", "CVE-2026-0004", "MEDIUM")],
+            "p3": [_dt_finding("grafana", "13.3.0", "CVE-2026-0009", "CRITICAL")],
+        },
+    )
+
+
+def test_report_findings_baseline_then_new_resolved_and_kev(inv):
+    from vulnflow import report as rp
+
+    fake = _report_portfolio()
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+    errors: list[str] = []
+    first = rp.collect_findings(inv, dt, errors)
+    assert errors == []
+    # suppressed findings and inactive project versions are left out; keys carry no versions
+    assert sorted(first) == [
+        "dev|container:grafana|grafana|CVE-2026-0004",
+        "sysadm|host:web01|curl|CVE-2026-0002",
+        "sysadm|host:web01|openssl|CVE-2026-0001",
+    ]
+    base = rp.findings_section(None, first, set(), weekly=False)
+    assert "baseline of 3 open findings" in base.lines[0] and not base.notable
+
+    saved = json.loads(json.dumps({k: f.to_json() for k, f in first.items()}))
+    # a new package version with the same CVE is not new; curl fixed; two new ones
+    fake.findings["p1"] = [
+        _dt_finding("openssl", "3.5.2", "CVE-2026-0001", "HIGH"),
+        _dt_finding("zlib", "1.3", "CVE-2026-0005", "LOW"),
+        _dt_finding("sudo", "1.9", "CVE-2026-0006", "CRITICAL"),
+    ]
+    fake.findings["p2"].append(_dt_finding("grafana", "13.3.1", "CVE-2026-0007", "MEDIUM"))
+    now = rp.collect_findings(inv, dt, errors)
+    daily = rp.findings_section(saved, now, {"CVE-2026-0007"}, weekly=False)
+    assert daily.notable
+    text = "\n".join(daily.lines)
+    assert text.startswith(
+        "3 new, 1 resolved or suppressed since the last daily report; 2 new critical/high/KEV:"
+    )
+    # KEV first, then by severity; the LOW one is only counted
+    assert daily.lines[1] == "  MEDIUM   CVE-2026-0007 KEV  grafana 13.3.1  (container:grafana@13.3.1)"
+    assert daily.lines[2] == "  CRITICAL CVE-2026-0006  sudo 1.9  (host:web01@debian-13)"
+    assert "CVE-2026-0005" not in text and "Open findings" not in text
+
+    weekly = "\n".join(rp.findings_section(saved, now, set(), weekly=True).lines)
+    assert "Other new findings per team: dev 1, sysadm 1" in weekly
+    assert "Resolved per team: sysadm 1" in weekly
+    assert "  dev            2  (medium 2)" in weekly
+    assert "  sysadm         3  (critical 1, high 1, low 1)" in weekly
+
+
+def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
+    from vulnflow.report import alerts_section
+
+    def line(at, cve, tier, team="sysadm", **kw):
+        return json.dumps(
+            {"received_at": at, "cve": cve, "team": team, "tier": tier, "tier_name": f"P{tier}", **kw}
+        )
+
+    log_lines = [
+        line("2026-11-24T10:00:00Z", "CVE-2021-44228", 1, cvss31=10.0, kev=True, epss=0.97),
+        line("2026-11-25T08:00:00Z", "CVE-2026-1111", 2, cvss31=8.1),
+        line("2026-11-25T09:00:00Z", "CVE-2026-1111", 1, cvss31=8.1, kev=True),
+        line("2026-11-25T09:30:00Z", "CVE-2026-2222", 3, cvss31=5.0),
+        "not json",
+        "",
+    ]
+    sec, newest = alerts_section(log_lines, "2026-11-24T12:00:00Z")
+    assert newest == "2026-11-25T09:30:00Z"
+    assert sec.notable
+    assert sec.lines == ["  [P1] CVE-2026-1111  team sysadm  CVSS 8.1 KEV"]
+    quiet, newest2 = alerts_section(log_lines, newest)
+    assert (quiet.notable, quiet.lines, newest2) == (False, ["None."], newest)
+
+
+def test_report_machines_and_updates_sections(tmp_path, inv):
+    from vulnflow.report import machines_section, updates_section
+    from vulnflow.upstreams import COMPONENTS, Release, Status
+
+    mf = tmp_path / "machines.toml"
+    mf.write_text(
+        '[groups.servers]\nhosts = ["web01", "db01", "new01"]\n'
+        '[hosts.web01]\nteam = "sysadm"\nscans = ["system"]\n'
+        '[hosts.db01]\nteam = "sysadm"\nscans = ["system"]\n'
+        '[hosts.new01]\nteam = "sysadm"\nscans = ["system"]\n'
+    )
+    machines = load_machines(mf, inv.teams)
+    now = 1_800_000_000.0
+    pushes = {"host:web01": now - 3600, "host:db01": now - 5 * 86400}
+    sec = machines_section(machines, pushes, 2, now=now)
+    assert sec.notable
+    assert sec.lines == [
+        "  db01                 sysadm   last push 5.0 days ago",
+        "  new01                sysadm   never pushed",
+    ]
+
+    from datetime import UTC, datetime
+
+    dojo, opencve = COMPONENTS[0], COMPONENTS[1]
+    rel = Release("3.5.300", datetime(2026, 11, 24, tzinfo=UTC))
+    statuses = [
+        Status(dojo, "3.5.201", "3.5.201", rel, None),
+        Status(opencve, "v3.1.0", "v3.1.0", None, None),
+    ]
+    daily = updates_section(statuses, everything=False)
+    assert daily.notable and daily.lines[0] == "DefectDojo: running 3.5.201, pinned 3.5.201"
+    assert not any(line.startswith("OpenCVE") for line in daily.lines)
+    weekly = updates_section(statuses, everything=True)
+    assert "OpenCVE: running v3.1.0, pinned v3.1.0" in weekly.lines
+    calm = updates_section(statuses[1:], everything=False)
+    assert (calm.notable, calm.lines) == (False, ["Nothing to do."])
+
+
+def test_report_command_saves_state_and_daily_is_quiet_without_news(tmp_path, monkeypatch, capsys):
+    import vulnflow.__main__ as vf
+    import vulnflow.upstreams as up
+
+    fake = _report_portfolio()
+    monkeypatch.setattr(
+        vf, "DependencyTrack", lambda url, key: DependencyTrack(url, key, transport=fake)
+    )
+    monkeypatch.setattr(up, "check", lambda root, env_file: [])
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DT_API_KEY={secrets.token_hex(8)}\nDT_URL=http://dt\nVULNFLOW_ENRICH_KEV=0\n")
+    alerts = tmp_path / "alerts.jsonl"
+    alerts.write_text("")
+    args = [
+        "--env-file", str(env_file),
+        "--inventory", str(INV),
+        "--machines", str(tmp_path / "none.toml"),
+        "--data-dir", str(tmp_path / "data"),
+        "report",
+    ]  # fmt: skip
+    assert vf.main([*args, "daily", "--alerts", str(alerts), "--quiet"]) == 0
+    assert capsys.readouterr().out == ""  # first run: baseline only
+    state_file = tmp_path / "data" / "report-state.json"
+    assert oct(state_file.stat().st_mode & 0o777) == "0o600"
+    state = json.loads(state_file.read_text())
+    assert len(state["daily"]["findings"]) == 3 and "weekly" not in state
+
+    assert vf.main([*args, "daily", "--alerts", str(alerts), "--quiet"]) == 0
+    assert capsys.readouterr().out == ""  # nothing new
+
+    fake.findings["p1"].append(_dt_finding("sudo", "1.9", "CVE-2026-0006", "CRITICAL"))
+    assert vf.main([*args, "daily", "--alerts", str(alerts), "--quiet", "--no-save"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("vulnflow daily report, ")
+    assert "== Dependency-Track findings\n1 new, 0 resolved" in out
+    assert "CVE-2026-0006" in out
+    assert len(json.loads(state_file.read_text())["daily"]["findings"]) == 3  # --no-save
+
+    # a missing alert log (receiver down) is an error in the report, exit 1
+    assert vf.main([*args, "weekly", "--alerts", str(tmp_path / "gone.jsonl")]) == 1
+    out = capsys.readouterr().out
+    assert "== OpenCVE alerts (ERROR)" in out and "baseline of 4 open findings" in out

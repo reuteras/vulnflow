@@ -1,0 +1,13 @@
+# Daily report: mailed only when something needs action (updates, new P1/P2 alerts, new
+# critical/high/KEV findings, hosts that stopped pushing). `./poc.sh schedule install`.
+[Unit]
+Description=vulnflow daily report
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=vulnflow-report@daily.service
+
+[Install]
+WantedBy=timers.target

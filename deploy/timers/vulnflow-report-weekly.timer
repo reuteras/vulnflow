@@ -1,0 +1,13 @@
+# Weekly report, always mailed: the week's new and resolved findings, open totals per team,
+# all upstream versions, hosts that stopped pushing. `./poc.sh schedule install`.
+[Unit]
+Description=vulnflow weekly report
+
+[Timer]
+OnCalendar=Mon *-*-* 06:45:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=vulnflow-report@weekly.service
+
+[Install]
+WantedBy=timers.target
