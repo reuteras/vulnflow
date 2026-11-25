@@ -19,8 +19,14 @@ projects are one group each):
   risks live in DT: DefectDojo's own risk acceptances stay with one version's test.
 - deactivate: a project whose last upload is older than `superseded_days` while a newer
   version of the group exists, or older than `gone_days` when it is the newest (nothing
-  runs it any more). Its findings in DefectDojo are closed by re-importing an empty
-  finding list into its test (close_old_findings); dt2dojo skips inactive projects.
+  runs it any more). A project on a host (`host-<h>` tag) goes sooner: as soon as the
+  host's own project `host:<h>` was uploaded `HOST_SCAN_MARGIN` or more after it, the
+  host's last agent run did not find it (a removed container, a code path dropped from the
+  config). One run uploads all of a host's projects within minutes. A container whose scan
+  failed is not uploaded either, so it is deactivated too and comes back with its next
+  upload (below); the agent's log and exit code show the failure. Its findings in
+  DefectDojo are closed by re-importing an empty finding list into its test
+  (close_old_findings); dt2dojo skips inactive projects.
 - reactivate: an inactive project uploaded again after it was deactivated (lastBomImport
   newer than DT's inactiveSince): a rollback, or a version that runs next to a newer one
   (two postgres containers on one host) and was deactivated while its host was offline.
@@ -59,6 +65,9 @@ CARRY_STATES = ("NOT_AFFECTED", "FALSE_POSITIVE")
 # comments DT writes itself on every analysis change; the human/vulnflow reason is the rest
 _DT_AUDIT = ("Analysis:", "Justification:", "Vendor Response:", "Details:", "Suppressed", "Unsuppressed")
 DAY = 86400
+# how much later the host's own project must have been uploaded before a project on that
+# host counts as gone: one agent run uploads everything within minutes
+HOST_SCAN_MARGIN = 3600
 
 
 @dataclass
@@ -82,6 +91,13 @@ class _Proj:
     @property
     def label(self) -> str:
         return project_label(self.p.name, self.p.version)
+
+    @property
+    def host_tag(self) -> str:
+        """The `host-<h>` tag of a project on a host; "" for a host's own project."""
+        if self.p.name.startswith("host:"):
+            return ""
+        return next((t for t in self.p.tags if t.startswith("host-")), "")
 
 
 def groups(inv: Inventory, dt: DependencyTrack, errors: list[str]) -> list[list[_Proj]]:
@@ -264,6 +280,18 @@ def _uploaded_since_deactivation(m: _Proj, newest: bool, age: float, superseded_
     return newest and age < superseded_days * DAY  # no inactiveSince: the old rule
 
 
+def _host_scans(all_groups: list[list[_Proj]]) -> dict[str, float]:
+    """{`host-<h>` tag: last upload of the host's own project `host:<h>`} (newest version)."""
+    out: dict[str, float] = {}
+    for group in all_groups:
+        for m in group:
+            last = m.p.last_bom_import
+            if m.p.name.startswith("host:") and last:
+                key = "host-" + m.p.name.removeprefix("host:")
+                out[key] = max(out.get(key, 0.0), last)
+    return out
+
+
 def prune(
     inv: Inventory,
     dt: DependencyTrack,
@@ -278,14 +306,19 @@ def prune(
     rep = PruneReport()
     now = time.time() if now is None else now
     today = date.fromtimestamp(now)
-    for group in groups(inv, dt, rep.errors):
+    all_groups = groups(inv, dt, rep.errors)
+    host_scans = _host_scans(all_groups)
+    for group in all_groups:
         uploaded = [m for m in group if m.p.last_bom_import]
         if not uploaded:
             continue
         newest = uploaded[0]
         for m in uploaded:
-            age = now - (m.p.last_bom_import or 0)
+            last = m.p.last_bom_import or 0
+            age = now - last
             limit = gone_days if m is newest else superseded_days
+            host_last = host_scans.get(m.host_tag) if m.host_tag else None
+            why = ""
             if not m.p.active and _uploaded_since_deactivation(m, m is newest, age, superseded_days):
                 rep.reactivated.append(f"{m.team.key}/{m.label}")
                 if apply:
@@ -295,8 +328,11 @@ def prune(
                         rep.errors.append(f"reactivate {m.label}: {e}")
                         continue
                 m.p.active = True
+            elif m.p.active and host_last is not None and host_last - last >= HOST_SCAN_MARGIN:
+                why = f"not in the host's last scan, {(now - host_last) / 3600:.1f} h ago"
             elif m.p.active and age > limit * DAY:
                 why = "newer version uploaded" if m is not newest else "no upload"
+            if why:
                 rep.deactivated.append(f"{m.team.key}/{m.label} ({why}; last {age / DAY:.1f} days ago)")
                 if apply:
                     try:

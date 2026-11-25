@@ -1856,6 +1856,59 @@ def test_prune_carries_decisions_deactivates_stale_and_reactivates_rollbacks(inv
     assert not again.changed and again.errors == []
 
 
+def test_prune_retires_what_the_hosts_last_scan_did_not_upload(inv):
+    from vulnflow.prune import prune
+
+    now = 1_800_000_000.0
+    hour = 3600 * 1000  # lastBomImport is epoch milliseconds
+
+    def proj(uuid, name, version, tags, age_h, active=True, inactive_h=None):
+        return {
+            "uuid": uuid,
+            "name": name,
+            "version": version,
+            "active": active,
+            "tags": [{"name": t} for t in tags],
+            "lastBomImport": int(now * 1000 - age_h * hour),
+            "inactiveSince": None if inactive_h is None else int(now * 1000 - inactive_h * hour),
+        }
+
+    on_h1 = ["kind-container", "team-dev", "host-h1"]
+    projects = [
+        proj("h1", "host:h1", "debian-13", ["kind-host", "team-sysadm"], 2),  # agent ran 2 h ago
+        proj("same", "container:nginx", "1.31", on_h1, 2.05),  # same run, minutes apart: kept
+        proj("gone", "container:airflow", "latest", on_h1, 26),  # not in the last run: retired
+        # back in the last run after being retired by an earlier one
+        proj("back", "container:redis", "8", on_h1, 2, active=False, inactive_h=20),
+        # a host whose own project is older than its containers (host scan failed): kept
+        proj("h2", "host:h2", "debian-13", ["kind-host", "team-sysadm"], 30),
+        proj("c2", "container:app", "1", ["kind-container", "team-dev", "host-h2"], 3),
+        # no host project at all: only the old 7-day rule
+        proj("c3", "container:app", "1", ["kind-container", "team-dev", "host-h3"], 50),
+    ]
+    fake = FakePortfolio(projects, {p["uuid"]: [] for p in projects})
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+
+    dry = prune(inv, dt, now=now)
+    assert dry.deactivated == [
+        "dev/container:airflow@latest (not in the host's last scan, 2.0 h ago; last 1.1 days ago)"
+    ]
+    assert dry.reactivated == ["dev/container:redis@8"]
+
+    dojo_t = FakeTransport({"POST /api/v2/reimport-scan/": {"statistics": {}}})
+    rep = prune(inv, dt, DefectDojo("http://dd", "t", transport=dojo_t), apply=True, now=now)
+    assert rep.errors == []
+    assert {u: fake.projects[u]["active"] for u in ("same", "gone", "back", "c2", "c3")} == {
+        "same": True,
+        "gone": False,
+        "back": True,
+        "c2": True,
+        "c3": True,
+    }
+    posts = [c for c in dojo_t.calls if c[0] == "POST"]
+    assert len(posts) == 1 and b"container:airflow" in posts[0][3]  # closed in DefectDojo first
+
+
 def test_prune_carries_accepted_risks_and_lifts_them_after_the_review_date(inv):
     from vulnflow.prune import prune
 
@@ -3334,6 +3387,31 @@ def test_agent_gives_the_images_own_go_binary_the_image_tag_as_version():
     out = a.version_from_tag([{"components": [q]}], "ghcr.io/grafana/grafana", "13.3.1")[0]
     assert out["components"][0]["purl"] == f"pkg:golang/{grafana}@13.3.1?type=module"
     assert out["components"][0]["cpe"] == ""
+
+
+def test_agent_reports_a_container_whose_image_was_removed(monkeypatch):
+    a = load_agent()
+
+    def no_syft(*args, **kw):
+        raise AssertionError("syft must not be asked to pull an image ID")
+
+    monkeypatch.setattr(a, "syft", no_syft)
+    for ref in (
+        "05c8f9d91118",
+        "sha256:" + "05c8f9d9111801716fd2237471586256d8ae62d6c159b756701669f3fcc4d716",
+    ):
+        with pytest.raises(a.ScanError, match="recreate the container"):
+            a.scan_image("docker", ref)
+    seen: list[str] = []
+
+    def fake_syft(target, *extra):
+        seen.append(target)
+        return []
+
+    monkeypatch.setattr(a, "syft", fake_syft)
+    a.scan_image("docker", "opencve-airflow-worker:latest")  # a name, even an odd one: scanned
+    a.scan_image("docker", "deadbeefcafe/app:1")
+    assert seen == ["docker:opencve-airflow-worker:latest", "docker:deadbeefcafe/app:1"]
 
 
 def test_agent_drops_pypi_copies_of_apt_python_packages():
