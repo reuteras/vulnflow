@@ -1,8 +1,14 @@
 """Daily and weekly email digests (`vulnflow report daily|weekly`).
 
-`./poc.sh report <kind>` runs this and mails the output with the host's own `sendmail`;
+`./poc.sh report <kind>` runs this and mails the result with the host's own `sendmail`;
 `./poc.sh schedule install` sets up the systemd timers in deploy/timers/ that call it.
 Nothing here sends mail or talks to Docker: poc.sh passes the receiver's alerts.jsonl in.
+
+Output: Markdown (default), or with --mime a complete multipart/alternative message (the
+Markdown as text/plain, an HTML rendering of the same sections as text/html) for
+`sendmail -t`. Both renderers work from the same blocks (paragraph, list, table); no
+Markdown is parsed. Inline `code` and **bold** are the only marks, and the HTML side
+escapes everything before turning those two into tags.
 
 Sections:
 
@@ -26,13 +32,17 @@ Exit code: 0, or 1 when a section could not be built (the error is in the report
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 import time
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Any
 
@@ -45,15 +55,61 @@ from .upstreams import Status
 KINDS = ("daily", "weekly")
 IMPORTANT = ("CRITICAL", "HIGH")
 SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNASSIGNED")
-LIST_MAX = 40  # listed lines per section; the rest is counted
+LIST_MAX = 40  # listed rows per table/list; the rest is counted
+
+
+@dataclass
+class Para:
+    text: str
+
+
+@dataclass
+class Items:
+    items: list[str]
+
+
+@dataclass
+class Table:
+    header: list[str]
+    rows: list[list[str]]
+
+
+Block = Para | Items | Table
 
 
 @dataclass
 class Section:
     title: str
-    lines: list[str] = field(default_factory=list)
+    blocks: list[Block] = field(default_factory=list)
     notable: bool = False  # something to act on: a quiet daily is not sent without one
     error: bool = False
+
+    def text(self) -> str:
+        """All of the section as plain text, for tests and logs."""
+        out: list[str] = []
+        for b in self.blocks:
+            if isinstance(b, Para):
+                out.append(b.text)
+            elif isinstance(b, Items):
+                out += b.items
+            else:
+                out += [" | ".join(r) for r in b.rows]
+        return "\n".join(out)
+
+
+def code(s: str) -> str:
+    return f"`{s.replace('`', '')}`" if s else ""
+
+
+def _cut_rows(rows: list[list[str]], limit: int = LIST_MAX) -> tuple[list[list[str]], int]:
+    return rows[:limit], max(0, len(rows) - limit)
+
+
+def _table(section: Section, header: list[str], rows: list[list[str]]) -> None:
+    shown, more = _cut_rows(rows)
+    section.blocks.append(Table(header, shown))
+    if more:
+        section.blocks.append(Para(f"... and {more} more."))
 
 
 @dataclass
@@ -77,19 +133,27 @@ class OpenFinding:
             "sev": self.severity,
         }
 
-    def label(self, kev: bool) -> str:
+    def row(self, kev: bool) -> list[str]:
         where = f"{self.project}@{self.project_version}" if self.project_version else self.project
-        mark = " KEV" if kev else ""
-        return f"  {self.severity:<8} {self.vuln_id}{mark}  {self.component} {self.version}  ({where})"
-
-
-def _cut(lines: list[str], limit: int = LIST_MAX) -> list[str]:
-    if len(lines) <= limit:
-        return lines
-    return [*lines[:limit], f"  ... and {len(lines) - limit} more"]
+        return [
+            self.severity.lower(),
+            code(self.vuln_id),
+            "**KEV**" if kev else "",
+            f"{code(self.component)} {self.version}".strip(),
+            code(where),
+        ]
 
 
 # ---- updates ---------------------------------------------------------------------------
+
+
+def _status_blocks(st: Status) -> list[Block]:
+    head, *rest = st.lines()
+    title, _, tail = head.partition(": ")
+    blocks: list[Block] = [Para(f"**{title}**: {tail}")]
+    if rest:
+        blocks.append(Items([" ".join(r.split()) for r in rest]))
+    return blocks
 
 
 def updates_section(statuses: list[Status], *, everything: bool) -> Section:
@@ -97,11 +161,11 @@ def updates_section(statuses: list[Status], *, everything: bool) -> Section:
     for st in statuses:
         if st.actionable or st.error:
             s.notable = True
-            s.lines += st.lines()
+            s.blocks += _status_blocks(st)
         elif everything:
-            s.lines += st.lines()
-    if not s.lines:
-        s.lines.append("Nothing to do.")
+            s.blocks += _status_blocks(st)
+    if not s.blocks:
+        s.blocks.append(Para("Nothing to do."))
     return s
 
 
@@ -109,7 +173,7 @@ def updates_section(statuses: list[Status], *, everything: bool) -> Section:
 
 
 def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple[Section, str]:
-    """P1..P<max_tier> alerts received after `since` (ISO 8601; empty = all), one line per
+    """P1..P<max_tier> alerts received after `since` (ISO 8601; empty = all), one row per
     team and CVE with the highest tier. Returns the section and the newest received_at."""
     s = Section(f"New P1-P{max_tier} alerts from OpenCVE")
     newest = since
@@ -129,21 +193,24 @@ def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple
         k = (str(a.get("team", "")), str(a.get("cve", "")))
         if k not in best or int(a["tier"]) < int(best[k]["tier"]):
             best[k] = a
+    rows = []
     for (team, cve), a in sorted(best.items(), key=lambda kv: (kv[1]["tier"], kv[0])):
-        epss = a.get("epss")
-        cvss = a.get("cvss31")
-        bits = [
-            f"CVSS {cvss}" if cvss is not None else "CVSS n/a",
-            "KEV" if a.get("kev") else "",
-            f"EPSS {epss:.3f}" if isinstance(epss, int | float) else "",
-        ]
-        s.lines.append(
-            f"  [{a.get('tier_name', '')}] {cve}  team {team}  {' '.join(b for b in bits if b)}"
+        epss, cvss = a.get("epss"), a.get("cvss31")
+        rows.append(
+            [
+                f"**{a.get('tier_name', '')}**",
+                code(cve),
+                team,
+                str(cvss) if cvss is not None else "n/a",
+                "**KEV**" if a.get("kev") else "",
+                f"{epss:.3f}" if isinstance(epss, int | float) else "",
+            ]
         )
-    s.notable = bool(best)
-    if not best:
-        s.lines.append("None.")
-    s.lines = _cut(s.lines)
+    s.notable = bool(rows)
+    if rows:
+        _table(s, ["Tier", "CVE", "Team", "CVSS", "KEV", "EPSS"], rows)
+    else:
+        s.blocks.append(Para("None."))
     return s, newest
 
 
@@ -180,9 +247,11 @@ def findings_section(
 ) -> Section:
     s = Section("Dependency-Track findings")
     if previous is None:
-        s.lines.append(
-            f"First report: baseline of {len(current)} open findings recorded; changes are "
-            "listed from the next one."
+        s.blocks.append(
+            Para(
+                f"First report: baseline of {len(current)} open findings recorded; changes are "
+                "listed from the next one."
+            )
         )
         return s
     new = [current[k] for k in current.keys() - previous.keys()]
@@ -190,30 +259,44 @@ def findings_section(
     important = [f for f in new if f.severity in IMPORTANT or f.vuln_id in kev]
     important.sort(key=lambda f: (f.vuln_id not in kev, _sev_rank(f.severity), f.team, f.vuln_id))
     s.notable = bool(important)
-    s.lines.append(
-        f"{len(new)} new, {len(gone)} resolved or suppressed since the last "
-        f"{'weekly' if weekly else 'daily'} report; {len(important)} new critical/high/KEV:"
+    s.blocks.append(
+        Para(
+            f"**{len(new)}** new, **{len(gone)}** resolved or suppressed since the last "
+            f"{'weekly' if weekly else 'daily'} report; **{len(important)}** new "
+            "critical/high/KEV."
+        )
     )
-    s.lines += _cut([f.label(f.vuln_id in kev) for f in important]) or ["  none"]
+    if important:
+        _table(
+            s,
+            ["Severity", "CVE", "KEV", "Component", "Project"],
+            [f.row(f.vuln_id in kev) for f in important],
+        )
     if weekly:
         listed = {f.key for f in important}
         rest = Counter(f.team for f in new if f.key not in listed)
-        if rest:
-            s.lines.append(
-                "Other new findings per team: " + ", ".join(f"{t} {n}" for t, n in sorted(rest.items()))
-            )
         resolved = Counter(k.split("|", 1)[0] for k in gone)
-        if resolved:
-            s.lines.append(
-                "Resolved per team: " + ", ".join(f"{t} {n}" for t, n in sorted(resolved.items()))
-            )
-        s.lines.append("Open findings per team:")
         per: dict[str, Counter[str]] = {}
         for f in current.values():
             per.setdefault(f.team, Counter())[f.severity] += 1
-        for team, c in sorted(per.items()):
-            parts = [f"{sev.lower()} {c[sev]}" for sev in SEVERITY_ORDER if c[sev]]
-            s.lines.append(f"  {team:<10} {sum(c.values()):>5}  ({', '.join(parts)})")
+        teams = sorted(set(per) | set(rest) | set(resolved))
+        sevs = [sev for sev in SEVERITY_ORDER if any(c[sev] for c in per.values())]
+        s.blocks.append(Para("Per team:"))
+        s.blocks.append(
+            Table(
+                ["Team", "Open", *(x.lower() for x in sevs), "Other new", "Resolved"],
+                [
+                    [
+                        t,
+                        str(sum(per.get(t, Counter()).values())),
+                        *(str(per.get(t, Counter())[x]) for x in sevs),
+                        str(rest[t]),
+                        str(resolved[t]),
+                    ]
+                    for t in teams
+                ],
+            )
+        )
     return s
 
 
@@ -225,21 +308,24 @@ def machines_section(
 ) -> Section:
     now = time.time() if now is None else now
     s = Section(f"Hosts that stopped pushing (more than {stale_days:g} days)")
+    rows = []
     for m in sorted(machines.hosts.values(), key=lambda m: (m.group, m.name)):
         if not host_scans(m):
             continue
         seen = pushes.get(project_name(m))
         if seen is None:
-            s.lines.append(f"  {m.name:<20} {m.team:<8} never pushed")
+            rows.append([code(m.name), m.team, "never"])
         elif (now - seen) / 86400 > stale_days:
-            s.lines.append(f"  {m.name:<20} {m.team:<8} last push {(now - seen) / 86400:.1f} days ago")
-    s.notable = bool(s.lines)
-    if not s.lines:
-        s.lines.append("None.")
+            rows.append([code(m.name), m.team, f"{(now - seen) / 86400:.1f} days ago"])
+    s.notable = bool(rows)
+    if rows:
+        _table(s, ["Host", "Team", "Last push"], rows)
+    else:
+        s.blocks.append(Para("None."))
     return s
 
 
-# ---- state and output ------------------------------------------------------------------
+# ---- state -----------------------------------------------------------------------------
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -259,13 +345,104 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def render(kind: str, sections: list[Section], now: datetime | None = None) -> str:
+def error_section(title: str, message: str) -> Section:
+    return Section(title, [Para(message)], notable=True, error=True)
+
+
+# ---- output ----------------------------------------------------------------------------
+
+
+def _title(kind: str, now: datetime) -> str:
+    return f"vulnflow {kind} report, {now:%Y-%m-%d %H:%M} UTC"
+
+
+def _md_cell(s: str) -> str:
+    return s.replace("|", "\\|") or " "
+
+
+def render_markdown(kind: str, sections: list[Section], now: datetime | None = None) -> str:
     now = now or datetime.now(UTC)
-    out = [f"vulnflow {kind} report, {now:%Y-%m-%d %H:%M} UTC", ""]
+    out = [f"# {_title(kind, now)}", ""]
     for s in sections:
-        out += [f"== {s.title}{' (ERROR)' if s.error else ''}", *s.lines, ""]
+        out += [f"## {s.title}{' (ERROR)' if s.error else ''}", ""]
+        for b in s.blocks:
+            if isinstance(b, Para):
+                out += [b.text, ""]
+            elif isinstance(b, Items):
+                out += [f"- {i}" for i in b.items] + [""]
+            else:
+                out.append("| " + " | ".join(b.header) + " |")
+                out.append("|" + "|".join(" --- " for _ in b.header) + "|")
+                out += ["| " + " | ".join(_md_cell(c) for c in r) + " |" for r in b.rows]
+                out.append("")
     return "\n".join(out).rstrip() + "\n"
 
 
-def error_section(title: str, message: str) -> Section:
-    return Section(title, [f"  {message}"], notable=True, error=True)
+_CODE = re.compile(r"`([^`]+)`")
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_TD = 'style="border:1px solid #ccc;padding:3px 8px;text-align:left;vertical-align:top"'
+_CODE_STYLE = 'style="font-family:Menlo,Consolas,monospace;font-size:90%"'
+
+
+def _inline(s: str) -> str:
+    """Escape, then turn the two marks this module writes into tags."""
+    t = html.escape(s, quote=False)
+    t = _CODE.sub(lambda m: f"<code {_CODE_STYLE}>{m.group(1)}</code>", t)
+    return _BOLD.sub(r"<strong>\1</strong>", t)
+
+
+def render_html(kind: str, sections: list[Section], now: datetime | None = None) -> str:
+    """The same report as HTML for mail clients: inline styles only (many clients drop
+    <style>), no images, no links out."""
+    now = now or datetime.now(UTC)
+    out = [
+        '<!doctype html><html><head><meta charset="utf-8">',
+        f"<title>{html.escape(_title(kind, now))}</title></head>",
+        '<body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;'
+        'font-size:14px;line-height:1.4;color:#222">',
+        f'<h1 style="font-size:20px">{html.escape(_title(kind, now))}</h1>',
+    ]
+    for s in sections:
+        color = "#b00020" if s.error else "#222"
+        err = " (ERROR)" if s.error else ""
+        out.append(
+            f'<h2 style="font-size:16px;margin-top:20px;color:{color}">{html.escape(s.title)}{err}</h2>'
+        )
+        for b in s.blocks:
+            if isinstance(b, Para):
+                out.append(f"<p>{_inline(b.text)}</p>")
+            elif isinstance(b, Items):
+                out.append("<ul>" + "".join(f"<li>{_inline(i)}</li>" for i in b.items) + "</ul>")
+            else:
+                out.append('<table style="border-collapse:collapse">')
+                out.append(
+                    "<tr>" + "".join(f"<th {_TD}>{html.escape(h)}</th>" for h in b.header) + "</tr>"
+                )
+                for r in b.rows:
+                    out.append("<tr>" + "".join(f"<td {_TD}>{_inline(c)}</td>" for c in r) + "</tr>")
+                out.append("</table>")
+    out.append("</body></html>")
+    return "\n".join(out) + "\n"
+
+
+def subject(kind: str, host: str, sections: list[Section]) -> str:
+    s = f"vulnflow {kind} report ({host})"
+    if any(x.error for x in sections):
+        return s + ": errors"
+    if any(x.notable for x in sections):
+        return s + ": action needed"
+    return s
+
+
+def mime_message(
+    kind: str, sections: list[Section], to: str, host: str, now: datetime | None = None
+) -> EmailMessage:
+    now = now or datetime.now(UTC)
+    msg = EmailMessage()
+    msg["To"] = to
+    msg["Subject"] = subject(kind, host, sections)
+    msg["Date"] = formatdate(now.timestamp(), localtime=True)
+    msg["Message-ID"] = make_msgid("vulnflow")
+    msg.set_content(render_markdown(kind, sections, now))
+    msg.add_alternative(render_html(kind, sections, now), subtype="html")
+    return msg

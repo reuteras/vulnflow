@@ -3850,7 +3850,7 @@ def test_report_findings_baseline_then_new_resolved_and_kev(inv):
         "sysadm|host:web01|openssl|CVE-2026-0001",
     ]
     base = rp.findings_section(None, first, set(), weekly=False)
-    assert "baseline of 3 open findings" in base.lines[0] and not base.notable
+    assert "baseline of 3 open findings" in base.text() and not base.notable
 
     saved = json.loads(json.dumps({k: f.to_json() for k, f in first.items()}))
     # a new package version with the same CVE is not new; curl fixed; two new ones
@@ -3863,24 +3863,39 @@ def test_report_findings_baseline_then_new_resolved_and_kev(inv):
     now = rp.collect_findings(inv, dt, errors)
     daily = rp.findings_section(saved, now, {"CVE-2026-0007"}, weekly=False)
     assert daily.notable
-    text = "\n".join(daily.lines)
-    assert text.startswith(
-        "3 new, 1 resolved or suppressed since the last daily report; 2 new critical/high/KEV:"
+    para, table = daily.blocks
+    assert isinstance(para, rp.Para) and isinstance(table, rp.Table)
+    assert para.text == (
+        "**3** new, **1** resolved or suppressed since the last daily report; "
+        "**2** new critical/high/KEV."
     )
-    # KEV first, then by severity; the LOW one is only counted
-    assert daily.lines[1] == "  MEDIUM   CVE-2026-0007 KEV  grafana 13.3.1  (container:grafana@13.3.1)"
-    assert daily.lines[2] == "  CRITICAL CVE-2026-0006  sudo 1.9  (host:web01@debian-13)"
-    assert "CVE-2026-0005" not in text and "Open findings" not in text
+    # KEV first, then by severity; the LOW one is only counted (weekly)
+    assert table.rows == [
+        ["medium", "`CVE-2026-0007`", "**KEV**", "`grafana` 13.3.1", "`container:grafana@13.3.1`"],
+        ["critical", "`CVE-2026-0006`", "", "`sudo` 1.9", "`host:web01@debian-13`"],
+    ]
 
-    weekly = "\n".join(rp.findings_section(saved, now, set(), weekly=True).lines)
-    assert "Other new findings per team: dev 1, sysadm 1" in weekly
-    assert "Resolved per team: sysadm 1" in weekly
-    assert "  dev            2  (medium 2)" in weekly
-    assert "  sysadm         3  (critical 1, high 1, low 1)" in weekly
+    weekly = rp.findings_section(saved, now, set(), weekly=True)
+    per_team = weekly.blocks[-1]
+    assert isinstance(per_team, rp.Table)
+    assert per_team.header == [
+        "Team",
+        "Open",
+        "critical",
+        "high",
+        "medium",
+        "low",
+        "Other new",
+        "Resolved",
+    ]
+    assert per_team.rows == [
+        ["dev", "2", "0", "0", "2", "0", "1", "0"],
+        ["sysadm", "3", "1", "1", "0", "1", "1", "1"],
+    ]
 
 
 def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
-    from vulnflow.report import alerts_section
+    from vulnflow.report import Para, Table, alerts_section
 
     def line(at, cve, tier, team="sysadm", **kw):
         return json.dumps(
@@ -3890,7 +3905,7 @@ def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
     log_lines = [
         line("2026-11-24T10:00:00Z", "CVE-2021-44228", 1, cvss31=10.0, kev=True, epss=0.97),
         line("2026-11-25T08:00:00Z", "CVE-2026-1111", 2, cvss31=8.1),
-        line("2026-11-25T09:00:00Z", "CVE-2026-1111", 1, cvss31=8.1, kev=True),
+        line("2026-11-25T09:00:00Z", "CVE-2026-1111", 1, cvss31=8.1, kev=True, epss=0.5),
         line("2026-11-25T09:30:00Z", "CVE-2026-2222", 3, cvss31=5.0),
         "not json",
         "",
@@ -3898,13 +3913,15 @@ def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
     sec, newest = alerts_section(log_lines, "2026-11-24T12:00:00Z")
     assert newest == "2026-11-25T09:30:00Z"
     assert sec.notable
-    assert sec.lines == ["  [P1] CVE-2026-1111  team sysadm  CVSS 8.1 KEV"]
+    (table,) = sec.blocks
+    assert isinstance(table, Table)
+    assert table.rows == [["**P1**", "`CVE-2026-1111`", "sysadm", "8.1", "**KEV**", "0.500"]]
     quiet, newest2 = alerts_section(log_lines, newest)
-    assert (quiet.notable, quiet.lines, newest2) == (False, ["None."], newest)
+    assert (quiet.notable, quiet.blocks, newest2) == (False, [Para("None.")], newest)
 
 
 def test_report_machines_and_updates_sections(tmp_path, inv):
-    from vulnflow.report import machines_section, updates_section
+    from vulnflow.report import Items, Para, Table, machines_section, updates_section
     from vulnflow.upstreams import COMPONENTS, Release, Status
 
     mf = tmp_path / "machines.toml"
@@ -3919,9 +3936,11 @@ def test_report_machines_and_updates_sections(tmp_path, inv):
     pushes = {"host:web01": now - 3600, "host:db01": now - 5 * 86400}
     sec = machines_section(machines, pushes, 2, now=now)
     assert sec.notable
-    assert sec.lines == [
-        "  db01                 sysadm   last push 5.0 days ago",
-        "  new01                sysadm   never pushed",
+    assert sec.blocks == [
+        Table(
+            ["Host", "Team", "Last push"],
+            [["`db01`", "sysadm", "5.0 days ago"], ["`new01`", "sysadm", "never"]],
+        )
     ]
 
     from datetime import UTC, datetime
@@ -3933,12 +3952,68 @@ def test_report_machines_and_updates_sections(tmp_path, inv):
         Status(opencve, "v3.1.0", "v3.1.0", None, None),
     ]
     daily = updates_section(statuses, everything=False)
-    assert daily.notable and daily.lines[0] == "DefectDojo: running 3.5.201, pinned 3.5.201"
-    assert not any(line.startswith("OpenCVE") for line in daily.lines)
+    assert daily.notable
+    assert daily.blocks[0] == Para("**DefectDojo**: running 3.5.201, pinned 3.5.201")
+    assert isinstance(daily.blocks[1], Items) and daily.blocks[1].items[0].startswith(
+        "UPDATE 3.5.300 released"
+    )
+    assert "OpenCVE" not in daily.text()
     weekly = updates_section(statuses, everything=True)
-    assert "OpenCVE: running v3.1.0, pinned v3.1.0" in weekly.lines
+    assert Para("**OpenCVE**: running v3.1.0, pinned v3.1.0") in weekly.blocks
     calm = updates_section(statuses[1:], everything=False)
-    assert (calm.notable, calm.lines) == (False, ["Nothing to do."])
+    assert (calm.notable, calm.blocks) == (False, [Para("Nothing to do.")])
+
+
+def test_report_markdown_html_and_mime_render_the_same_sections():
+    from datetime import UTC, datetime
+    from email import message_from_string, policy
+
+    from vulnflow.report import (
+        Items,
+        Para,
+        Section,
+        Table,
+        error_section,
+        mime_message,
+        render_html,
+        render_markdown,
+    )
+
+    now = datetime(2026, 11, 25, 6, 30, tzinfo=UTC)
+    sections = [
+        Section(
+            "Findings <new>",
+            [
+                Para("**2** new"),
+                Table(["CVE", "Component"], [["`CVE-1`", "a|b <script>"], ["`CVE-2`", ""]]),
+                Items(["READY 3.5.300 is pinned"]),
+            ],
+            notable=True,
+        ),
+        error_section("Hosts", "Dependency-Track: refused"),
+    ]
+    md = render_markdown("daily", sections, now)
+    assert md.startswith(
+        "# vulnflow daily report, 2026-11-25 06:30 UTC\n\n## Findings <new>\n\n**2** new\n"
+    )
+    assert "| CVE | Component |\n| --- | --- |\n| `CVE-1` | a\\|b <script> |\n| `CVE-2` |   |" in md
+    assert "- READY 3.5.300 is pinned" in md and "## Hosts (ERROR)" in md
+
+    page = render_html("daily", sections, now)
+    assert "<script>" not in page and "&lt;script&gt;" in page
+    assert "Findings &lt;new&gt;" in page and "<strong>2</strong> new" in page
+    assert ">CVE-1</code>" in page and "<li>READY 3.5.300 is pinned</li>" in page
+
+    msg = mime_message("daily", sections, "ops@example.org", "vulnflow", now)
+    parsed = message_from_string(msg.as_string(), policy=policy.default)
+    assert parsed["To"] == "ops@example.org"
+    assert parsed["Subject"] == "vulnflow daily report (vulnflow): errors"
+    assert parsed.get_content_type() == "multipart/alternative"
+    plain = parsed.get_body(preferencelist=("plain",))
+    rich = parsed.get_body(preferencelist=("html",))
+    assert plain is not None and rich is not None
+    assert plain.get_content() == md
+    assert rich.get_content() == page
 
 
 def test_report_command_saves_state_and_daily_is_quiet_without_news(tmp_path, monkeypatch, capsys):
@@ -3974,12 +4049,23 @@ def test_report_command_saves_state_and_daily_is_quiet_without_news(tmp_path, mo
     fake.findings["p1"].append(_dt_finding("sudo", "1.9", "CVE-2026-0006", "CRITICAL"))
     assert vf.main([*args, "daily", "--alerts", str(alerts), "--quiet", "--no-save"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("vulnflow daily report, ")
-    assert "== Dependency-Track findings\n1 new, 0 resolved" in out
-    assert "CVE-2026-0006" in out
+    assert out.startswith("# vulnflow daily report, ")
+    assert "## Dependency-Track findings\n\n**1** new, **0** resolved" in out
+    assert "`CVE-2026-0006`" in out
     assert len(json.loads(state_file.read_text())["daily"]["findings"]) == 3  # --no-save
+
+    # --mime: a whole message for sendmail -t, subject says action is needed
+    assert vf.main([*args, "daily", "--alerts", str(alerts), "--no-save", "--mime"]) == 2
+    capsys.readouterr()
+    assert (
+        vf.main([*args, "daily", "--alerts", str(alerts), "--quiet", "--mime", "--to", "a@example.org"])
+        == 0
+    )
+    mail = capsys.readouterr().out
+    assert "To: a@example.org\n" in mail and "Subject: vulnflow daily report (" in mail
+    assert ": action needed" in mail and "multipart/alternative" in mail
 
     # a missing alert log (receiver down) is an error in the report, exit 1
     assert vf.main([*args, "weekly", "--alerts", str(tmp_path / "gone.jsonl")]) == 1
     out = capsys.readouterr().out
-    assert "== OpenCVE alerts (ERROR)" in out and "baseline of 4 open findings" in out
+    assert "## OpenCVE alerts (ERROR)" in out and "baseline of 4 open findings" in out

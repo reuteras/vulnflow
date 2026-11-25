@@ -119,6 +119,9 @@ image or package instead).
 Two digests, mailed by the server's own mail setup (`sendmail`: postfix, msmtp-mta,
 nullmailer, whatever already delivers its cron mail). vulnflow holds no SMTP credentials.
 
+Each mail has a Markdown text part and an HTML part with the same tables; mail clients
+show the one they can.
+
 | Report | When | Sent | Contents |
 | --- | --- | --- | --- |
 | daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
