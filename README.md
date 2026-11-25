@@ -19,6 +19,7 @@ A proof of concept for three-layer vulnerability tracking, all self-hosted:
 | [SBOMs](docs/sboms.md) | Feeding SBOMs by hand and from CI, and the push agents on your own servers and laptops |
 | [Daily usage](docs/operations.md) | How alerts and findings reach you, sysadmin and developer tasks, false positives, the routine, email reports, updates |
 | [Teams, tiers and where things live](docs/concepts.md) | How teams map onto the three tools, priority tiers P1-P4, where status and comments are kept |
+| [Exposure and criticality](docs/exposure.md) | Proposal: ranking by exposure (network and untrusted input), criticality and patchability, for large estates with border and citizen services |
 | [Security](docs/security.md) | OPSEC notes, licences, every external server contacted |
 | [Development](docs/development.md) | Tests and checks, what is verified against upstream and what is assumed |
 
