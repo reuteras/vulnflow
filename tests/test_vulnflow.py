@@ -936,7 +936,7 @@ def test_patched_findings_lists_only_recorded_fixes(inv):
 
     t = FakeTransport({"GET /api/v1/": route})
     dt = DependencyTrack("http://dt", "k", transport=t)
-    rows, unknown, _, _, errors = patched_findings(inv, dt)
+    rows, unknown, _, _, _, errors = patched_findings(inv, dt)
     assert errors == []
     assert [(r.team, r.project, r.vuln_id, r.patched) for r in rows] == [
         ("dev", "app", "GHSA-fixed", "2.31.0")
@@ -988,11 +988,13 @@ def test_patched_findings_osv_fallback_is_opt_in(inv):
 
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
 
-    rows, unknown, _, _, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
+    rows, unknown, _, _, _, _ = patched_findings(inv, dt)  # default: nothing leaves the machine
     assert rows == [] and unknown == 1
 
     osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, _, _, errors = patched_findings(inv, dt, osv=OSV("https://osv.test", transport=osv_t))
+    rows, unknown, _, _, _, errors = patched_findings(
+        inv, dt, osv=OSV("https://osv.test", transport=osv_t)
+    )
     assert errors == [] and unknown == 0
     assert [(r.vuln_id, r.patched, r.via) for r in rows] == [("CVE-2024-1", "2.31.0", "osv")]
     method, url, _, body = osv_t.calls[0]
@@ -1022,6 +1024,7 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
         finding("libssl3t64", ssl, "CVE-2024-1"),  # tracker: unimportant
         finding("libssl3t64", ssl, "CVE-2024-2"),  # tracker: open/high
         finding("libssl3t64", ssl, "CVE-2024-3"),  # not in tracker
+        finding("libssl3t64", ssl, "DEBIAN-CVE-2024-2"),  # DT's OSV id for the same CVE
         finding("acl", "pkg:deb/debian/acl@2.3", "CVE-2024-1"),  # no distro: release unknown
         finding("requests", "pkg:pypi/requests@2", "CVE-2024-1"),  # not Debian: ignored
     ]
@@ -1053,6 +1056,7 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
     assert errors == []
     assert [(r.vuln_id, r.urgency, r.status, r.fixed, r.package, r.release) for r in rows] == [
         ("CVE-2024-2", "high", "resolved", "3.5.5-1", "openssl", "trixie"),
+        ("DEBIAN-CVE-2024-2", "high", "resolved", "3.5.5-1", "openssl", "trixie"),
         ("CVE-2024-1", "unimportant", "open", "", "openssl", "trixie"),
     ]
     assert (rows[0].project_uuid, rows[0].component_uuid, rows[0].vuln_uuid) == (
@@ -1066,7 +1070,10 @@ def test_debian_tracker_matches_on_cve_source_package_and_release(inv, tmp_path)
     only, _, _ = debian_findings(inv, dt, tracker, ignorable_only=True)
     assert [r.vuln_id for r in only] == ["CVE-2024-1"]
     forced, _, _ = debian_findings(inv, dt, tracker, release="bookworm")
-    assert [(r.vuln_id, r.urgency) for r in forced] == [("CVE-2024-2", "low")]
+    assert [(r.vuln_id, r.urgency) for r in forced] == [
+        ("CVE-2024-2", "low"),
+        ("DEBIAN-CVE-2024-2", "low"),
+    ]
     assert len(tt.calls) == 1  # one download, then the in-memory index
 
 
@@ -1483,6 +1490,7 @@ def test_disputed_uses_nvd_tags_and_counts_what_nvd_cannot_answer(inv, tmp_path)
     findings = [
         finding("CVE-2018-20225"),  # disputed only in NVD's cveTags, not in DT's description
         finding("CVE-2018-1"),  # rejected
+        finding("DEBIAN-CVE-2018-1"),  # DT's OSV id for the same CVE: looked up as CVE-2018-1
         finding("CVE-2026-99999"),  # newer than the feed
         finding("GHSA-xxxx-yyyy-zzzz"),  # not a CVE: not counted as unchecked
         finding("CVE-2018-5", "** DISPUTED ** old prefix still counts"),
@@ -1518,13 +1526,14 @@ def test_disputed_uses_nvd_tags_and_counts_what_nvd_cannot_answer(inv, tmp_path)
     )
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
     res = disputed_findings(inv, dt, nvd=nvd)
-    assert res.errors == [] and res.checked == 5 and res.unchecked == 1
+    assert res.errors == [] and res.checked == 6 and res.unchecked == 1
     assert [(r.vuln_id, r.marker, r.project_version) for r in res.rows] == [
         ("CVE-2018-1", "REJECT", "1.2"),
+        ("DEBIAN-CVE-2018-1", "REJECT", "1.2"),
         ("CVE-2018-20225", "DISPUTED", "1.2"),
         ("CVE-2018-5", "DISPUTED", "1.2"),
     ]
-    assert res.rows[1].reason == 'CVE-2018-20225 is marked DISPUTED in NVD: "NOTE: intended."'
+    assert res.rows[2].reason == 'CVE-2018-20225 is marked DISPUTED in NVD: "NOTE: intended."'
 
 
 def test_debian_cli_shows_project_version_and_why_debian_has_no_fix(inv, tmp_path, monkeypatch, capsys):
@@ -2128,6 +2137,18 @@ def test_patches_skips_osv_for_unknown_component_versions(inv):
         # built from a commit: sorts before every release, so not sent to OSV either
         finding("github.com/prometheus/prometheus", "v0.0.0-20261105150651-e2e28adeee2c", "CVE-2026-2"),
     ]
+    # a Debian package: left to `vulnflow debian`, neither looked up in DT nor sent to OSV
+    findings.append(
+        {
+            "component": {
+                "name": "curl",
+                "version": "8.14.1-2+deb13u7",
+                "purl": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7?distro=debian-13",
+            },
+            "vulnerability": {"source": "OSV", "vulnId": "DEBIAN-CVE-2026-3", "severity": "HIGH"},
+            "analysis": {},
+        }
+    )
 
     def dt_route(m, url, h, b):
         if "/project/tag/team-dev" in url:
@@ -2155,10 +2176,10 @@ def test_patches_skips_osv_for_unknown_component_versions(inv):
     ]
     dt = DependencyTrack("http://dt", "k", transport=FakeTransport({"GET /api/v1/": dt_route}))
     osv_t = FakeTransport({"POST /v1/query": {"vulns": osv_vulns}})
-    rows, unknown, unversioned, pseudo, errors = patched_findings(
+    rows, unknown, unversioned, pseudo, debian, errors = patched_findings(
         inv, dt, osv=OSV("https://osv.test", transport=osv_t)
     )
-    assert errors == [] and unknown == 0 and unversioned == 2 and pseudo == 1
+    assert errors == [] and unknown == 0 and unversioned == 2 and pseudo == 1 and debian == 1
     assert [(r.vuln_id, r.recommended, r.patched) for r in rows] == [
         ("CVE-2026-1", "9.0.6", "10.2.1, 9.0.6, 3.1.3")
     ]
@@ -3349,6 +3370,17 @@ def test_agent_drops_pypi_copies_of_apt_python_packages():
                 "/opt/app/vendor/idna/METADATA",
             ),
             comp("pkg:pypi/nolocation@1.0"),  # no path: kept
+            # syft 1.57.2 on `dir:/` writes root-relative paths: still apt's copy, dropped
+            comp("pkg:pypi/pyjwt@2.10.1", apt.replace("urllib3-2.3.0", "pyjwt-2.10.1")[1:]),
+            comp(
+                "pkg:pypi/pillow@11.1.0",
+                "./usr/lib/python3/dist-packages/pillow-11.1.0.egg-info/PKG-INFO",
+            ),
+            # relative, but not apt's directory: kept
+            comp(
+                "pkg:pypi/rich@13.0.0",
+                "opt/app/.venv/lib/python3.13/site-packages/rich-13.0.0.dist-info/METADATA",
+            ),
         ]
     }
     kept = [c["purl"] for c in a.no_apt_python_copies([doc])[0]["components"]]
@@ -3358,8 +3390,9 @@ def test_agent_drops_pypi_copies_of_apt_python_packages():
         "pkg:pypi/rich@14.0.0",  # a venv
         "pkg:pypi/idna@3.10",  # also found outside apt's directory
         "pkg:pypi/nolocation@1.0",
+        "pkg:pypi/rich@13.0.0",
     ]
-    assert len(doc["components"]) == 6  # the input is not modified
+    assert len(doc["components"]) == 9  # the input is not modified
 
 
 def test_agent_tracks_only_the_running_kernel():
