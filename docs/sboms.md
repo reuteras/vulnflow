@@ -8,6 +8,7 @@ from CI.
 
 ```bash
 # an application, from CI (GitLab/GitHub/Jenkins); needs syft + jq
+# (Forgejo on the tailnet: see "From Forgejo Actions" below)
 DT_URL=... DT_API_KEY=... PROJECT_NAME=ärendesystem PROJECT_VERSION=2.4.1 \
   TEAM_TAG=team-dev ./scripts/ci-sbom-upload.sh
 
@@ -62,6 +63,46 @@ python3 -m vulnflow upload-sbom --team dev --name myapp --version 1.4.0 \
 Better: do it in CI on every release with [`scripts/ci-sbom-upload.sh`](../scripts/ci-sbom-upload.sh)
 (scans the checkout or image, uses a DT key with only upload permissions), so each released
 version gets its own DT project version.
+
+## From Forgejo Actions
+
+A Forgejo server on the tailnet can push SBOMs straight to Dependency-Track from its runner,
+on every push to `main`, on tags and once a day. Per repository:
+
+1. On the vulnflow server, make the repository its own upload-only key:
+
+   ```bash
+   python3 -m vulnflow ci-key myapp          # team ci-myapp; key in data/ci/myapp/key
+   ```
+
+   The team `ci-<name>` has only `BOM_UPLOAD` and `PROJECT_CREATION_UPLOAD`, like an
+   agent's: the key can create its project and upload SBOMs, and read nothing back.
+   Rerunning keeps a key that still works (`--rotate` for a new one); `ci-revoke myapp`
+   deletes the team and its keys. The command prints the `DT_URL` to use
+   (`VULNFLOW_AGENT_DT_URL` or `DT_PUBLIC_API_URL`, the `tailscale serve` address).
+2. In the repository's settings, under Actions: the secret `DT_API_KEY` (the key file's
+   content), the variable `DT_URL`, and the variable `DT_TEAM` if the owner is not `dev`.
+3. Copy [`deploy/forgejo/sbom.yml`](../deploy/forgejo/sbom.yml) to
+   `.forgejo/workflows/sbom.yml` in the repository. It installs syft (pinned, checksum
+   verified; a `# renovate:` comment for Renovate's `customManagers:githubActionsVersions`
+   preset), scans the checkout and uploads the SBOM as project `<repository>`, version
+   `git describe --tags --always`, tags `team-<team>`, `kind-app` and `ci-forgejo`.
+
+Its first step asks `DT_URL/api/version`. If that fails, the job container can't reach
+Dependency-Track:
+
+- **Tailscale ACL:** the runner's host must reach the vulnflow server on TCP 8180, as the
+  agents do.
+- **DNS:** the job runs in a container on a Docker network, and Docker gives containers
+  the host's upstream resolvers, not the host's own split DNS (systemd-resolved sending
+  `*.ts.net` to Tailscale), so the MagicDNS name may not resolve there. Point the job
+  containers at Tailscale's resolver (`--dns 100.100.100.100` in the runner config's
+  `container.options`) or run them on the host network (`container.network: host`).
+
+The daily run matters: `prune` deactivates the newest version of a `kind-*` project after
+7 days without an upload, so a repository that only uploaded on releases would drop out of
+the lists. Each commit makes a new version; the old ones are retired two days after a
+newer one is uploaded.
 
 ## Own machines (push agents)
 

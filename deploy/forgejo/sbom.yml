@@ -1,0 +1,108 @@
+---
+# Example Forgejo Actions workflow: a CycloneDX SBOM of the repository, uploaded to
+# vulnflow's Dependency-Track over the tailnet. Copy it to .forgejo/workflows/sbom.yml in
+# the project. See docs/sboms.md "From Forgejo Actions".
+#
+# Repository settings > Actions:
+#   secret    DT_API_KEY  content of data/ci/<name>/key (`python3 -m vulnflow ci-key <name>`)
+#   variable  DT_URL      https://<vulnflow-host>.<tailnet>.ts.net:8180 (printed by ci-key)
+#   variable  DT_TEAM     owning team: sysadm, users or dev (default dev)
+#
+# The project is <repository name> in Dependency-Track, version `git describe --tags
+# --always`, tags team-<team>, kind-app and ci-forgejo. The daily run keeps the newest
+# version active: `prune` deactivates the newest version after 7 days without an upload.
+name: sbom
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git describe needs the tags
+          persist-credentials: false
+
+      - name: Check that Dependency-Track is reachable
+        env:
+          DT_URL: ${{ vars.DT_URL }}
+        run: |
+          set -eu
+          if [ -z "${DT_URL}" ]; then
+            echo "::error::set the repository variable DT_URL"
+            exit 1
+          fi
+          if ! curl -fsS --max-time 20 "${DT_URL%/}/api/version"; then
+            echo "::error::${DT_URL} is not reachable from the job container (DNS or ACL, see docs/sboms.md)"
+            exit 1
+          fi
+          echo
+
+      - name: Install syft
+        env:
+          # renovate: datasource=github-releases depName=anchore/syft
+          SYFT_VERSION: v1.57.2
+        run: |
+          set -eu
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64 | arm64) arch=arm64 ;;
+            *) echo "::error::no syft build for $(uname -m)"; exit 1 ;;
+          esac
+          v="${SYFT_VERSION#v}"
+          base="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}"
+          tmp="$(mktemp -d)"
+          cd "${tmp}"
+          curl -fsSLO "${base}/syft_${v}_linux_${arch}.tar.gz"
+          curl -fsSLO "${base}/syft_${v}_checksums.txt"
+          sha256sum --ignore-missing --strict -c "syft_${v}_checksums.txt"
+          tar xzf "syft_${v}_linux_${arch}.tar.gz" syft
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 syft "${HOME}/.local/bin/syft"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Build the SBOM and upload it
+        env:
+          DT_URL: ${{ vars.DT_URL }}
+          DT_API_KEY: ${{ secrets.DT_API_KEY }}
+          DT_TEAM: ${{ vars.DT_TEAM || 'dev' }}
+          PROJECT: ${{ github.event.repository.name }}
+          SYFT_FILE_METADATA_SELECTION: none # packages only, no per-file entries
+        run: |
+          set -eu
+          trap 'rm -f payload.json dt-headers' EXIT
+          version="$(git describe --tags --always)"
+          # The values go into JSON by hand below, so allow only plain names.
+          case "${PROJECT}${version}${DT_TEAM}" in
+            *[!A-Za-z0-9._+-]*) echo "::error::unexpected characters in name, version or team"; exit 1 ;;
+          esac
+          syft scan dir:. -q --source-name "${PROJECT}" --source-version "${version}" \
+            -o cyclonedx-json=sbom.cdx.json
+          {
+            printf '{"projectName":"%s","projectVersion":"%s","autoCreate":true,' \
+              "${PROJECT}" "${version}"
+            printf '"projectTags":[{"name":"team-%s"},{"name":"kind-app"},{"name":"ci-forgejo"}],' \
+              "${DT_TEAM}"
+            printf '"bom":"'
+            base64 -w0 sbom.cdx.json
+            printf '"}'
+          } > payload.json
+          # the key goes to curl in a file, not on its command line
+          umask 077
+          printf 'X-Api-Key: %s\n' "${DT_API_KEY}" > dt-headers
+          curl -fsS -X PUT "${DT_URL%/}/api/v1/bom" \
+            -H @dt-headers -H "Content-Type: application/json" \
+            --data @payload.json
+          echo
+          echo "uploaded ${PROJECT}@${version} (team-${DT_TEAM})"

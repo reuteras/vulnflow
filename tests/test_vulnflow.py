@@ -2980,6 +2980,58 @@ def test_agent_keys_per_host_team_keep_rotate_revoke():
         dt_admin_http("http://dt:8180", "wrong", transport=dt)
 
 
+def test_ci_keys_per_pipeline_team_keep_rotate_revoke():
+    from vulnflow.bootstrap import (
+        DT_AGENT_PERMISSIONS,
+        BootstrapError,
+        agent_key,
+        ci_key,
+        dt_admin_http,
+        revoke_ci,
+    )
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    admin = dt_admin_http("http://dt:8180", TEST_PW, transport=dt)
+    k1, new1 = ci_key(admin, "myapp")
+    assert new1 and dt.keys[k1] == "ci-myapp"
+    assert {p["name"] for p in dt.teams["ci-myapp"]["permissions"]} == set(DT_AGENT_PERMISSIONS)
+    assert ci_key(admin, "myapp", k1) == (k1, False)  # a working key is kept
+    k2, new2 = ci_key(admin, "myapp", k1, rotate=True)
+    assert new2 and k2 != k1 and k1 not in dt.keys
+    agent, _ = agent_key(admin, "myapp")  # a host's key never counts as the pipeline's
+    k3, new3 = ci_key(admin, "myapp", agent)
+    assert new3 and dt.keys[k3] == "ci-myapp" and dt.keys[agent] == "agent-myapp"
+    with pytest.raises(BootstrapError, match="CI name"):
+        ci_key(admin, "../x")
+    assert revoke_ci(admin, "myapp") and "ci-myapp" not in dt.teams and k3 not in dt.keys
+    assert "agent-myapp" in dt.teams  # the host's team is left alone
+    assert not revoke_ci(admin, "myapp")
+
+
+def test_ci_key_cli_writes_a_private_key_file(tmp_path, monkeypatch, capsys):
+    from vulnflow.__main__ import main
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    monkeypatch.setattr("vulnflow.net.urllib_transport", dt)
+    monkeypatch.setenv("DT_URL", "http://dt:8180")
+    monkeypatch.setenv("DT_ADMIN_PASSWORD", TEST_PW)
+    monkeypatch.setenv("VULNFLOW_AGENT_DT_URL", "https://vf.example.ts.net:8180")
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    out = tmp_path / "ci"
+    args = ["--env-file", str(env_file), "ci-key", "myapp", "--out", str(out)]
+    assert main(args) == 0
+    f = out / "myapp" / "key"
+    key = f.read_text().strip()
+    assert dt.keys[key] == "ci-myapp"
+    assert f.stat().st_mode & 0o777 == 0o600 and f.parent.stat().st_mode & 0o777 == 0o700
+    text = capsys.readouterr().out
+    assert key not in text and "DT_URL = https://vf.example.ts.net:8180" in text
+    assert main(args) == 0 and f.read_text().strip() == key  # rerun keeps the key
+    assert main(["--env-file", str(env_file), "ci-revoke", "myapp"]) == 0
+    assert "ci-myapp" not in dt.teams
+
+
 def test_maintenance_key_has_its_own_team_with_only_prune_permissions():
     from vulnflow.bootstrap import (
         DT_MAINTENANCE_PERMISSIONS,

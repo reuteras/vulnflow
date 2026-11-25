@@ -132,7 +132,8 @@ Dependency-Track has seen.
 ### An SBOM per release
 
 Run [`scripts/ci-sbom-upload.sh`](../scripts/ci-sbom-upload.sh) in the release pipeline
-(see [SBOM of an app](sboms.md#sbom-of-an-app)). Each release becomes its own project version
+(see [SBOM of an app](sboms.md#sbom-of-an-app)); for a Forgejo repository, copy the example
+workflow ([From Forgejo Actions](sboms.md#from-forgejo-actions)). Each release becomes its own project version
 in Dependency-Track and its own test in DefectDojo; `prune` retires a version two days after
 a newer one is uploaded and the old one no longer is.
 

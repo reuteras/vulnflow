@@ -365,6 +365,49 @@ def _agent_revoke(a: argparse.Namespace) -> int:
     return 0
 
 
+def _ci_key(a: argparse.Namespace) -> int:
+    """`ci-key`: a DT team ci-<name> per CI pipeline; the key goes to <out>/<name>/key."""
+    from .bootstrap import BootstrapError, ci_key, dt_admin_http
+
+    url = _agent_dt_url()
+    out = Path(a.out)
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+        for name in a.names:
+            f = out / name / "key"
+            old = f.read_text(encoding="utf-8").strip() if f.is_file() else ""
+            key, new = ci_key(admin, name, old, rotate=a.rotate)
+            f.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            f.parent.chmod(0o700)
+            f.touch(mode=0o600, exist_ok=True)
+            f.chmod(0o600)
+            f.write_text(key + "\n", encoding="utf-8")
+            print(f"  {'new ' if new else 'ok  '}  team ci-{name}: key in {f}{' (new)' if new else ''}")
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    print(f"  CI settings: secret DT_API_KEY = the key file's content, variable DT_URL = {url}")
+    return 0
+
+
+def _ci_revoke(a: argparse.Namespace) -> int:
+    from .bootstrap import BootstrapError, dt_admin_http, revoke_ci
+
+    try:
+        admin = dt_admin_http(
+            env("DT_URL", "http://localhost:8180"), env("DT_ADMIN_PASSWORD", required=True)
+        )
+        for name in a.names:
+            gone = revoke_ci(admin, name)
+            print(f"  {'del ' if gone else 'none'}  team ci-{name}{'' if gone else ' (not found)'}")
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _machines(a: argparse.Namespace, inv: Inventory) -> int:
     from .machines import last_pushes, report
 
@@ -754,6 +797,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     ar = sub.add_parser("agent-revoke", help="delete a host's DT team agent-<host> and its keys")
     ar.add_argument("hosts", nargs="+")
+    ck = sub.add_parser(
+        "ci-key",
+        help="per CI pipeline: DT team ci-<name> with an upload-only key (see docs/sboms.md)",
+    )
+    ck.add_argument("names", nargs="+", help="one per repository, e.g. its name")
+    ck.add_argument("--out", default="data/ci", help="directory for <name>/key")
+    ck.add_argument("--rotate", action="store_true", help="new key even if the old one works")
+    cr = sub.add_parser("ci-revoke", help="delete a pipeline's DT team ci-<name> and its keys")
+    cr.add_argument("names", nargs="+")
 
     b = sub.add_parser(
         "dt-bootstrap", help="first-run Dependency-Track setup: admin password, team, API key"
@@ -1218,6 +1270,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "agent-revoke":
         return _agent_revoke(a)
+
+    if a.cmd == "ci-key":
+        return _ci_key(a)
+
+    if a.cmd == "ci-revoke":
+        return _ci_revoke(a)
 
     if a.cmd == "upload-sbom":
         team = inv.teams.get(a.team)
