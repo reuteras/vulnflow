@@ -75,10 +75,11 @@ jobs:
       - name: Build the SBOM and upload it
         env:
           DT_URL: ${{ vars.DT_URL }}
-          DT_API_KEY: ${{ secrets.DT_API_KEY }}
           DT_TEAM: ${{ vars.DT_TEAM || 'dev' }}
           PROJECT: ${{ github.event.repository.name }}
           SYFT_FILE_METADATA_SELECTION: none # packages only, no per-file entries
+          DT_API_KEY: ${{ secrets.DT_API_KEY }}
+        # checkov:skip=CKV_SECRET_6: no secret here, the key comes from secrets.DT_API_KEY
         run: |
           set -eu
           trap 'rm -f payload.json dt-headers' EXIT
