@@ -142,4 +142,7 @@ Daily and weekly email reports (updates, new P1/P2 alerts, new findings, silent 
 set `VULNFLOW_REPORT_TO` and run `./poc.sh schedule install`, see
 [Email reports](docs/operations.md#email-reports).
 
+In a terminal on the server, `./poc.sh tui` shows findings, alerts, hosts and updates and
+can mark findings as false positives or accepted risks.
+
 Details, commands and the monthly routine: [Daily usage](docs/operations.md).

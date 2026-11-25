@@ -18,6 +18,9 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   `CONFIG_FORMAT` must match `AGENT_CONFIG_FORMAT` in `vulnflow/machines.py`, which renders
   the per-host config (`vulnflow agent-bundle`). Each host has its own DT team
   `agent-<host>` with only `BOM_UPLOAD` + `PROJECT_CREATION_UPLOAD`.
+- TUI: `vulnflow tui` (`vulnflow/tui.py`, stdlib `curses`); its screen logic takes any object
+  with curses' window methods so tests drive it with a fake. Marking goes through
+  `triage.apply_ignores` like `ignore`; keep the two writing the same analysis and ledger.
 - Email reports: `vulnflow report daily|weekly` (`vulnflow/report.py`) builds the digest;
   `./poc.sh report` mails it with the host's `sendmail` (no SMTP code or credentials in
   vulnflow) and `./poc.sh schedule` installs the systemd units in `deploy/timers/`.

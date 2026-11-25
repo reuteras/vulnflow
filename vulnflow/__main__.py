@@ -377,6 +377,64 @@ def _machines(a: argparse.Namespace, inv: Inventory) -> int:
     return 1 if stale else 0
 
 
+def _tui(a: argparse.Namespace, inv: Inventory) -> int:
+    """`tui`: findings, alerts, hosts and updates in the terminal; marks findings like
+    `ignore` when DT_ADMIN_PASSWORD is set (see vulnflow/tui.py)."""
+    from . import tui
+    from .bootstrap import dt_admin_http
+    from .intel import KevCache
+    from .machines import last_pushes
+    from .upstreams import check
+    from .upstreams import report as updates_report
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("  error tui needs a terminal", file=sys.stderr)
+        return 2
+    dt_url = env("DT_URL", "http://localhost:8180")
+    dt = DependencyTrack(dt_url, env("DT_API_KEY", required=True))
+    kev: set[str] = set()
+    if env_flag("VULNFLOW_ENRICH_KEV"):
+        try:
+            kev = set(KevCache(Path(a.data_dir)).index())
+        except Exception as e:
+            logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
+    machines = load_machines(a.machines, inv.teams)
+
+    def findings() -> tuple[list[tui.FindingRow], list[str]]:
+        errors: list[str] = []
+        return tui.load_findings(inv, dt, kev, errors), errors
+
+    def hosts(width: int) -> list[str]:
+        try:
+            pushes: dict[str, float] | None = last_pushes(dt)
+        except Exception:
+            pushes = None
+        return tui.host_lines(machines, pushes, width, time.time())
+
+    def updates() -> list[str]:
+        return updates_report(check(Path("."), Path(a.env_file))).splitlines()
+
+    write = None
+    if env("DT_ADMIN_PASSWORD"):
+        write = tui.make_writer(
+            lambda: dt_admin_http(dt_url, env("DT_ADMIN_PASSWORD")),
+            Path(a.data_dir) / "ignored.jsonl",
+        )
+    tui.run(
+        tui.App(
+            tui.Sources(
+                findings=findings,
+                alerts=lambda: tui.read_alerts(a.alerts),
+                hosts=hosts,
+                updates=updates,
+                details=lambda r: tui.finding_details(r, dt),
+                write=write,
+            )
+        )
+    )
+    return 0
+
+
 def _report(a: argparse.Namespace, inv: Inventory) -> int:
     """`report daily|weekly`: the digest poc.sh mails (see vulnflow/report.py)."""
     from . import report as rp
@@ -751,6 +809,14 @@ def main(argv: list[str] | None = None) -> int:
         help="print a whole mail for `sendmail -t` (text/plain Markdown + text/html); needs --to",
     )
     rpt.add_argument("--to", default="", help="recipient(s) for --mime, comma-separated")
+
+    tu = sub.add_parser(
+        "tui",
+        help="terminal UI: findings (filter, details, mark like `ignore`), alerts, hosts, updates",
+    )
+    tu.add_argument(
+        "--alerts", type=Path, default=None, metavar="FILE", help="the receiver's alerts.jsonl"
+    )
 
     sub.add_parser(
         "check-updates",
@@ -1143,6 +1209,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "report":
         return _report(a, inv)
+
+    if a.cmd == "tui":
+        return _tui(a, inv)
 
     if a.cmd == "agent-bundle":
         return _agent_bundle(a, inv)
