@@ -83,6 +83,10 @@ DT_MAINTENANCE_PERMISSIONS = (
     "PORTFOLIO_MANAGEMENT",
 )
 DT_AGENT_TEAM_PREFIX = "agent-"
+# A CI pipeline (one repository) uploads with the same two permissions as an agent, in its own
+# team ci-<name>, so one leaked CI secret can be revoked without touching the others.
+DT_CI_TEAM_PREFIX = "ci-"
+CI_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 # DT's login/forceChangePassword are @Produces(TEXT_PLAIN): Accept: application/json -> 406
 FORM = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
@@ -342,13 +346,31 @@ def maintenance_key(admin: Http, existing_key: str = "") -> tuple[str, bool]:
     return team_key(admin, DT_MAINTENANCE_TEAM, DT_MAINTENANCE_PERMISSIONS, existing_key)
 
 
-def revoke_agent(admin: Http, host: str) -> bool:
-    """Delete team agent-<host> and with it every API key of that host. False if absent."""
-    team = _find_team(admin, DT_AGENT_TEAM_PREFIX + host)
+def ci_key(admin: Http, name: str, existing_key: str = "", *, rotate: bool = False) -> tuple[str, bool]:
+    """(API key, new?) for a CI pipeline: its own team ci-<name> with only
+    DT_AGENT_PERMISSIONS (upload an SBOM, create its project; read nothing back)."""
+    if not CI_NAME_RE.fullmatch(name):
+        raise BootstrapError(f"CI name {name!r}: use letters, digits, '.', '_' and '-'")
+    return team_key(admin, DT_CI_TEAM_PREFIX + name, DT_AGENT_PERMISSIONS, existing_key, rotate=rotate)
+
+
+def revoke_team(admin: Http, name: str) -> bool:
+    """Delete a team and with it every API key it holds. False if absent."""
+    team = _find_team(admin, name)
     if team is None:
         return False
     admin.request("DELETE", "api/v1/team", json_body={"uuid": team["uuid"]})
     return True
+
+
+def revoke_agent(admin: Http, host: str) -> bool:
+    """Delete team agent-<host> and with it every API key of that host. False if absent."""
+    return revoke_team(admin, DT_AGENT_TEAM_PREFIX + host)
+
+
+def revoke_ci(admin: Http, name: str) -> bool:
+    """Delete team ci-<name> and its keys. False if absent."""
+    return revoke_team(admin, DT_CI_TEAM_PREFIX + name)
 
 
 def agent_teams(admin: Http) -> list[str]:

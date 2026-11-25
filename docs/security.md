@@ -10,7 +10,8 @@
 - **Your host list stays out of git.** `machines.toml` (hosts, groups, code paths) is
   gitignored and dockerignored like `.env`, and isn't mounted into the glue containers.
   Agent bundles in `data/agents/` hold one upload-only DT key per host (files 600); revoke a
-  host with `python3 -m vulnflow agent-revoke <host>`.
+  host with `python3 -m vulnflow agent-revoke <host>`. CI pipelines get the same kind of key
+  per repository in `data/ci/` (`ci-key`; `ci-revoke <name>`).
 - **Enrichment leaks interest, not exposure.** The receiver sends only CVE IDs to CISA (KEV
   file download), FIRST (EPSS) and CIRCL (sightings). You can turn each one off with
   `VULNFLOW_ENRICH_*=0`. For an isolated network, mirror the KEV and EPSS files internally and
