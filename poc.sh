@@ -241,6 +241,29 @@ opencve_pin_celery() {
   log "OpenCVE: pinned $OPENCVE_CELERY_PINS in the scheduler image (opencve/opencve#810)"
 }
 
+# OpenCVE v3.1.0 pins django==5.2.11, which has 40 open findings (1 critical, 8 high) fixed
+# in later 5.2 LTS patch releases. The webserver image also takes requirements.txt from a
+# git clone made during the build, and pip refuses a second, conflicting == pin, so patch
+# the local Dockerfile to upgrade Django in a second pip install after upstream's. Skipped
+# once upstream's requirements.txt pins this version or newer.
+OPENCVE_DJANGO_PIN="5.2.19"
+opencve_pin_django() {
+  local df="$UP/opencve/web/Dockerfile" req="$UP/opencve/web/requirements.txt" up
+  local line='python3 -m pip install -r opencve/web/requirements.txt'
+  up="$(sed -nE 's/^django(\[[^]]*\])?==([0-9.]+)$/\2/p' "$req")"
+  [[ -n "$up" ]] || die "OpenCVE web/requirements.txt no longer pins django; update opencve_pin_django in poc.sh"
+  if [[ "$(printf '%s\n' "$up" "$OPENCVE_DJANGO_PIN" | sort -V | tail -n 1)" == "$up" ]]; then
+    log "OpenCVE: upstream pins django $up; no build patch needed (drop opencve_pin_django)"
+    return
+  fi
+  grep -qF "$line && python3 -m pip install django==$OPENCVE_DJANGO_PIN" "$df" && return
+  grep -q "^RUN $line\$" "$df" \
+    || die "OpenCVE web/Dockerfile changed; update opencve_pin_django in poc.sh"
+  sed -i.bak "s#^RUN $line\$#& \\&\\& python3 -m pip install django==$OPENCVE_DJANGO_PIN#" "$df"
+  rm -f "$df.bak"
+  log "OpenCVE: django $up -> $OPENCVE_DJANGO_PIN in the webserver image"
+}
+
 # Upstream defaults that are the same in every OpenCVE install. Values in docker/.env win
 # over airflow.cfg (AIRFLOW__SECTION__KEY). On an existing install a new Fernet key makes
 # the stored Airflow connections undecryptable; opencve_reset_airflow_connections (run by
@@ -276,9 +299,10 @@ cmd_opencve_prepare() {
   mkdir -p "$UP"
   # Undo our build patch first so a ref change doesn't trip over a modified file
   [[ -d "$UP/opencve/.git" ]] \
-    && git -c "safe.directory=$UP/opencve" -C "$UP/opencve" checkout --quiet -- scheduler/Dockerfile
+    && git -c "safe.directory=$UP/opencve" -C "$UP/opencve" checkout --quiet -- scheduler/Dockerfile web/Dockerfile
   clone_or_update https://github.com/opencve/opencve.git "$UP/opencve" "${OPENCVE_REF:-}"
   opencve_pin_celery
+  opencve_pin_django
   # shellcheck disable=SC2046
   (cd "$UP/opencve/docker" && ./install.sh $(opencve_args) prepare)
 
