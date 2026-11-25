@@ -109,10 +109,37 @@ image or package instead).
 
 | When | What |
 | --- | --- |
-| Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the server's nightly update runs `check-updates` |
+| Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the [email reports](#email-reports) arrive daily (when something needs action) and every Monday |
 | Weekly | Steps 1-2 of [Clearing known-OK findings](#clearing-known-ok-findings). `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
 | After an image update | Nothing: decisions carry over to the new tag, and the old tag is retired at the first `dt2dojo` round after the host's next agent run (2 days after its last upload if the host has no `host:` project). `python3 -m vulnflow prune` shows what the next round will do |
 | Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: anything new to accept (step 4) or that Debian has fixed since? `sync --dry-run`: teams without SBOMs |
+
+## Email reports
+
+Two digests, mailed by the server's own mail setup (`sendmail`: postfix, msmtp-mta,
+nullmailer, whatever already delivers its cron mail). vulnflow holds no SMTP credentials.
+
+| Report | When | Sent | Contents |
+| --- | --- | --- | --- |
+| daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
+| weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, every upstream version |
+
+Set the recipient and install the timers once, as the user that runs `./poc.sh`:
+
+```bash
+python3 -m vulnflow env-set <<<'VULNFLOW_REPORT_TO=you@example.org'
+./poc.sh schedule install    # systemd timers from deploy/timers/ (sudo); remove | status
+./poc.sh report weekly       # send one now
+```
+
+"New" is since the last report of the same kind, so the weekly covers the whole week. The
+first run of each kind records a baseline and lists no changes. A finding is the same finding
+on a new image tag or package version, so an upgrade that keeps a CVE does not report it
+again; findings that were suppressed (`ignore`) count as resolved. The state is in
+`data/report-state.json`. `python3 -m vulnflow report daily --no-save` previews a report
+without recording it, and without `VULNFLOW_REPORT_TO` `./poc.sh report` prints instead of
+mailing. The daily report includes `check-updates`, so a separate nightly `check-updates` is
+no longer needed.
 
 ## Look up a CVE
 

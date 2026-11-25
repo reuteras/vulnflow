@@ -26,6 +26,8 @@
 #   check-updates     newer upstream releases (7-day cooldown) and pinned versions not deployed
 #   upgrade C [V] [--now]  back up C's database, then deploy C (dojo|opencve|dtrack) at the
 #                     version pinned in the repo, or at V (--now: V is not the reviewed pin)
+#   report K          K = daily|weekly digest, mailed to VULNFLOW_REPORT_TO with sendmail
+#   schedule A        A = install|remove|status: systemd timers for the daily/weekly reports
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -775,6 +777,75 @@ cmd_check_updates() {
   vulnflow check-updates
 }
 
+# Digest from `vulnflow report` (vulnflow/report.py), mailed with the host's own sendmail
+# (postfix, msmtp-mta, nullmailer...). daily: only when something needs action; weekly:
+# always. VULNFLOW_REPORT_TO empty: printed instead (the journal, under the timer).
+cmd_report() {
+  local kind="${1:-}" alerts out rc=0 quiet="" subject
+  [[ "$kind" == daily || "$kind" == weekly ]] || die "usage: ./poc.sh report daily|weekly"
+  load_env
+  [[ "$kind" == daily ]] && quiet=1
+  if [[ -n "${VULNFLOW_REPORT_TO:-}" ]] && ! command -v sendmail >/dev/null; then
+    die "no sendmail: install a mail transfer agent (postfix, msmtp-mta, nullmailer) or empty VULNFLOW_REPORT_TO"
+  fi
+  # The receiver's alert log lives in its volume. A stopped receiver leaves no file, which
+  # the report shows as an error; no alerts yet is an empty file.
+  alerts="$(mktemp)"
+  if ! glue_compose exec -T receiver sh -c 'cat /app/data/alerts.jsonl 2>/dev/null || true' \
+    >"$alerts" 2>/dev/null; then
+    rm -f "$alerts"
+  fi
+  out="$(vulnflow report "$kind" --alerts "$alerts" ${quiet:+--quiet})" || rc=$?
+  rm -f "$alerts"
+  [[ -n "$out" ]] || return "$rc"
+  if [[ -z "${VULNFLOW_REPORT_TO:-}" ]]; then
+    printf '%s\n' "$out"
+    return "$rc"
+  fi
+  subject="vulnflow $kind report ($(hostname -s))"
+  [[ $rc -eq 0 ]] || subject="$subject: errors"
+  {
+    printf 'To: %s\nSubject: %s\nContent-Type: text/plain; charset=utf-8\n\n' \
+      "$VULNFLOW_REPORT_TO" "$subject"
+    printf '%s\n' "$out"
+  } | sendmail -t -oi
+  log "$kind report mailed to $VULNFLOW_REPORT_TO"
+  return "$rc"
+}
+
+# systemd timers for the reports (deploy/timers/; @ROOT@ and @USER@ filled in on install).
+# The service runs as the user calling this, who needs docker access like for ./poc.sh.
+REPORT_UNITS=(vulnflow-report@.service vulnflow-report-daily.timer vulnflow-report-weekly.timer)
+REPORT_TIMERS=(vulnflow-report-daily.timer vulnflow-report-weekly.timer)
+cmd_schedule() {
+  local u
+  command -v systemctl >/dev/null || die "systemctl not found: the timers need systemd"
+  case "${1:-status}" in
+    install)
+      load_env
+      [[ -n "${VULNFLOW_REPORT_TO:-}" ]] ||
+        warn "VULNFLOW_REPORT_TO is empty in .env: reports only go to the journal"
+      command -v sendmail >/dev/null ||
+        warn "no sendmail: install a mail transfer agent (postfix, msmtp-mta, nullmailer)"
+      for u in "${REPORT_UNITS[@]}"; do
+        sed -e "s|@ROOT@|$ROOT|g" -e "s|@USER@|$(id -un)|g" "deploy/timers/$u" |
+          sudo tee "/etc/systemd/system/$u" >/dev/null
+      done
+      sudo systemctl daemon-reload
+      sudo systemctl enable --now "${REPORT_TIMERS[@]}"
+      log "Timers installed; first run records a baseline. Try one now: ./poc.sh report weekly"
+      ;;
+    remove)
+      sudo systemctl disable --now "${REPORT_TIMERS[@]}" 2>/dev/null || true
+      for u in "${REPORT_UNITS[@]}"; do sudo rm -f "/etc/systemd/system/$u"; done
+      sudo systemctl daemon-reload
+      log "Report timers removed"
+      ;;
+    status) systemctl list-timers --all 'vulnflow-report-*' ;;
+    *) die "usage: ./poc.sh schedule install|remove|status" ;;
+  esac
+}
+
 # Upgrade one stack: database dump first, then the same steps as setup, which are safe to
 # rerun. dojo/opencve: version = DD_REF/OPENCVE_REF in .env.example (reviewed in the repo,
 # AGENTS.md "Bootstrap invariants"), or an explicit one with --now. dtrack: the image tags in
@@ -884,6 +955,8 @@ case "${1:-}" in
     ;;
   status) cmd_status ;;
   check-updates) cmd_check_updates ;;
+  report) cmd_report "${2:-}" ;;
+  schedule) cmd_schedule "${2:-}" ;;
   upgrade)
     shift
     cmd_upgrade "$@"
@@ -892,7 +965,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,28p' "$0"
+    sed -n '2,30p' "$0"
     exit 1
     ;;
 esac

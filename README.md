@@ -16,7 +16,7 @@ A proof of concept for three-layer vulnerability tracking, all self-hosted:
 | This README | What it is, install, basic run, daily usage in short |
 | [Installation](docs/install.md) | The setup steps one by one, what the bootstraps do, first steps: reaching the UIs, OSV, describing what you run, syft |
 | [SBOMs](docs/sboms.md) | Feeding SBOMs by hand and from CI, and the push agents on your own servers and laptops |
-| [Daily usage](docs/operations.md) | Results, the alert smoke test, clearing known-OK findings, the recommended routine, updates and upgrades |
+| [Daily usage](docs/operations.md) | Results, the alert smoke test, clearing known-OK findings, the recommended routine, email reports, updates and upgrades |
 | [Teams, tiers and where things live](docs/concepts.md) | How teams map onto the three tools, priority tiers P1-P4, where status and comments are kept |
 | [Security](docs/security.md) | OPSEC notes, licences, every external server contacted |
 | [Development](docs/development.md) | Tests and checks, what is verified against upstream and what is assumed |
@@ -136,5 +136,9 @@ Mostly automatic: agents upload SBOMs daily, `dt2dojo` copies findings to Defect
 - **Dev:** upload an SBOM per release from CI; triage the app's findings in DefectDojo.
 - **Weekly:** clear known-OK findings (`debian`, `disputed`, `ignore`) and check for hosts
   that stopped pushing (`python3 -m vulnflow machines`).
+
+Daily and weekly email reports (updates, new P1/P2 alerts, new findings, silent hosts):
+set `VULNFLOW_REPORT_TO` and run `./poc.sh schedule install`, see
+[Email reports](docs/operations.md#email-reports).
 
 Details, commands and the monthly routine: [Daily usage](docs/operations.md).

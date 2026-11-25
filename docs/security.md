@@ -62,7 +62,7 @@ connects in.
 | `registry.defectdojo.com` | DefectDojo `django` and `nginx` images | `setup`, `upgrade` |
 | Docker Hub | `postgres`, `valkey`, `nginx`, `redis/redis-stack`, the Airflow base image, `python` (glue and OpenCVE web images) | `setup`, `upgrade` |
 | PyPI | Python packages for OpenCVE's locally built images (vulnflow itself has no runtime dependencies) | OpenCVE build |
-| `api.github.com` | Newest releases of DefectDojo, OpenCVE, Dependency-Track and Valkey (anonymous, four requests per run; sends nothing about you) | `./poc.sh check-updates` (nightly) |
+| `api.github.com` | Newest releases of DefectDojo, OpenCVE, Dependency-Track and Valkey (anonymous, four requests per run; sends nothing about you) | `./poc.sh check-updates`, the email reports |
 
 ### Vulnerability data, while running
 
@@ -72,7 +72,7 @@ connects in.
 | `storage.googleapis.com/osv-vulnerabilities` | Dependency-Track's OSV mirror, for `DT_OSV_ECOSYSTEMS` | nothing about you: it downloads per-ecosystem archives | `DT_OSV_ECOSYSTEMS=` empty before bootstrap, or DT UI |
 | GitHub Advisories | Dependency-Track, only if you enable it with a GitHub token ([OSV in Dependency-Track](install.md#2-osv-in-dependency-track)) | the token | off by default |
 | `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
-| `www.cisa.gov` | receiver enrichment: CISA KEV list (cached 6 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
+| `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
 | your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`) | the alert text: CVE, tier, team, links | leave it empty |
@@ -82,7 +82,7 @@ The `enrich` command uses the same three enrichment sources as the receiver.
 
 ### On-demand triage commands
 
-These run only when you start them; nothing is scheduled. `ignore`/`unignore` only talk to
+These run only when you start them; the email reports do not run them. `ignore`/`unignore` only talk to
 Dependency-Track.
 
 | Command | Server | What leaves the machine |
