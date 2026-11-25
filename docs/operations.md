@@ -61,6 +61,7 @@ The same data without a browser, on the server (over ssh):
 | `j`/`k`, arrows, PgUp/PgDn | move |
 | `/`, `t`, `s` | filter findings by text (CVE, component, project), team, minimum severity |
 | Enter | the finding: project, component, purl, description, KEV, where on disk |
+| `J`/`K` (in the finding) | the next / previous finding in the current list; the list cursor follows |
 | space | select several findings |
 | `m` | mark the selected (or current) findings: Not Affected with a justification, False Positive, or an accepted risk with a review date; asks for a reason and a `y` first |
 | `r`, `q` | reload, quit |
