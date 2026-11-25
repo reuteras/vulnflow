@@ -42,7 +42,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-from .net import Http, Transport, multipart
+from .net import Http, HttpError, Transport, multipart
 
 log = logging.getLogger(__name__)
 
@@ -250,8 +250,20 @@ class DependencyTrack:
 
     def set_active(self, project_uuid: str, active: bool) -> None:
         """PATCH /api/v1/project/{uuid} {"active": ...}; needs PORTFOLIO_MANAGEMENT
-        (ProjectResource.patchProject, DT 5.2.2)."""
-        self.http.request("PATCH", f"api/v1/project/{project_uuid}", json_body={"active": active})
+        (ProjectResource.patchProject, DT 5.2.2).
+
+        DT 5.2.2 answered 304 Not Modified to seven of eight deactivations on 2026-11-25
+        while its log said "updated" and every one was inactive afterwards. A 304 is
+        therefore checked by reading the project back."""
+        path = f"api/v1/project/{project_uuid}"
+        r = self.http.request("PATCH", path, json_body={"active": active}, expect_ok=False)
+        if r.ok:
+            return
+        if r.status == 304:
+            p = self.http.get(path).json() or {}
+            if bool(p.get("active", p.get("inactiveSince") is None)) == active:
+                return
+        raise HttpError("PATCH", self.http.url(path), r)
 
     def export_fpf(self, project_uuid: str) -> bytes:
         return self.http.get(f"api/v1/finding/project/{project_uuid}/export").body
