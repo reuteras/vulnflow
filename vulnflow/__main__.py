@@ -533,7 +533,8 @@ def main(argv: list[str] | None = None) -> int:
     ig.add_argument(
         "--overwrite",
         action="store_true",
-        help="also replace a finding somebody already triaged (default: leave those alone)",
+        help="also replace a finding somebody already triaged, or correct the justification/response "
+        "of one already suppressed in this state (default: leave those alone)",
     )
 
     ui = sub.add_parser(

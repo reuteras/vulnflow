@@ -1143,6 +1143,52 @@ def test_ignore_writes_reviewed_findings_to_dt_once(tmp_path):
         load_review(f)
 
 
+def test_ignore_overwrite_corrects_justification_of_a_suppressed_finding(tmp_path):
+    from vulnflow.net import Http
+    from vulnflow.triage import IgnoreItem, apply_ignores
+
+    it = IgnoreItem("dev", "app", "P1", "stdlib", "go1.24.4", "C1", "CVE-2025-47906", "V1", "c")
+    cur = {
+        "analysisState": "NOT_AFFECTED",
+        "analysisJustification": "CODE_NOT_REACHABLE",
+        "isSuppressed": True,
+    }
+
+    def run(justification, overwrite):
+        t = FakeTransport(
+            {
+                "GET /api/v1/analysis": lambda m, u, h, b: Response(200, json.dumps(cur).encode(), {}),
+                "PUT /api/v1/analysis": {},
+            }
+        )
+        ledger = tmp_path / "ledger.jsonl"
+        res = apply_ignores(
+            Http("http://dt", transport=t),
+            [it],
+            "NOT_AFFECTED",
+            justification,
+            overwrite=overwrite,
+            ledger=ledger,
+        )
+        return res, [json.loads(c[3]) for c in t.calls if c[0] == "PUT"], ledger
+
+    # without --overwrite a suppressed finding in that state counts as done, as before
+    (written, skipped, _, errs), puts, _ = run("REQUIRES_ENVIRONMENT", False)
+    assert (written, [i.vuln_id for i in skipped], puts, errs) == ([], ["CVE-2025-47906"], [], [])
+    # the same justification is a no-op even with --overwrite (no duplicate comment)
+    (written, skipped, _, _), puts, _ = run("CODE_NOT_REACHABLE", True)
+    assert (written, len(skipped), puts) == ([], 1, [])
+    # --overwrite with a different justification rewrites it and records the old one
+    (written, skipped, _, errs), puts, ledger = run("REQUIRES_ENVIRONMENT", True)
+    assert (len(written), skipped, errs) == (1, [], [])
+    assert puts[0]["analysisJustification"] == "REQUIRES_ENVIRONMENT" and puts[0]["isSuppressed"] is True
+    entry = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert (entry["previous_state"], entry["previous_justification"]) == (
+        "NOT_AFFECTED",
+        "CODE_NOT_REACHABLE",
+    )
+
+
 def test_disputed_marker_must_lead_the_description():
     from vulnflow.disputed import disputed_marker
 

@@ -46,6 +46,14 @@ ACCEPT_RESPONSES = ("WILL_NOT_FIX", "CAN_NOT_FIX")
 # "review by 2027-03-01" in the comment: `prune` lifts the suppression after that day
 REVIEW_BY = re.compile(r"\breview by (\d{4}-\d{2}-\d{2})\b")
 UNSET = ("", "NOT_SET")
+
+
+def _set(value: Any) -> str | None:
+    """A DT analysis field, with its unset spellings as None."""
+    v = str(value or "")
+    return None if v in UNSET else v
+
+
 MARKER = "via vulnflow"  # ends every comment `ignore` writes
 REQUIRED = (
     "team",
@@ -194,8 +202,10 @@ def apply_ignores(
 ) -> tuple[list[IgnoreItem], list[IgnoreItem], list[Kept], list[str]]:
     """(written, already in that state, kept because somebody already triaged them, errors).
     Rewriting an identical analysis would only add a duplicate comment, so those are left
-    alone; a different existing analysis is left alone too unless `overwrite`. Each write
-    goes to the ledger together with the analysis it replaced."""
+    alone; a different existing analysis is left alone too unless `overwrite`. With
+    `overwrite`, a finding already suppressed in `state` is rewritten when its
+    justification or response differs (correcting a reason); without it, it counts as
+    done. Each write goes to the ledger together with the analysis it replaced."""
     if state not in STATES:
         raise ValueError(f"state must be one of {STATES}")
     if state == "EXPLOITABLE" and response not in ACCEPT_RESPONSES:
@@ -209,8 +219,12 @@ def apply_ignores(
             cur = current_analysis(http, it.project_uuid, it.component_uuid, it.vuln_uuid)
             cur_state = str(cur.get("analysisState") or "")
             if cur_state == state and cur.get("isSuppressed"):
-                skipped.append(it)
-                continue
+                same = (
+                    justification is None or _set(cur.get("analysisJustification")) == justification
+                ) and (response is None or _set(cur.get("analysisResponse")) == response)
+                if same or not overwrite:
+                    skipped.append(it)
+                    continue
             if cur_state not in (*UNSET, state) and not overwrite:
                 kept.append(Kept(it, cur_state))
                 continue
@@ -230,6 +244,7 @@ def apply_ignores(
                         "state": state,
                         "previous_state": cur_state or "NOT_SET",
                         "previous_suppressed": bool(cur.get("isSuppressed")),
+                        "previous_justification": _set(cur.get("analysisJustification")) or "NOT_SET",
                     },
                 )
         except Exception as e:
