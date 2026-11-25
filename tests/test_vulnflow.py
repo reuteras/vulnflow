@@ -4322,6 +4322,44 @@ def test_tui_marks_a_finding_false_positive_with_confirmation(inv, tmp_path):
     assert app.status.startswith("read-only")
 
 
+def test_tui_details_step_with_J_and_K(inv):
+    from datetime import date
+
+    from vulnflow import tui
+
+    dt = DependencyTrack("http://dt", "k", transport=_report_portfolio())
+    shown: list[str] = []
+
+    def details(r):
+        shown.append(r.vuln_id)
+        return tui.finding_details(r, None)
+
+    app = tui.App(
+        tui.Sources(
+            findings=lambda: (tui.load_findings(inv, dt, {"CVE-2026-0004"}, []), []),
+            alerts=lambda: [],
+            hosts=lambda w: [],
+            updates=lambda: [],
+            details=details,
+            write=None,
+        ),
+        today=date(2026, 11, 25),
+    )
+    app.reload()
+    # open the first finding, J twice (the last J is the end of the list: stays), K back, close
+    scr = FakeScreen([10, "J", "J", "J", "K", "q"])
+    app.draw(scr)
+    assert app.handle(scr, scr.getch())
+    assert shown == [
+        "CVE-2026-0004",
+        "CVE-2026-0001",
+        "CVE-2026-0002",
+        "CVE-2026-0002",
+        "CVE-2026-0001",
+    ]
+    assert app.pos == 1  # the list cursor follows, so closing leaves it on the last viewed one
+
+
 def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
     from vulnflow import tui
 

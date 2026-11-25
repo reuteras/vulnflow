@@ -55,7 +55,8 @@ TABS = ("Findings", "Alerts", "Hosts", "Updates")
 ESC = 27
 ENTER_KEYS = (10, 13, curses.KEY_ENTER)
 HELP = (
-    "1-4 tabs  j/k move  / text  t team  s severity  space select  Enter show  m mark  r reload  q quit"
+    "1-4 tabs  j/k move  / text  t team  s severity  space select  "
+    "Enter show (J/K next/prev)  m mark  r reload  q quit"
 )
 
 
@@ -377,11 +378,23 @@ class App:
                 self.selected ^= {r.key}
                 self.pos += 1
         elif k in ENTER_KEYS:
-            r = self.current()
-            if r:
-                pager(scr, f"{r.vuln_id} in {r.component} {r.version}", self.src.details(r))
+            self._view(scr)
         elif k == ord("m"):
             self._mark(scr)
+
+    def _view(self, scr: Screen) -> None:
+        """Details of the current finding; J/K step to the next/previous one in the list."""
+        while (r := self.current()) is not None:
+            k = pager(scr, f"{r.vuln_id} in {r.component} {r.version}", self.src.details(r))
+            n = len(self.visible())
+            if k == ord("J") and self.pos < n - 1:
+                self.pos += 1
+            elif k == ord("K") and self.pos > 0:
+                self.pos -= 1
+            elif k in (ord("J"), ord("K")):
+                continue  # already at the end of the list
+            else:
+                return
 
     def _mark(self, scr: Screen) -> None:
         if self.src.write is None:
@@ -491,7 +504,8 @@ def ask_decision(scr: Screen, n: int, today: date) -> Decision | None:
 
 def pager(scr: Screen, title: str, lines: list[str], confirm: bool = False) -> int:
     """Show lines (wrapped) until a key: with confirm, any key returns it; otherwise
-    j/k/space scroll and q, Esc or Enter close."""
+    j/k/space scroll, q, Esc or Enter close, and J/K are returned so the caller can
+    move to the next/previous item."""
     top = 0
     while True:
         scr.erase()
@@ -501,12 +515,12 @@ def pager(scr: Screen, title: str, lines: list[str], confirm: bool = False) -> i
         for i, line in enumerate(wrapped[top : top + h - 3]):
             _put(scr, 2 + i, line, w)
         if not confirm:
-            _put(scr, h - 1, "j/k/space scroll, q/Enter close", w, curses.A_BOLD)
+            _put(scr, h - 1, "j/k/space scroll, J/K next/prev finding, q/Enter close", w, curses.A_BOLD)
         scr.refresh()
         k = scr.getch()
         if confirm:
             return k
-        if k in (ord("q"), ESC, *ENTER_KEYS):
+        if k in (ord("q"), ord("J"), ord("K"), ESC, *ENTER_KEYS):
             return k
         if k in (ord("j"), curses.KEY_DOWN):
             top = min(top + 1, max(0, len(wrapped) - 1))
