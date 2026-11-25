@@ -33,7 +33,8 @@ hand against the tracker for 17 rows of 5 packages on bookworm and trixie (2026-
 including epochs, `~debNNuN` and `+debNNuN`. Not yet seen on real findings: fixed_version
 "0" and a purl `upstream=` that carries a version.
 
-The tracker is keyed by *source* package. A finding is matched on its CVE id plus the
+The tracker is keyed by *source* package. A finding is matched on its CVE id (DT's OSV
+source names it DEBIAN-CVE-YYYY-N; the row keeps that id) plus the
 component's own deb name or the `upstream=` source name in its purl (syft writes it), and the
 release comes from the purl's `distro=debian-13` (or --release). No match means no answer,
 never a guess.
@@ -53,7 +54,7 @@ from . import debver
 from .clients import DependencyTrack
 from .config import Inventory
 from .net import Http, Transport
-from .patches import open_findings
+from .patches import cve_id, open_findings
 
 log = logging.getLogger(__name__)
 
@@ -220,10 +221,11 @@ def debian_findings(
         vid = str(v.get("vulnId") or "")
         c: dict[str, Any] = f.get("component") or {}
         parsed = parse_deb_purl(str(c.get("purl") or ""))
-        if not vid.startswith("CVE-") or parsed is None:
+        cve = cve_id(vid)
+        if not cve or parsed is None:
             continue
         names, purl_release = parsed
-        info = tracker.lookup(vid, names, release or purl_release) if (release or purl_release) else None
+        info = tracker.lookup(cve, names, release or purl_release) if (release or purl_release) else None
         if info is None:
             unmatched += 1
             continue

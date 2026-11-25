@@ -713,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        rows, unknown, unversioned, pseudo, errors = patched_findings(
+        rows, unknown, unversioned, pseudo, debian, errors = patched_findings(
             inv, dt, a.team, osv=OSV() if a.osv else None
         )
         if a.json:
@@ -738,6 +738,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"; {pseudo} skipped: Go pseudo-version (built from a commit, so every advisory "
                 "matches; check the commit date in the version instead)"
                 if pseudo
+                else ""
+            )
+            + (
+                f"; {debian} on Debian packages left out: the fix depends on the release, "
+                "see `vulnflow debian`"
+                if debian
                 else ""
             ),
             file=sys.stderr,

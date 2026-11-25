@@ -49,7 +49,7 @@ from typing import Any
 from .clients import DependencyTrack
 from .config import Inventory
 from .net import Http, Transport
-from .patches import open_findings
+from .patches import cve_id, open_findings
 
 log = logging.getLogger(__name__)
 
@@ -341,10 +341,11 @@ def disputed_findings(
         checked += 1
         hit: tuple[str, str] | None = None
         where = "in its CVE record"
-        if nvd is not None and vid.upper().startswith("CVE-"):
-            if not nvd.knows(vid):
+        cve = cve_id(vid)  # DT's OSV source names Debian's records DEBIAN-CVE-...
+        if nvd is not None and cve:
+            if not nvd.knows(cve):
                 unchecked += 1
-            hit, where = nvd.flag(vid), "in NVD"
+            hit, where = nvd.flag(cve), "in NVD"
         if hit is None:
             desc = str(v.get("description") or "")
             if not desc and src:

@@ -204,13 +204,24 @@ def syft(target: str, extra: tuple[str, ...] = ()) -> list[Doc]:
 APT_PYTHON_DIR = "/usr/lib/python3/dist-packages/"
 
 
+def absolute(path: str) -> str:
+    """A syft location as an absolute path: `usr/lib/x` and `./usr/lib/x` -> `/usr/lib/x`."""
+    if path.startswith("./"):
+        path = path[2:]
+    return path if path.startswith("/") else "/" + path
+
+
 def no_apt_python_copies(docs: list[Doc]) -> list[Doc]:
     """Drop the pkg:pypi copies syft makes of apt's python3-* packages.
 
     syft reports python3-urllib3 2.3.0-3+deb13u2 as a deb and, from its dist-info, again as
     pkg:pypi/urllib3@2.3.0; the PyPI one matches every upstream CVE Debian has backported a
     fix for (seen 2026-11-24: 47 findings on 4 Debian hosts, all such copies). The deb stays
-    and carries the right version."""
+    and carries the right version.
+
+    syft 1.57.2 writes a `dir:/` scan's paths relative to the root (`usr/lib/python3/...`,
+    no leading slash; seen 2026-11-25, when the copies were still uploaded), so paths are
+    made absolute before the comparison."""
     out = []
     for d in docs:
         keep = []
@@ -224,7 +235,7 @@ def no_apt_python_copies(docs: list[Doc]) -> list[Doc]:
             if (
                 str(c.get("purl", "")).startswith("pkg:pypi/")
                 and paths
-                and all(x.startswith(APT_PYTHON_DIR) for x in paths)
+                and all(absolute(x).startswith(APT_PYTHON_DIR) for x in paths)
             ):
                 continue
             keep.append(c)
