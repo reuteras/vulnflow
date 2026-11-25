@@ -1909,6 +1909,36 @@ def test_prune_retires_what_the_hosts_last_scan_did_not_upload(inv):
     assert len(posts) == 1 and b"container:airflow" in posts[0][3]  # closed in DefectDojo first
 
 
+def test_set_active_accepts_dt_304_only_when_the_project_changed():
+    from vulnflow.net import HttpError
+
+    state = {"active": True}
+
+    def route(applied):
+        def patch(m, url, h, b):
+            if applied:
+                state.update(json.loads(b))
+            return Response(304, b"", {})  # what DT 5.2.2 answered, applied or not
+
+        return patch
+
+    def get(m, url, h, b):
+        return Response(200, json.dumps({"uuid": "p1", **state}).encode(), {})
+
+    t = FakeTransport({"PATCH /api/v1/project/p1": route(True), "GET /api/v1/project/p1": get})
+    DependencyTrack("http://dt", "k", transport=t).set_active("p1", False)
+    assert state["active"] is False
+    assert [(c[0], c[1]) for c in t.calls] == [
+        ("PATCH", "http://dt/api/v1/project/p1"),
+        ("GET", "http://dt/api/v1/project/p1"),
+    ]
+
+    state["active"] = True
+    t = FakeTransport({"PATCH /api/v1/project/p1": route(False), "GET /api/v1/project/p1": get})
+    with pytest.raises(HttpError):
+        DependencyTrack("http://dt", "k", transport=t).set_active("p1", False)
+
+
 def test_prune_carries_accepted_risks_and_lifts_them_after_the_review_date(inv):
     from vulnflow.prune import prune
 
