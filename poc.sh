@@ -785,7 +785,7 @@ find_sendmail() { PATH="$PATH:/usr/sbin:/sbin" command -v sendmail || true; }
 # anyway, e.g. to test the mail); weekly: always. VULNFLOW_REPORT_TO empty: printed instead
 # (the journal, under the timer).
 cmd_report() {
-  local kind="${1:-}" alerts out rc=0 quiet="" subject sendmail
+  local kind="${1:-}" alerts out rc=0 quiet="" sendmail mail=()
   [[ "$kind" == daily || "$kind" == weekly ]] || die "usage: ./poc.sh report daily|weekly [--always]"
   load_env
   [[ "$kind" == daily && "${2:-}" != --always ]] && quiet=1
@@ -793,6 +793,8 @@ cmd_report() {
   if [[ -n "${VULNFLOW_REPORT_TO:-}" && -z "$sendmail" ]]; then
     die "no sendmail: install a mail transfer agent (postfix, msmtp-mta, nullmailer) or empty VULNFLOW_REPORT_TO"
   fi
+  # A whole message (Markdown text part + HTML part) when mailing, Markdown when printing.
+  [[ -n "${VULNFLOW_REPORT_TO:-}" ]] && mail=(--mime --to "$VULNFLOW_REPORT_TO")
   # The receiver's alert log lives in its volume. A stopped receiver leaves no file, which
   # the report shows as an error; no alerts yet is an empty file.
   alerts="$(mktemp)"
@@ -800,20 +802,14 @@ cmd_report() {
     >"$alerts" 2>/dev/null; then
     rm -f "$alerts"
   fi
-  out="$(vulnflow report "$kind" --alerts "$alerts" ${quiet:+--quiet})" || rc=$?
+  out="$(vulnflow report "$kind" --alerts "$alerts" ${quiet:+--quiet} ${mail[@]+"${mail[@]}"})" || rc=$?
   rm -f "$alerts"
   [[ -n "$out" ]] || return "$rc"
   if [[ -z "${VULNFLOW_REPORT_TO:-}" ]]; then
     printf '%s\n' "$out"
     return "$rc"
   fi
-  subject="vulnflow $kind report ($(hostname -s))"
-  [[ $rc -eq 0 ]] || subject="$subject: errors"
-  {
-    printf 'To: %s\nSubject: %s\nContent-Type: text/plain; charset=utf-8\n\n' \
-      "$VULNFLOW_REPORT_TO" "$subject"
-    printf '%s\n' "$out"
-  } | "$sendmail" -t -oi
+  printf '%s\n' "$out" | "$sendmail" -t -oi
   log "$kind report mailed to $VULNFLOW_REPORT_TO"
   return "$rc"
 }
