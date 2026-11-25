@@ -22,7 +22,7 @@ there), so checked against a running 5.2.2 instead (2026-11-24):
        application/problem+json: with Accept: application/json it is a 406.
   OSV ships disabled, ecosystems PyPI/npm/Go/Maven/NuGet (no Debian); only NVD is on.
 
-DefectDojo (checked against 3.5.201): the initializer creates the admin with DD_ADMIN_PASSWORD
+DefectDojo (checked against 3.5.300): the initializer creates the admin with DD_ADMIN_PASSWORD
 (passed in by stacks/defectdojo/override.yml) and
   POST /api/v2/api-token-auth/   {"username","password"} -> {"token": ...}
 returns that user's (stable) API v2 token. It is enabled by default

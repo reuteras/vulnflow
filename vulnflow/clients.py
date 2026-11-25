@@ -358,7 +358,7 @@ class DefectDojo:
         version: str = "",
         apply_tags_to_findings: bool = False,
     ) -> dict[str, Any]:
-        """POST reimport-scan/. `tags` replace the test's tags (DefectDojo 3.5.201
+        """POST reimport-scan/. `tags` replace the test's tags (DefectDojo 3.5.300
         ReImportScanSerializer); with apply_tags_to_findings they go on its findings too.
         `version` is set on the test."""
         fields: dict[str, str | list[str]] = {
