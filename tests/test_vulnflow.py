@@ -4341,6 +4341,7 @@ def test_tui_details_step_with_J_and_K(inv):
             hosts=lambda w: [],
             updates=lambda: [],
             details=details,
+            write=None,
         ),
         today=date(2026, 11, 25),
     )
