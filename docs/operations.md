@@ -1,118 +1,269 @@
 # Daily usage
 
-[Back to the README](../README.md). Where to look, how to clear known-OK findings, what
-to run when, and keeping the stacks up to date.
+[Back to the README](../README.md). How findings and alerts reach you, what each team does
+with them, how to clear false positives, and keeping the stacks up to date. Commands run on
+the vulnflow server, in the repository directory.
 
-## See the results
+## How findings and alerts reach you
 
-- **Dependency-Track:** projects `host:...` (tag `team-sysadm`) and `myapp` (tag
-  `team-dev`) with their components and vulnerabilities, once analysis is done.
-- **DefectDojo:** `dt2dojo` copies DT findings every 30 minutes into one product per DT
-  project, under the team's product type. To run it now:
-  `python3 -m vulnflow dt2dojo`.
-- **OpenCVE:** projects `sysadm` and `dev` list the CVEs matching their subscriptions;
-  new or changed ones are sent to the receiver by the `vulnflow` automation.
-- **Coverage check:** `python3 -m vulnflow sync --dry-run` warns about teams with no SBOM
-  in DT yet.
+Two paths run side by side, and the email reports summarise both.
 
-## Smoke-test the alert path
+**Watch: a CVE changes for a product you follow (OpenCVE).** OpenCVE's Airflow DAG imports CVE
+changes regularly from its own knowledge base, NVD, the CVE List, Red Hat and CISA
+Vulnrichment. When a change touches a vendor or
+product in a team's subscriptions (from `inventory.toml` and `machines.toml`), OpenCVE adds
+it to that team's project (`sysadm`, `users`, `dev`). Each project has an alert automation
+named `vulnflow`, created by `opencve-bootstrap`, which fires on every change and sends a
+webhook: an HTTP POST with the CVE, its CVSS score and the event types, from OpenCVE's
+worker to `http://vulnflow-receiver:8380/opencve` on the Docker network the two share, with
+the shared secret `VULNFLOW_WEBHOOK_TOKEN` in an `X-Vulnflow-Token` header. Nothing leaves
+the server. The receiver then:
 
-Send the receiver a fake OpenCVE webhook (Log4Shell, which is in CISA KEV, so it should
-come out as **P1**). The token goes in on stdin, not on the command line:
+1. looks the CVE up in CISA KEV, FIRST EPSS and CIRCL sightings, and ranks it P1 to P4
+   ([Priority tiers](concepts.md#priority-tiers));
+2. appends every alert to `alerts.jsonl` in its data volume (for the SIEM and the reports);
+3. for P1 and P2: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`),
+   and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one.
+
+**Match: a CVE is found in something you run (Dependency-Track).** The push agents (daily)
+and CI (per release) upload SBOMs; Dependency-Track matches every component against NVD,
+OSV and the GitHub advisories, also when a new CVE arrives later for an SBOM it already has.
+Every 30 minutes `dt2dojo` copies the open findings into DefectDojo, one product per DT
+project under the team's product type, and closes the ones that are gone.
+
+**Email reports** (daily when something needs action, weekly always): new P1/P2 alerts,
+new critical/high/KEV findings, hosts that stopped uploading, and versions to deploy. See
+[Email reports](#email-reports).
+
+## Where to look
+
+| Question | Where |
+| --- | --- |
+| Which CVEs changed for the products my team follows? | OpenCVE, the team's project; `to_evaluate` = P1/P2 nobody has looked at yet |
+| Which of our hosts, images and apps have a vulnerable component? | Dependency-Track, projects tagged `team-<team>`: `host:…`, `container:…`, `code:…`, apps from CI |
+| What are we working on, who owns it, by when? | DefectDojo, the team's product type (Sysadmin, Users, Development); filter by the `host-*` / `kind-*` / `group-*` tags |
+| Which hosts stopped uploading? | `python3 -m vulnflow machines`, or the email report |
+| Does a team have no SBOM at all yet? | `python3 -m vulnflow sync --dry-run` |
+| How serious is CVE-X right now? | `python3 -m vulnflow enrich CVE-X` ([Look up a CVE](#look-up-a-cve)) |
+| Where on disk is component X? | `python3 -m vulnflow where <name> [--version V]` |
+
+Dependency-Track analyses new SBOMs within minutes; DefectDojo follows at the next
+`dt2dojo` round (`python3 -m vulnflow dt2dojo` runs one now).
+
+## Sysadmin: common tasks
+
+### A P1/P2 alert arrives
+
+1. Open the CVE in OpenCVE (team project `sysadm`). It is `to_evaluate`.
+2. Does it affect us? `python3 -m vulnflow where <component>` and Dependency-Track's
+   component search show where it is installed; for a product without an SBOM (firewall,
+   switch, SaaS) you know from your own inventory.
+3. Set the OpenCVE status (`analysis_in_progress`, `remediation_in_progress`,
+   `not_applicable`, `risk_accepted`, `resolved`, …) and an assignee. The receiver only
+   sets `to_evaluate` on a CVE that has no status, so yours stays.
+4. If it is installed somewhere it shows up as a DefectDojo finding too; do the work there.
+
+### A new finding on a Debian package
+
+Most Debian findings are already fixed by a Debian backport (NVD only knows upstream
+versions). Check before you patch:
 
 ```bash
-set -a; . ./.env; set +a
-cat >/tmp/vf-test.json <<'EOF'
-{"organization": "test", "project": "sysadm",
- "changes": [{"cve": {"cve_id": "CVE-2021-44228", "cvss31": 10.0,
-                      "description": "smoke test"},
-              "events": [{"type": "first_time"}]}]}
-EOF
-curl -s -H @- --json @/tmp/vf-test.json "http://127.0.0.1:${VULNFLOW_PORT:-8380}/opencve" \
-  <<<"X-Vulnflow-Token: $VULNFLOW_WEBHOOK_TOKEN"
-docker exec vulnflow-glue-receiver-1 tail -n 1 /app/data/alerts.jsonl
+python3 -m vulnflow debian --team sysadm --action fixed   # fixed in the installed version
+python3 -m vulnflow debian --team sysadm --action update  # an apt upgrade fixes it
+python3 -m vulnflow debian --team sysadm --action no-fix  # no fix in this release yet
 ```
 
-The reply is `{"accepted": 1}`, and the last line of `alerts.jsonl` shows the P1 alert. A
-log warning that the OpenCVE write-back failed for this CVE is expected: Log4j isn't in
-`sysadm`'s subscriptions. To get alerts in chat, set `VULNFLOW_CHAT_WEBHOOK` in `.env` and
-run `./poc.sh glue-up`.
+`fixed` rows are false positives: clear them ([Fixed by a Debian
+backport](#1-fixed-by-a-debian-backport)). `update` rows are real: `apt upgrade` on the host,
+and the next agent run closes them. `no-fix` rows wait for Debian; accept the risk with a
+review date if the urgency is low ([Accepted risks](#4-accepted-risks)).
 
-## Day to day
+### A host stopped uploading
 
-- **Sysadmin:** triage new CVEs in OpenCVE project `sysadm` (status, assignee), then
-  handle the Debian-package findings in DefectDojo. Rerun the host SBOM after upgrades
-  (from cron or config management).
-- **Dev:** upload an SBOM per release from CI; triage findings for `myapp` in DefectDojo
-  (or with VEX/analysis in DT, which carries over).
-- **Both:** P1/P2 alerts arrive in chat (when configured) and are marked `to_evaluate` in
-  OpenCVE, but only if nobody has triaged them yet.
+The report or `python3 -m vulnflow machines` says `STALE` or `never pushed`. On the host:
 
-### Clearing known-OK findings
+```bash
+systemctl status vulnflow-agent.timer vulnflow-agent.service   # Linux
+journalctl -u vulnflow-agent.service -n 50
+tail -50 ~/Library/Logs/vulnflow-agent.log                       # macOS
+```
 
-Mark each one once: `prune` (every `dt2dojo` round) copies the decision to later versions of
-the same build, and the next round closes the finding in DefectDojo. `ignore` skips findings
-that are already marked, so rerunning a step only adds what is new. It applies every row in
-the file, so read the file first; `unignore` takes any of it back.
+Usual causes: the host was off, syft is missing or failed (out of memory or `/tmp` space on
+a large image), or the key was revoked (`agent-bundle` makes a new one). See
+[What to expect](sboms.md#what-to-expect).
 
-1. **Already fixed by Debian.** NVD compares upstream version numbers, and Debian fixes in
-   its own package versions:
+### After upgrading a host or an image
 
-   ```bash
-   python3 -m vulnflow debian --action fixed --json > fixed.json     # read it, drop rows you disagree with
-   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT            # dry run
-   python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT --apply
-   ```
+Nothing to do. The next agent run uploads the new versions; Not Affected and False Positive
+decisions carry over to the new image tag, and the old tag is retired (its findings closed
+in DefectDojo) at the first `dt2dojo` round after that run. `python3 -m vulnflow prune`
+shows what the next round will do.
 
-   Each analysis says which Debian version fixed it and which is installed.
+### A product without an SBOM
 
-2. **Disputed, rejected, or "every version" in NVD.** The supplier says it is not a
-   vulnerability, the CVE was withdrawn, or (`ANY-VERSION`) NVD's record lists the product
-   with version `*` and no version range, so every version ever made matches: an old CVE
-   (more than 2 years, `--any-version-years`) on a current version is NVD's data error. Seen:
-   72 Safari CVEs from 2005-2012 matching Safari 27.2 on every Mac, 144 findings on two
-   laptops. Check each reason (the `NOTE:` text, or product and dates) before agreeing.
-   `ANY-VERSION` is a list to review, not a verdict: an old CVE nobody ever fixed is real
-   too (2026-11-24: `rsa` 0.9.x and CVE-2023-49092, the Marvin attack, which RustCrypto has
-   not fixed). Delete those rows from the file before `ignore`.
-   Safari's version changes with every macOS update, so these come back as new findings on
-   the new version; rerunning this step marks them again:
+Appliances, firmware and SaaS are followed only in OpenCVE: add the vendor or product to the
+team's subscriptions (`[subscriptions.sysadm]` in `machines.toml`), then
+`python3 -m vulnflow sync`. `suggest-subscriptions` proposes products from what
+Dependency-Track has seen.
 
-   ```bash
-   python3 -m vulnflow disputed --json > disputed.json
-   python3 -m vulnflow ignore --from disputed.json --state FALSE_POSITIVE            # dry run, then --apply
-   ```
+## Developer: common tasks
 
-3. **Anything else you investigated by hand** (e.g. a `pkg:generic/...` binary on a
-   distribution none of the tools cover): write the rows with a `reason`, in the same JSON
-   shape, and run `ignore` with the matching `--justification` (`CODE_NOT_PRESENT` when the
-   fix is in, `CODE_NOT_REACHABLE` when the code is never run with outside input).
+### An SBOM per release
 
-4. **Accepted risks** (it is affected, and you decide to live with it for now, e.g. a
-   `debian --action no-fix` row Debian calls minor): record it in Dependency-Track with a
-   review date, so it carries over to new versions and comes back by itself:
+Run [`scripts/ci-sbom-upload.sh`](../scripts/ci-sbom-upload.sh) in the release pipeline
+(see [SBOM of an app](sboms.md#sbom-of-an-app)). Each release becomes its own project version
+in Dependency-Track and its own test in DefectDojo; `prune` retires a version two days after
+a newer one is uploaded and the old one no longer is.
 
-   ```bash
-   python3 -m vulnflow ignore --from accept.json --state EXPLOITABLE --response WILL_NOT_FIX \
-       --review-by 2027-03-01            # dry run, then --apply; CAN_NOT_FIX when there is no fix
-   ```
+### A finding in a dependency
 
-   The finding is suppressed (gone from the lists and DefectDojo) until the review date; the
-   first `dt2dojo` round after it lifts the suppression and it shows up again, with a
-   comment saying why. `--review-by` works with the other states too, for a Not Affected
-   you want to look at again.
+```bash
+python3 -m vulnflow patches --team dev          # which findings have a fixed release (DT's data)
+python3 -m vulnflow patches --team dev --osv    # also ask osv.dev (sends package URLs out)
+python3 -m vulnflow where requests --version 2.31.0   # which images or apps carry it
+```
+
+`patches` gives the fix for the installed branch (`recommended`). Bump the dependency, and
+the next release's SBOM closes the finding. With Renovate or Dependabot in the repository,
+the weekly `patches --osv` is the list of what their next merges will fix.
+
+### The vulnerable code is never reached
+
+If the vulnerable function is not used (a CLI-only feature of a library, a platform you do
+not run), record it as Not Affected with the justification `CODE_NOT_REACHABLE`; see
+[Investigated by hand](#3-investigated-by-hand). It carries over to the next release as long
+as the component and the CVE stay the same.
+
+### Accepting a risk for now
+
+Affected, no fix yet, and you decide to live with it until a date: [Accepted
+risks](#4-accepted-risks). It comes back by itself after the review date.
+
+## False positives and known-OK findings
+
+| Case | How you recognise it | What to do |
+| --- | --- | --- |
+| Fixed by a Debian backport | `debian --action fixed` lists it | [1](#1-fixed-by-a-debian-backport): `ignore`, Not Affected, `CODE_NOT_PRESENT` |
+| Disputed or rejected CVE | `disputed` lists it with a reason | [2](#2-disputed-rejected-or-every-version-in-nvd): `ignore`, False Positive |
+| NVD lists every version (`ANY-VERSION`) | `disputed` lists it; an old CVE on a current version | [2](#2-disputed-rejected-or-every-version-in-nvd), after checking it is really fixed |
+| Wrong product matched | CVE is about another project with the same name (e.g. CVE-2014-125070 on the Rust crate `console`) | [3](#3-investigated-by-hand): False Positive with the reason |
+| Version range misread | NVD's range excludes the installed version, but DT matched (e.g. a `3.0.0b9` bound) | [3](#3-investigated-by-hand): False Positive with the reason |
+| Version unknown (`UNKNOWN`, Go pseudo-version) | every historic CVE of the package matches | fix the SBOM, not the finding: see [What to expect](sboms.md#what-to-expect); these findings close when the version is right |
+| Code not present or never reached | you checked the code or the build | [3](#3-investigated-by-hand): Not Affected, `CODE_NOT_PRESENT` / `CODE_NOT_REACHABLE` |
+| Ubuntu or Red Hat package already patched | `vendor --ubuntu` / `--redhat` says `fixed` | [1](#1-fixed-by-a-debian-backport), with the `vendor --json` file |
+| Affected, but accepted for now | your decision | [4](#4-accepted-risks): Exploitable + Will Not Fix / Can Not Fix with `--review-by` |
+
+Record every such decision in **Dependency-Track**, not in DefectDojo: `prune` carries it to
+later versions of the same build and DefectDojo closes the finding at the next round. A
+decision made only in DefectDojo stays with that one version.
+
+`ignore` reads a review file (the JSON from `debian --json`, `disputed --json` or
+`vendor --json`, edited down to the rows you agree with) and writes one analysis per row.
+It needs `DT_ADMIN_PASSWORD` (in `.env` on the server). It skips findings that are already
+marked, so rerunning a step only adds what is new; it applies every row in the file, so
+read the file first; `unignore` takes any of it back. Without `--apply` it is a dry run.
+
+### 1. Fixed by a Debian backport
+
+NVD compares upstream version numbers, and Debian fixes in its own package versions, so a
+package with the fix backported still matches NVD's range:
+
+```bash
+python3 -m vulnflow debian --action fixed --json > fixed.json     # read it, drop rows you disagree with
+python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT            # dry run
+python3 -m vulnflow ignore --from fixed.json --justification CODE_NOT_PRESENT --apply
+```
+
+Each analysis says which Debian version fixed it and which is installed. Ubuntu and Red Hat
+packages work the same way with `vendor --ubuntu --action fixed --json` or
+`vendor --redhat …` (they send the CVE ids to ubuntu.com or access.redhat.com).
+
+### 2. Disputed, rejected, or "every version" in NVD
+
+The supplier says it is not a vulnerability, the CVE was withdrawn, or (`ANY-VERSION`) NVD's
+record lists the product with version `*` and no version range, so every version ever made
+matches: an old CVE (more than 2 years, `--any-version-years`) on a current version is NVD's
+data error. Seen: 72 Safari CVEs from 2005-2012 matching Safari 27.2 on every Mac, 144
+findings on two laptops. Check each reason (the `NOTE:` text, or product and dates) before
+agreeing.
+
+`ANY-VERSION` is a list to review, not a verdict: an old CVE nobody ever fixed is real too
+(2026-11-24: `rsa` 0.9.x and CVE-2023-49092, the Marvin attack, which RustCrypto has not
+fixed). Delete those rows from the file before `ignore`. Safari's version changes with every
+macOS update, so these come back as new findings on the new version; rerunning this step
+marks them again:
+
+```bash
+python3 -m vulnflow disputed --json > disputed.json
+python3 -m vulnflow ignore --from disputed.json --state FALSE_POSITIVE            # dry run, then --apply
+```
+
+### 3. Investigated by hand
+
+A wrong product, a misread version range, code that is not in the build or never reached:
+nothing generates these, you found them.
+
+- **One or two findings:** in Dependency-Track's UI, open the project, Audit
+  Vulnerabilities, the finding, and set the Analysis (state, justification, a comment saying
+  why) and Suppress. `prune` carries it to later versions like any other decision.
+- **Many:** take the rows for those findings from a `debian`, `disputed` or `vendor`
+  `--json` file (they carry the UUIDs `ignore` needs), set `reason` on each, and run
+  `ignore` with the matching state and justification:
+
+```bash
+python3 -m vulnflow ignore --from wrong-product.json --state FALSE_POSITIVE   # dry run, then --apply
+python3 -m vulnflow ignore --from unused.json --justification CODE_NOT_REACHABLE
+```
+
+Justifications: `CODE_NOT_PRESENT` (the fix is in, or the vulnerable part is not compiled
+in), `CODE_NOT_REACHABLE` (the code is there but never runs with outside input),
+`REQUIRES_CONFIGURATION`, `REQUIRES_DEPENDENCY`, `REQUIRES_ENVIRONMENT`,
+`PROTECTED_BY_COMPILER`, `PROTECTED_AT_RUNTIME`, `PROTECTED_AT_PERIMETER`,
+`PROTECTED_BY_MITIGATING_CONTROL`. Examples seen on this estate (2026-11-24): CVE-2014-125070
+on the Rust crate `console` (another project), CVE-2018-17175 on `marshmallow` 3.2x
+(Dependency-Track misreads the `3.0.0b9` bound), CVE-2022-48833 on kernel 7.3.6 (only 5.x
+ranges), ffmpeg CVE-2025-25468/25469 (the bound is a git date).
+
+### 4. Accepted risks
+
+It is affected, and you decide to live with it for now (e.g. a `debian --action no-fix` row
+Debian calls minor). Record it in Dependency-Track with a review date, so it carries over to
+new versions and comes back by itself:
+
+```bash
+python3 -m vulnflow ignore --from accept.json --state EXPLOITABLE --response WILL_NOT_FIX \
+    --review-by 2027-03-01            # dry run, then --apply; CAN_NOT_FIX when there is no fix
+```
+
+The finding is suppressed (gone from the lists and DefectDojo) until the review date; the
+first `dt2dojo` round after it lifts the suppression and it shows up again, with a comment
+saying why. `--review-by` works with the other states too, for a Not Affected you want to
+look at again. In the UI, writing `review by 2027-03-01` in the analysis comment does the
+same.
 
 Not for `ignore`: `debian --action update` and `patches --osv` list real fixes (update the
 image or package instead).
 
-### Recommended routine
+### Undo
+
+```bash
+python3 -m vulnflow unignore                 # dry run: everything vulnflow marked
+python3 -m vulnflow unignore --from fp.json --apply   # only these rows
+```
+
+`unignore` restores the analysis each finding had before, but only where the finding is still
+as vulnflow left it: a decision somebody made since stays. One finding at a time is also fine
+in Dependency-Track's UI (Audit Vulnerabilities, the finding, Analysis).
+
+## Recommended routine
 
 | When | What |
 | --- | --- |
 | Automatically | Agents upload daily; `dt2dojo` (every 30 min) runs `prune` first, then copies to DefectDojo; the [email reports](#email-reports) arrive daily (when something needs action) and every Monday |
-| Weekly | Steps 1-2 of [Clearing known-OK findings](#clearing-known-ok-findings). `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
+| Weekly | [False positives](#false-positives-and-known-ok-findings) 1-2. `debian --action update` and `patches --osv`: what an image/package update would fix, input for the next Renovate merge. `python3 -m vulnflow machines`: hosts that stopped pushing (more than `--stale-days`, 2) |
 | After an image update | Nothing: decisions carry over to the new tag, and the old tag is retired at the first `dt2dojo` round after the host's next agent run (2 days after its last upload if the host has no `host:` project). `python3 -m vulnflow prune` shows what the next round will do |
-| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: anything new to accept (step 4) or that Debian has fixed since? `sync --dry-run`: teams without SBOMs |
+| Monthly | `python3 -m vulnflow unignore` (dry run): what vulnflow has marked, and what somebody changed since (`--apply --forget-changed` drops those from the ledger). `debian --action no-fix`: anything new to accept ([Accepted risks](#4-accepted-risks)) or that Debian has fixed since? `sync --dry-run`: teams without SBOMs |
 
 ## Email reports
 
@@ -159,7 +310,7 @@ CVE-2025-0001: P4 Watch | KEV=no EPSS=0.0056 (p47) sightings={'published-proof-o
 
 ## Updates
 
-`./poc.sh check-updates` (run nightly on the server, output in the cron mail) compares, for
+`./poc.sh check-updates` (also part of the daily [email report](#email-reports)) compares, for
 DefectDojo, OpenCVE, Dependency-Track and DefectDojo's Valkey, the newest upstream GitHub
 release that is at least 7 days old, the version pinned in the repository
 (`DD_REF`/`OPENCVE_REF` in `.env.example`, the image tags in
