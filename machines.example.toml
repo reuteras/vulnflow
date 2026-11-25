@@ -7,7 +7,8 @@
 # repo or vault) and copy it to the vulnflow server; set VULNFLOW_MACHINES in .env if it
 # lives somewhere else. After a change: python3 -m vulnflow agent-bundle --all
 #
-# Teams are the [teams.*] keys of inventory/inventory.toml (sysadm, users, dev).
+# Teams are the [teams.*] keys of inventory/inventory.toml (sysadm, users, dev, network,
+# virt, platform).
 
 # ---- Groups: shared settings plus the hosts in them -------------------------------
 # A host belongs to at most one group. Settings:
