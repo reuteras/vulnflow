@@ -5,16 +5,22 @@
 ## How the teams work
 
 Everything is keyed on the team entries in `inventory/inventory.toml`. The example estate has
-three groups:
+six groups:
 
-| | sysadm | users | dev |
-| --- | --- | --- | --- |
-| Owns | the servers | the MacBooks | code and containers |
-| OpenCVE project | `sysadm` | `users` | `dev` |
-| Dependency-Track tag | `team-sysadm` | `team-users` | `team-dev` |
-| DefectDojo product type | `Sysadmin` | `Users` | `Development` |
-| Chat mention | `@sysadm` | `@users` | `@dev` |
-| DT projects | `host:<server>` | `host:<macbook>` | `container:<image>`, `code:<name>` |
+| | sysadm | users | dev | network | virt | platform |
+| --- | --- | --- | --- | --- | --- | --- |
+| Owns | the servers | the MacBooks | code and containers | firewalls, VPN, load balancers, switches | vCenter, ESXi | OpenShift, Kubernetes |
+| OpenCVE project | `sysadm` | `users` | `dev` | `network` | `virt` | `platform` |
+| Dependency-Track tag | `team-sysadm` | `team-users` | `team-dev` | `team-network` | `team-virt` | `team-platform` |
+| DefectDojo product type | `Sysadmin` | `Users` | `Development` | `Network` | `Virtualization` | `Platform` |
+| Chat mention | `@sysadm` | `@users` | `@dev` | `@network` | `@virt` | `@platform` |
+| DT projects | `host:<server>` | `host:<macbook>` | `container:<image>`, `code:<name>` | none | none | none |
+
+network, virt and platform run appliances and platforms with no SBOM, so OpenCVE follows
+their products (Fortinet, NetScaler, Cisco and Check Point product lines; vCenter and ESXi;
+OpenShift and Kubernetes), with no version: every CVE for the product is an alert. The
+products in `inventory.toml` are common examples; put the ones you run in
+`[subscriptions.<team>]` in `machines.toml`.
 
 Products that several teams care about can be listed under each. Each team then gets its
 own alert and its own status in OpenCVE. A machine's `team` owns its `host:` project; the

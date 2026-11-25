@@ -1,4 +1,4 @@
-# vulnflow PoC — CVE tracking for the sysadmin, users and dev teams
+# vulnflow PoC — CVE tracking for sysadmin, users, dev, network, virtualization and platform teams
 
 A proof of concept for three-layer vulnerability tracking, all self-hosted:
 

@@ -92,7 +92,12 @@ def make_enricher(tmp_path, **kw) -> tuple[Enricher, FakeTransport]:
 
 # ----------------------------------------------------------------------- inventory
 def test_inventory_loads_teams_and_rules(inv):
-    assert set(inv.teams) == {"sysadm", "users", "dev"}
+    assert set(inv.teams) == {"sysadm", "users", "dev", "network", "virt", "platform"}
+    assert inv.teams["network"].products["citrix"] == [
+        "netscaler_application_delivery_controller",
+        "netscaler_gateway",
+    ]
+    assert inv.teams["virt"].dtrack_tag == "team-virt"
     s = inv.teams["sysadm"]
     assert s.opencve_project == "sysadm" and s.dtrack_tag == "team-sysadm"
     assert s.products["debian"] == ["debian_linux"] and s.products["linux"] == ["linux_kernel"]
@@ -385,10 +390,11 @@ def test_dt_to_dojo_routes_by_tag(inv):
     rep = dt_to_dojo(
         inv, DependencyTrack("http://dt", "k", transport=t), DefectDojo("http://dd", "k", transport=t)
     )
-    assert not rep.errors and not rep.warnings and len(rep.done) == 4
-    assert rep.done[-1] == "3 inactive project(s) skipped (retired versions)"
+    n = len(inv.teams)  # one active and one retired project per team tag
+    assert not rep.errors and not rep.warnings and len(rep.done) == n + 1
+    assert rep.done[-1] == f"{n} inactive project(s) skipped (retired versions)"
     posts = [c for c in t.calls if c[0] == "POST"]
-    assert len(posts) == 3
+    assert len(posts) == n
     sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
     assert b"Sysadmin" in sysadm[3]
     fields = _multipart_fields(sysadm[3])

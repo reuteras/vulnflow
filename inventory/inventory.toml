@@ -19,10 +19,16 @@ chat_min_tier = 2
 ignore_event_types = ["references"]
 
 # ---------------------------------------------------------------------------
-# Three groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
-#   sysadm  the servers (OS packages, Homebrew on the servers)
-#   users   the MacBooks (macOS, Homebrew, apps, language tools)
-#   dev     code and containers (application dependencies, container images)
+# Six groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
+#   sysadm    the servers (OS packages, Homebrew on the servers)
+#   users     the MacBooks (macOS, Homebrew, apps, language tools)
+#   dev       code and containers (application dependencies, container images)
+#   network   firewalls, VPN gateways, load balancers, switches and routers
+#   virt      the virtualization platform (vCenter, ESXi)
+#   platform  the container platform (OpenShift, Kubernetes)
+# The last three are appliances and platforms without an SBOM: OpenCVE follows them by
+# product. The products below are common enterprise examples; list what you run in
+# machines.toml ([subscriptions.<team>]) and drop the rest.
 # A machine's `team` owns its host project; its containers and code go to dev (below).
 [teams.sysadm]
 display_name   = "Sysadmin"
@@ -67,6 +73,51 @@ vendors  = ["python", "nodejs"]
 postgresql = ["postgresql"]
 # Libraries are better tracked by SBOM in Dependency-Track (purl/OSV/GHSA matching)
 # than by CPE subscriptions here, because NVD no longer adds CPEs to most CVEs.
+
+[teams.network]
+display_name   = "Network"
+opencve_project = "network"
+defectdojo_product_type = "Network"
+dtrack_tag     = "team-network"
+chat_mention   = "@network"
+
+[teams.network.opencve]
+vendors  = []
+
+[teams.network.opencve.products]
+# Product lines, not whole vendors: `cisco` alone has 300+ products in NVD.
+fortinet   = ["fortios", "fortiproxy", "fortimanager", "fortianalyzer", "fortiweb"]
+citrix     = ["netscaler_application_delivery_controller", "netscaler_gateway"]
+cisco      = ["adaptive_security_appliance_software", "firepower_threat_defense", "ios_xe",
+              "nx-os", "identity_services_engine"]
+checkpoint = ["quantum_security_gateway_firmware", "quantum_spark_firmware", "gaia_os"]
+
+[teams.virt]
+display_name   = "Virtualization"
+opencve_project = "virt"
+defectdojo_product_type = "Virtualization"
+dtrack_tag     = "team-virt"
+chat_mention   = "@virt"
+
+[teams.virt.opencve]
+vendors  = []
+
+[teams.virt.opencve.products]
+vmware = ["vcenter_server", "esxi"]   # still `vmware` in NVD after Broadcom's acquisition
+
+[teams.platform]
+display_name   = "Platform"
+opencve_project = "platform"
+defectdojo_product_type = "Platform"
+dtrack_tag     = "team-platform"
+chat_mention   = "@platform"
+
+[teams.platform.opencve]
+vendors  = []
+
+[teams.platform.opencve.products]
+redhat     = ["openshift_container_platform"]
+kubernetes = ["kubernetes"]
 
 # ---------------------------------------------------------------------------
 # Your own hosts (servers, laptops, code directories) are NOT listed here: they go in
