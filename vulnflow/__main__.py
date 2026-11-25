@@ -98,7 +98,7 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
     if res.osv.startswith("failed"):
         print(
             f"  warn  OSV source not configured ({res.osv}); enable it in the DT UI "
-            "(see README 'After setup')",
+            "(see docs/install.md 'After setup')",
             file=sys.stderr,
         )
     else:
@@ -579,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ab = sub.add_parser(
         "agent-bundle",
-        help="per host: agent config.json + its own DT API key, for Ansible to copy (see README)",
+        help="per host: agent config.json + its own DT API key, for Ansible to copy (see docs/sboms.md)",
     )
     ab.add_argument("hosts", nargs="*")
     ab.add_argument("--all", action="store_true", help="every host in machines.toml")

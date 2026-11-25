@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Guidance for AI coding agents working in this repository. Human-facing docs are in
-[README.md](README.md).
+[README.md](README.md) and [docs/](docs/).
 
 ## Project shape
 
@@ -130,8 +130,8 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   prepended on stdin.
 - Upstream endpoints/behaviour the bootstraps rely on are listed, with the version they
   were checked against, in the docstrings of `vulnflow/bootstrap.py` and
-  `vulnflow/clients.py` and in README "Verified vs assumed". When bumping DT, `DD_REF` or
-  `OPENCVE_REF`, re-check those against the new upstream source and update the docstrings.
+  `vulnflow/clients.py` and in `docs/development.md` "Verified vs assumed". When bumping
+  DT, `DD_REF` or `OPENCVE_REF`, re-check those against the new upstream source and update the docstrings.
   Check against a clone of the **exact tag** (`git clone --depth 1 -b <tag>`), never `master`:
   OpenCVE's master differs from v3.1.0 in exactly the parts we use (SSRF allow-list,
   automations).

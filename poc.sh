@@ -172,7 +172,7 @@ cmd_check() {
   swap="$(awk '/SwapTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)"
   if ((mem < 16 && swap < 4)); then
     warn "~${mem} GB RAM and ${swap} GB swap: add 4-8 GB swap so the first imports don't get" \
-      "OOM-killed (README 'Own machines (push agents)')"
+      "OOM-killed (docs/sboms.md 'Own machines (push agents)')"
   fi
 }
 
@@ -858,7 +858,7 @@ cmd_setup() {
   cmd_status
   log "Setup done in $(((SECONDS - t0) / 60)) min."
   print_logins
-  log "Still yours: feed SBOMs (README 'Feed SBOMs') and optional VULNFLOW_CHAT_WEBHOOK."
+  log "Still yours: feed SBOMs (docs/sboms.md) and optional VULNFLOW_CHAT_WEBHOOK."
   if [[ -z "$TS_HOST" ]]; then
     log "All ports are bound to 127.0.0.1: reach them over ssh -L or set VULNFLOW_TS_HOST."
   fi

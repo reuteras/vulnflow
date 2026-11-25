@@ -37,7 +37,7 @@ vendors  = []
 debian    = ["debian_linux"]
 canonical = ["ubuntu_linux"]
 linux     = ["linux_kernel"]
-# Add what the servers run (names are NVD's; see README "Describe what you run" for how to
+# Add what the servers run (names are NVD's; see docs/install.md "Describe what you run" for how to
 # check one): nginx, openssh, postgresql, ...
 
 [teams.users]
