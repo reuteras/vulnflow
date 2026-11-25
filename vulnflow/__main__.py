@@ -124,6 +124,27 @@ def _maintenance_dt() -> DependencyTrack | None:
     return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
 
 
+def _mm_bootstrap(env_file: str, wait: float) -> int:
+    from .bootstrap import BootstrapError, bootstrap_mattermost, set_env_values
+
+    try:
+        url = bootstrap_mattermost(
+            env("MM_URL", f"http://localhost:{env('MM_PORT', '8065')}"),
+            admin_user=env("MM_ADMIN_USER", "admin"),
+            admin_password=env("MM_ADMIN_PASSWORD", required=True),
+            wait_timeout=wait,
+        )
+    except BootstrapError as e:
+        print(f"  error {e}", file=sys.stderr)
+        return 1
+    if env("VULNFLOW_CHAT_WEBHOOK") == url:
+        print("  ok    VULNFLOW_CHAT_WEBHOOK already points at Mattermost's alerts channel")
+    else:
+        set_env_values(env_file, {"VULNFLOW_CHAT_WEBHOOK": url})
+        print(f"  set   VULNFLOW_CHAT_WEBHOOK in {env_file} (Mattermost, channel alerts)")
+    return 0
+
+
 def _dd_bootstrap(env_file: str, wait: float) -> int:
     from .bootstrap import BootstrapError, bootstrap_defectdojo, set_env_values
 
@@ -688,6 +709,11 @@ def main(argv: list[str] | None = None) -> int:
         help="how long to wait for the API server to come up",
     )
 
+    mmb = sub.add_parser(
+        "mm-bootstrap",
+        help="local chat (Mattermost): admin, team, channel 'alerts', webhook -> VULNFLOW_CHAT_WEBHOOK",
+    )
+    mmb.add_argument("--wait", type=float, default=300, metavar="SECONDS")
     ddb = sub.add_parser("dd-bootstrap", help="first-run DefectDojo setup: API key for admin")
     ddb.add_argument("--wait", type=float, default=900, metavar="SECONDS")
 
@@ -743,6 +769,8 @@ def main(argv: list[str] | None = None) -> int:
         return _env_set(a.env_file)
     if a.cmd == "dd-bootstrap":
         return _dd_bootstrap(a.env_file, a.wait)
+    if a.cmd == "mm-bootstrap":
+        return _mm_bootstrap(a.env_file, a.wait)
     if a.cmd == "check-updates":
         from .upstreams import check, report
 

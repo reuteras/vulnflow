@@ -8,6 +8,7 @@ A proof of concept for three-layer vulnerability tracking, all self-hosted:
 | Match | **OWASP Dependency-Track 5.x** (Apache-2.0) | "Which of *our* apps/hosts contain the affected component?" — from SBOMs | 8181 (UI), 8180 (API) |
 | Work | **DefectDojo** (BSD-3) | "Who owns this finding, what's its status, is the risk accepted until when?" | 8280 |
 | Glue | **vulnflow** (this repo, stdlib Python) | Inventory sync, KEV/EPSS/CIRCL enrichment, priority tiers, routing to teams | 8380 |
+| Chat (optional) | **Mattermost Team Edition** (`./poc.sh chat-up`) | Where the P1/P2 alerts show up, if you have no chat of your own | 8065 |
 
 ## Documentation
 

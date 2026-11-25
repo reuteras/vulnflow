@@ -33,6 +33,22 @@ stacks/opencve/bootstrap_org.py runs inside the webserver container via manage.p
 Projects and subscriptions then go through API v2. Webhooks go through manage.py shell too
 (stacks/opencve/bootstrap_webhooks.py): v3.1.0's API rejects every private webhook URL, and
 a notification is only sent by an Automation with a send_notification action.
+
+Mattermost Team Edition, the optional local chat (checked against the v12.1.0 tag,
+server/channels/api4 and app/user.go): with open signup off, the first account may still
+sign up (CreateUserFromSignup, IsFirstUserAccount) and becomes system admin
+(app/users/users.go); every later one is refused with 403.
+  GET  /api/v4/system/ping
+  POST /api/v4/users/login            {"login_id","password"} -> 200, session in the Token header
+  POST /api/v4/users                  {"username","email","password"} -> 201
+  GET  /api/v4/teams/name/{name}      -> 200 team, 404 if missing
+  POST /api/v4/teams                  {"name","display_name","type":"I"} -> 201 (creator joins)
+  GET  /api/v4/teams/{id}/channels/name/{name}  -> 200 channel, 404 if missing
+  POST /api/v4/channels               {"team_id","name","display_name","type":"O"} -> 201
+  GET  /api/v4/hooks/incoming?team_id=  -> [hook]
+  POST /api/v4/hooks/incoming         {"channel_id","display_name","description"} -> 201
+An incoming webhook takes the Slack-style {"text": ...} the receiver posts, at
+<server>/hooks/{id}.
 """
 
 from __future__ import annotations
@@ -418,6 +434,100 @@ def bootstrap_defectdojo(
             )
         log.info("DefectDojo admin not ready yet (HTTP %s), retrying", r.status)
         time.sleep(interval)
+
+
+MM_HOOK_NAME = "vulnflow"
+
+
+def _mm_login(http: Http, user: str, password: str) -> str:
+    r = http.post("users/login", expect_ok=False, json_body={"login_id": user, "password": password})
+    if not r.ok:
+        return ""
+    return next((v for k, v in r.headers.items() if k.lower() == "token"), "")
+
+
+def bootstrap_mattermost(
+    base_url: str,
+    *,
+    admin_user: str,
+    admin_password: str,
+    team: str = "vulnflow",
+    channel: str = "alerts",
+    hook_base: str = "http://mattermost:8065",
+    transport: Transport | None = None,
+    wait_timeout: float = 300.0,
+    interval: float = 5.0,
+) -> str:
+    """Admin, team, channel and incoming webhook; returns the webhook URL as the receiver
+    reaches it (hook_base: the server's name on the chat network). Safe to rerun: finds
+    what exists and only creates what is missing; the URL stays the same."""
+    root = base_url.rstrip("/")
+    http = Http(f"{root}/api/v4", headers={"Accept": "application/json"}, transport=transport)
+    wait_for(http, "system/ping", wait_timeout, interval)
+    token = _mm_login(http, admin_user, admin_password)
+    if not token:
+        email = f"{admin_user.lower()}@vulnflow.invalid"
+        r = http.post(
+            "users",
+            expect_ok=False,
+            json_body={"username": admin_user, "email": email, "password": admin_password},
+        )
+        if r.status == 403:
+            raise BootstrapError(
+                f"Mattermost already has users and {admin_user!r} cannot log in with "
+                "MM_ADMIN_PASSWORD; put the real password in .env"
+            )
+        if not r.ok:
+            raise BootstrapError(
+                f"Mattermost: creating {admin_user!r} failed (HTTP {r.status}: "
+                f"{r.body[:200].decode('utf-8', 'replace')})"
+            )
+        token = _mm_login(http, admin_user, admin_password)
+        if not token:
+            raise BootstrapError(f"Mattermost: {admin_user!r} was created but cannot log in")
+    http.headers["Authorization"] = f"Bearer {token}"
+
+    r = http.get(f"teams/name/{team}", expect_ok=False)
+    if r.status == 404:
+        r = http.post("teams", json_body={"name": team, "display_name": team.title(), "type": "I"})
+    elif not r.ok:
+        raise BootstrapError(f"Mattermost: team lookup failed (HTTP {r.status})")
+    team_id = str((r.json() or {})["id"])
+
+    r = http.get(f"teams/{team_id}/channels/name/{channel}", expect_ok=False)
+    if r.status == 404:
+        r = http.post(
+            "channels",
+            json_body={
+                "team_id": team_id,
+                "name": channel,
+                "display_name": channel.title(),
+                "type": "O",
+            },
+        )
+    elif not r.ok:
+        raise BootstrapError(f"Mattermost: channel lookup failed (HTTP {r.status})")
+    channel_id = str((r.json() or {})["id"])
+
+    hooks = http.get(f"hooks/incoming?team_id={team_id}&per_page=200").json() or []
+    hook = next(
+        (
+            h
+            for h in hooks
+            if h.get("channel_id") == channel_id and h.get("display_name") == MM_HOOK_NAME
+        ),
+        None,
+    )
+    if hook is None:
+        hook = http.post(
+            "hooks/incoming",
+            json_body={
+                "channel_id": channel_id,
+                "display_name": MM_HOOK_NAME,
+                "description": "P1/P2 alerts from the vulnflow receiver",
+            },
+        ).json()
+    return f"{hook_base.rstrip('/')}/hooks/{hook['id']}"
 
 
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")

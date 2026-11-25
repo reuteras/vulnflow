@@ -154,6 +154,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   2025-11) with an exact `redis:8.x` tag. OpenCVE needs the JSON module, built into Redis 8.
   When bumping `OPENCVE_REF`, check the redis service and any new Redis module commands
   (`json()`, `ft()`, `ts()`) in upstream's code.
+- Optional local chat: `stacks/mattermost` (compose project `vulnflow-chat`, Mattermost
+  Team Edition + postgres), started by `./poc.sh chat-up`, not by `setup`. The receiver
+  joins its network through `deploy/docker-compose.glue-chat.yml`, and `mm-bootstrap`
+  writes `VULNFLOW_CHAT_WEBHOOK`. Keep its phone-home settings off when bumping it.
 - Exposure: every published port binds to 127.0.0.1, and the target server is reachable
   only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
   `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.
