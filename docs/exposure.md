@@ -191,7 +191,7 @@ on a group.
 | --- | --- |
 | any, by name | `[projects."<name>"]`, e.g. a project uploaded from CI (wins over the rest) |
 | `host:<h>` | `[hosts.<h>]` |
-| `container:<image>` | `[hosts.<h>.images]` of the host in its `host-<h>` tag: the image name, its last part (`nginx`), or a glob (`ghcr.io/acme/admin-*`); an exact name wins over a glob |
+| `container:<image>` | `[hosts.<h>.images]` of the host in its `host-<h>` tag: the image name, its last part (`nginx`), or a glob (`ghcr.io/acme/admin-*`); an exact name wins over a glob, a longer glob over a shorter one, so `"*"` catches the host's other containers |
 | `code:<name>` | `[code.<name>]` |
 | `<name>` from a GitHub release | `[github.<name>]` |
 
@@ -201,7 +201,12 @@ exposure = "internal"            # the host itself
 [hosts.web01.images]
 "nginx" = { exposure = "internet", input = "public", criticality = "high" }
 "ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
+"*" = { exposure = "internal" }  # the host's other containers (databases, workers, ...)
 ```
+
+A catch-all is per host, on purpose: it says "everything else on this host is internal",
+which you can check host by host, where a group-wide value could not be. An entry that sets
+none of the keys counts as unknown.
 
 They become tags on the Dependency-Track project (`exposure-internet`, `input-public`,
 `crit-high`, `flag-eol`, `flag-certified`), which `dt2dojo` copies to DefectDojo. A project

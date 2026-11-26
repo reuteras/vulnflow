@@ -91,6 +91,10 @@ class AssetContext:
     eol: bool = False
     certified: bool = False
 
+    def __bool__(self) -> bool:
+        """False when nothing is set: the asset's context is unknown."""
+        return bool(self.exposure or self.input or self.criticality or self.eol or self.certified)
+
     def tags(self) -> list[str]:
         """Dependency-Track project tags; unknown values get none."""
         out = []
