@@ -3634,6 +3634,108 @@ def test_machines_schema_is_up_to_date_and_matches_the_parser(inv):
     assert host["team"]["enum"] == sorted(inv.teams)
 
 
+def test_assess_threat_times_context_matrix():
+    from vulnflow.config import AssetContext as C
+    from vulnflow.priority import assess
+
+    rules = PriorityRules()
+    kev = Signals("CVE-1", kev=True)
+    hot = Signals("CVE-2", epss=0.5)
+    high = Signals("CVE-3")  # with CVSS 8
+    other = Signals("CVE-4")  # with CVSS 5
+
+    def tier(sig, cvss, ctx=None, vector="", laptop=False):
+        return assess(cvss, sig, rules, ctx, vector, laptop).tier
+
+    # the matrix in docs/exposure.md; no context = the internal column = the old tiers
+    cols = [C("internet"), C("external-auth"), C("internal"), C("restricted", "staff")]
+    assert [tier(kev, 9.8, c) for c in cols] == [1, 1, 1, 2]
+    assert [tier(hot, 5.0, c) for c in cols] == [1, 2, 2, 3]
+    assert [tier(high, 8.0, c) for c in cols] == [2, 3, 3, 4]
+    assert [tier(other, 5.0, c) for c in cols] == [3, 4, 4, 4]
+    assert [tier(x, c) for x, c in ((kev, 9.8), (hot, 5.0), (high, 8.0), (other, 5.0))] == [1, 2, 3, 4]
+    # public input and hostile-device count as internet
+    assert tier(high, 8.0, C("restricted", "public")) == 2
+    assert tier(high, 8.0, C("hostile-device")) == 2
+    # criticality: critical/high one step up, low one down; KEV on critical is always P1
+    assert tier(high, 8.0, C("internal", criticality="critical")) == 2
+    assert tier(high, 8.0, C("internal", criticality="low")) == 4
+    assert tier(kev, 9.8, C("restricted", "staff", "critical")) == 1
+    assert tier(kev, 9.8, C("restricted", "staff", "high")) == 1
+    assert tier(kev, 9.8, C("restricted", "staff", "low")) == 3
+    # criticality without exposure still counts
+    assert tier(high, 8.0, C(criticality="critical")) == 2
+    # the attack vector: a local bug on an internet host ranks as restricted
+    net = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    local = "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"
+    adjacent = "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    browser = "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"
+    assert tier(high, 8.0, C("internet"), net) == 2
+    assert tier(high, 8.0, C("internet"), local) == 4
+    assert tier(high, 8.0, C("internet"), adjacent) == 3
+    # a laptop: internal, but a network bug that needs a user to open something is internet
+    assert tier(high, 8.0, C("internal"), browser, laptop=True) == 2
+    assert tier(high, 8.0, C("internal"), browser, laptop=False) == 3
+    assert tier(high, 8.0, C("internal"), net, laptop=True) == 3
+    v = assess(8.0, high, rules, C("internet", criticality="critical"), net)
+    assert v.tier == 1 and v.reasons == ["CVSS 8.0 >= 7.0", "no EPSS yet", "internet", "critical asset"]
+    lv = assess(8.0, high, rules, C("internet"), local).reasons
+    assert lv[-2:] == ["internet", "local access needed (AV:L)"]
+
+
+def test_rank_findings_with_context_tags_and_cached_vectors(inv, tmp_path):
+    from vulnflow.clients import DTProject
+    from vulnflow.ranking import VectorCache, context_from_tags, rank_finding, rank_findings
+
+    ctx, laptop = context_from_tags(["team-users", "kind-laptop", "exposure-internal", "crit-high"])
+    assert ctx is not None and (ctx.exposure, ctx.criticality, laptop) == ("internal", "high", True)
+    assert context_from_tags(["team-dev", "exposure-bogus"]) == (None, False)
+
+    asked: list[str] = []
+
+    def vuln(m, url, h, b):
+        vid = url.rsplit("/", 1)[1]
+        asked.append(vid)
+        vec = {"CVE-1": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"}.get(vid, "")
+        return Response(200, json.dumps({"vulnId": vid, "cvssV3Vector": vec}).encode(), {})
+
+    t = FakeTransport({"GET /api/v1/vulnerability/source/": vuln})
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    clock = [1000.0]
+    vectors = VectorCache(dt, tmp_path / "v.json", now=lambda: clock[0])
+
+    def finding(vid: str, cvss: float, epss: float | None = None) -> dict[str, Any]:
+        v = {"vulnId": vid, "source": "NVD", "severity": "HIGH", "cvssV3BaseScore": cvss}
+        if epss is not None:
+            v["epssScore"] = epss
+        return {"component": {"name": "lib", "version": "1"}, "vulnerability": v}
+
+    web = DTProject("p1", "host:web", "1", True, ["team-sysadm", "exposure-internet", "crit-high"])
+    bare = DTProject("p2", "host:bare", "1", True, ["team-sysadm"])
+    verdict, cvss, epss = rank_finding(web, finding("CVE-2", 8.0, 0.3), inv.rules, set(), vectors)
+    assert (verdict.tier, cvss, epss) == (1, 8.0, 0.3)  # EPSS from DT, internet, high asset
+    assert rank_finding(web, finding("CVE-1", 8.0), inv.rules, set(), vectors)[0].tier == 3  # AV:L
+    assert rank_finding(bare, finding("CVE-1", 8.0), inv.rules, {"CVE-1"}, vectors)[0].tier == 1
+    assert asked == ["CVE-2", "CVE-1"]  # no context, no vector needed: the bare host asks nothing
+    # cached on disk: a new cache doesn't ask again, until the entry is 30 days old
+    vectors.save()
+    again = VectorCache(dt, tmp_path / "v.json", now=lambda: clock[0])
+    assert again.get("NVD", "CVE-1").startswith("CVSS:3.1/AV:L") and asked == ["CVE-2", "CVE-1"]
+    clock[0] += 31 * 86400
+    assert again.get("NVD", "CVE-1") and asked[-1] == "CVE-1" and len(asked) == 3
+    # DT down: ranking goes on without the vector, and says so once
+    broken = VectorCache(
+        DependencyTrack("http://dt", "k", transport=FakeTransport({})), tmp_path / "x.json"
+    )
+    assert broken.get("NVD", "CVE-9") == "" and len(broken.errors) <= 1
+
+    dtp = DependencyTrack("http://dt", "k", transport=_report_portfolio())
+    errors: list[str] = []
+    ranked = rank_findings(inv, dtp, {"CVE-2026-0004"}, None, errors)
+    assert not errors and ranked[0].vuln_id == "CVE-2026-0004" and ranked[0].tier == 1
+    assert [r.tier for r in ranked] == sorted(r.tier for r in ranked)
+
+
 def test_set_tags_304_is_checked_by_reading_back():
     t = FakeTransport(
         {
@@ -4606,12 +4708,20 @@ def test_report_findings_baseline_then_new_resolved_and_kev(inv):
     assert isinstance(para, rp.Para) and isinstance(table, rp.Table)
     assert para.text == (
         "**3** new, **1** resolved or suppressed since the last daily report; "
-        "**2** new critical/high/KEV."
+        "**2** new P1/P2, critical, high or KEV."
     )
-    # KEV first, then by severity; the LOW one is only counted (weekly)
+    # not ranked here (no tier, no reasons): KEV first, then by severity; LOW only counted
     assert table.rows == [
-        ["medium", "`CVE-2026-0007`", "**KEV**", "`grafana` 13.3.1", "`container:grafana@13.3.1`"],
-        ["critical", "`CVE-2026-0006`", "", "`sudo` 1.9", "`host:web01@debian-13`"],
+        [
+            "",
+            "medium",
+            "`CVE-2026-0007`",
+            "**KEV**",
+            "`grafana` 13.3.1",
+            "`container:grafana@13.3.1`",
+            "",
+        ],
+        ["", "critical", "`CVE-2026-0006`", "", "`sudo` 1.9", "`host:web01@debian-13`", ""],
     ]
 
     weekly = rp.findings_section(saved, now, set(), weekly=True)
@@ -5068,7 +5178,8 @@ def test_tui_filters_and_decision_rules(inv):
     ]
     assert [r.vuln_id for r in tui.filter_rows(rows, min_sev="HIGH")] == ["CVE-2026-0001"]
     assert [r.vuln_id for r in tui.filter_rows(rows, text="CURL")] == ["CVE-2026-0002"]
-    assert tui.finding_line(rows[0], 200).startswith("  MEDI KEV CVE-2026-0004")
+    assert tui.finding_line(rows[0], 200).startswith("  P1 MEDI KEV CVE-2026-0004")
+    assert [r.vuln_id for r in tui.filter_rows(rows, max_tier=1)] == ["CVE-2026-0004"]
 
     today = date(2026, 11, 25)
     ok = tui.Decision(

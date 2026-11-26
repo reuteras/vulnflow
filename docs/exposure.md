@@ -2,12 +2,13 @@
 
 [Back to the README](../README.md).
 
-**Status: step 1 of [What it takes](#what-it-takes-in-vulnflow) is in place** (the asset
-model and its tags, see [Step 1 in use](#step-1-in-use)); scoring with it (step 2) and the
-rest are not. Today vulnflow ranks a CVE by threat alone (KEV,
-CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)) and routes it
-by team. The same CVE gets the same tier on a public web service and on a locked-down admin
-workstation. This document describes how to add *asset context*, how exposed an asset is and
+**Status: steps 1 and 2 of [What it takes](#what-it-takes-in-vulnflow) are in place**: the
+asset model and its tags ([Step 1 in use](#step-1-in-use)) and the scoring of
+Dependency-Track findings with them ([Step 2 in use](#step-2-in-use)); DefectDojo priority
+and SLA (step 3) and the rest are not. Before this, vulnflow ranked a CVE by threat alone
+(KEV, CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)), so the
+same CVE got the same tier on a public web service and on a locked-down admin workstation;
+OpenCVE alerts still do, because they are per product, not per asset. This document describes how to add *asset context*, how exposed an asset is and
 how much it matters, for large organisations such as government agencies and banks: many
 users and teams, public digital services, mobile apps, identity, regulated critical
 services and a fair amount of legacy.
@@ -231,3 +232,29 @@ value means and marks mistakes while you type: taplo, which LazyVim's TOML extra
 VS Code's Even Better TOML use. `taplo lint machines.toml` checks the file from the
 command line. `python3 -m vulnflow schema` regenerates the schema (the teams come from
 `inventory/inventory.toml`); a test fails when the committed file is out of date.
+
+## Step 2 in use
+
+Every open Dependency-Track finding gets a tier from the threat (KEV from the cached
+catalog, EPSS and CVSS v3 as Dependency-Track reports them on the finding) and its
+project's context tags, by the matrix in
+[Combining threat and context](#combining-threat-and-context-into-a-tier):
+
+- no context: the `internal` column, which is the threat-only tier vulnflow always had;
+- `input = "public"` and `hostile-device`: the `internet` column;
+- the CVSS v3 vector: a Local or Physical bug ranks in the `restricted` column, an Adjacent
+  one at most as `internal`; on a laptop (`kind-laptop`) a network bug that needs user
+  interaction (`UI:R`: browser, mail, PDF) ranks as `internet`, so laptops can be
+  `internal` and their client-side CVEs still rank high;
+- `critical` and `high` raise one step, `low` lowers one; KEV or an exploited sighting on a
+  `critical` asset is P1.
+
+Findings don't carry the vector, so vulnflow reads it per vulnerability from
+Dependency-Track, only for projects with context, and caches it in `cvss-vectors.json` in
+the data directory (refreshed after 30 days). Each tier has its reasons, e.g. `in CISA KEV;
+internet; critical asset`.
+
+Where it shows: `python3 -m vulnflow priorities [--team T] [--tier N] [--json]` lists the
+findings by tier with the reasons; the TUI's Findings tab sorts by tier and filters with
+`p`; the email reports list new P1/P2 findings (with critical, high and KEV ones as before),
+with the tier and reasons, and a new P1 or P2 makes the daily report go out.

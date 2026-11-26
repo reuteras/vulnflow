@@ -47,6 +47,15 @@ The write-back to OpenCVE (`VULNFLOW_OPENCVE_TRIAGE_MAX_TIER`) **only touches CV
 has triaged yet**. It never overwrites a status a person set (e.g. `risk_accepted`).
 Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 
+### Findings: threat and asset context
+
+Dependency-Track findings are ranked P1–P4 by the same threat rules **and** the asset
+context of their project (exposure, input, criticality from `machines.toml`): a KEV on an
+internet-facing service is P1, the same KEV on a tailnet-only admin tool P2, a local-only
+bug ranks as if unreachable, and a laptop's browser bug counts as internet-facing. Without
+context a finding keeps the threat-only tier above. See
+[Exposure and criticality](exposure.md#step-2-in-use); `vulnflow priorities` lists them.
+
 ### Which changes notify
 
 The tier says how serious the CVE is; it doesn't say whether this change matters. OpenCVE

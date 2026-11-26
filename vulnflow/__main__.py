@@ -199,6 +199,49 @@ def _github_sboms(
     return 1 if res.errors else 0
 
 
+def _kev_ids(data_dir: Path) -> set[str]:
+    """The cached CISA KEV catalog's CVE ids (empty when off or unavailable)."""
+    from .intel import KevCache
+
+    if not env_flag("VULNFLOW_ENRICH_KEV"):
+        return set()
+    try:
+        return set(KevCache(data_dir).index())
+    except Exception as e:
+        logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
+        return set()
+
+
+def _priorities(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
+    """`priorities`: findings by tier (ranking.py)."""
+    from .ranking import VECTOR_FILE, VectorCache, rank_findings
+
+    if a.team and a.team not in inv.teams:
+        print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+        return 2
+    dt = _dtrack(required=True)
+    if dt is None:  # unreachable: required=True exits first
+        return 2
+    errors: list[str] = []
+    rows = rank_findings(
+        inv, dt, _kev_ids(data_dir), VectorCache(dt, data_dir / VECTOR_FILE), errors, a.team
+    )
+    rows = [r for r in rows if r.tier <= a.tier]
+    if a.json:
+        print(json.dumps([asdict(r) for r in rows], indent=2))
+    else:
+        for r in rows:
+            print(
+                f"{r.tier_name:<10} {r.vuln_id:<20} {r.team}/{r.where}: {r.component} {r.version}"
+                f" | {'; '.join(r.reasons)}"
+            )
+        counts = {t: sum(1 for r in rows if r.tier == t) for t in (1, 2, 3, 4)}
+        print("  " + ", ".join(f"P{t}: {n}" for t, n in counts.items() if t <= a.tier), file=sys.stderr)
+    for msg in errors:
+        print(f"  error {msg}", file=sys.stderr)
+    return 1 if errors else 0
+
+
 def _maintenance_dt() -> DependencyTrack | None:
     key = env("DT_MAINTENANCE_API_KEY")
     return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
@@ -525,9 +568,13 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
             logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
     machines = load_machines(a.machines, inv.teams)
 
+    from .ranking import VECTOR_FILE, VectorCache
+
+    vectors = VectorCache(dt, Path(a.data_dir) / VECTOR_FILE)
+
     def findings() -> tuple[list[tui.FindingRow], list[str]]:
         errors: list[str] = []
-        return tui.load_findings(inv, dt, kev, errors), errors
+        return tui.load_findings(inv, dt, kev, errors, vectors), errors
 
     def hosts(width: int) -> list[str]:
         try:
@@ -564,7 +611,6 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
 def _report(a: argparse.Namespace, inv: Inventory) -> int:
     """`report daily|weekly`: the digest poc.sh mails (see vulnflow/report.py)."""
     from . import report as rp
-    from .intel import KevCache
     from .machines import last_pushes
     from .upstreams import check
 
@@ -619,17 +665,15 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
     else:
         sections.append(rp.error_section("Dependency-Track findings", "DT_API_KEY not set"))
     if dt is not None:
+        from .ranking import VECTOR_FILE, VectorCache
+
         errors: list[str] = []
-        current = rp.collect_findings(inv, dt, errors)
+        kev = _kev_ids(Path(a.data_dir))
+        vectors = VectorCache(dt, Path(a.data_dir) / VECTOR_FILE)
+        current = rp.collect_findings(inv, dt, errors, kev, vectors)
         if errors:  # a partial list would report everything it missed as resolved
             sections.append(rp.error_section("Dependency-Track findings", "; ".join(errors)[:500]))
         else:
-            kev: set[str] = set()
-            if env_flag("VULNFLOW_ENRICH_KEV"):
-                try:
-                    kev = set(KevCache(Path(a.data_dir)).index())
-                except Exception as e:
-                    logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
             sections.append(rp.findings_section(mine.get("findings"), current, kev, weekly=weekly))
             mine["findings"] = {k: f.to_json() for k, f in current.items()}
 
@@ -688,6 +732,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
     )
+    pz = sub.add_parser(
+        "priorities",
+        help="open Dependency-Track findings ranked P1-P4 by threat and asset context "
+        "(docs/exposure.md), with the reasons",
+    )
+    pz.add_argument("--team", help="only this team")
+    pz.add_argument("--tier", type=int, default=4, choices=(1, 2, 3, 4), help="up to this tier (4)")
+    pz.add_argument("--json", action="store_true")
     sub.add_parser(
         "schema",
         help="print the JSON Schema of machines.toml (schemas/machines.schema.json) for editor "
@@ -1098,6 +1150,9 @@ def main(argv: list[str] | None = None) -> int:
             if not a.loop:
                 return 1 if rep.errors or kev_rc or gh_rc else 0
             time.sleep(a.loop)
+
+    if a.cmd == "priorities":
+        return _priorities(a, inv, data_dir)
 
     if a.cmd == "schema":
         from .schema import render
