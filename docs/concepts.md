@@ -4,22 +4,27 @@
 
 ## How the teams work
 
-Everything is keyed on the team entries in `inventory/inventory.toml`. The example estate has
-six groups:
+Everything is keyed on the team entries in `inventory/inventory.toml`. Each team has an
+OpenCVE project and a chat mention named after its key (`network`, `@network`), a
+Dependency-Track tag `team-<key>` and a DefectDojo product type. The example estate has ten:
 
-| | sysadm | users | dev | network | virt | platform |
-| --- | --- | --- | --- | --- | --- | --- |
-| Owns | the servers | the MacBooks | code and containers | firewalls, VPN, load balancers, switches | vCenter, ESXi | OpenShift, Kubernetes |
-| OpenCVE project | `sysadm` | `users` | `dev` | `network` | `virt` | `platform` |
-| Dependency-Track tag | `team-sysadm` | `team-users` | `team-dev` | `team-network` | `team-virt` | `team-platform` |
-| DefectDojo product type | `Sysadmin` | `Users` | `Development` | `Network` | `Virtualization` | `Platform` |
-| Chat mention | `@sysadm` | `@users` | `@dev` | `@network` | `@virt` | `@platform` |
-| DT projects | `host:<server>` | `host:<macbook>` | `container:<image>`, `code:<name>` | none | none | none |
+| Team | Owns | DefectDojo product type | Dependency-Track projects |
+| --- | --- | --- | --- |
+| `sysadm` | the servers, security tools | `Sysadmin` | `host:<server>` |
+| `users` | the MacBooks | `Users` | `host:<macbook>` |
+| `dev` | code and containers | `Development` | `container:<image>`, `code:<name>`, apps from CI |
+| `network` | firewalls, VPN and remote-access gateways, load balancers | `Network` | none |
+| `virt` | vCenter, ESXi, backup and storage | `Virtualization` | none |
+| `platform` | OpenShift, Kubernetes | `Platform` | none |
+| `workplace` | Windows clients, office software, browsers | `Workplace` | none |
+| `msinfra` | domain controllers, Exchange, SharePoint | `Microsoft infrastructure` | none |
+| `itmgmt` | endpoint management and remote-support tools | `IT management` | none |
+| `apps` | SAP, Oracle E-Business Suite, Atlassian, managed file transfer | `Business applications` | none |
 
-network, virt and platform run appliances and platforms with no SBOM, so OpenCVE follows
-their products (Fortinet, NetScaler, Cisco and Check Point product lines; vCenter and ESXi;
-OpenShift and Kubernetes), with no version: every CVE for the product is an alert. The
-products in `inventory.toml` are common examples; put the ones you run in
+The teams without Dependency-Track projects run appliances, platforms and software the push
+agents don't scan, so OpenCVE follows their products, with no version: every CVE for the
+product is an alert. Most of those products are there because they keep showing up in
+CISA KEV. The lists in `inventory.toml` are examples; put what you run in
 `[subscriptions.<team>]` in `machines.toml`.
 
 Products that several teams care about can be listed under each. Each team then gets its

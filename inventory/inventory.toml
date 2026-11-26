@@ -19,15 +19,22 @@ chat_min_tier = 2
 ignore_event_types = ["references"]
 
 # ---------------------------------------------------------------------------
-# Six groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
-#   sysadm    the servers (OS packages, Homebrew on the servers)
-#   users     the MacBooks (macOS, Homebrew, apps, language tools)
-#   dev       code and containers (application dependencies, container images)
-#   network   firewalls, VPN gateways, load balancers, switches and routers
-#   virt      the virtualization platform (vCenter, ESXi)
-#   platform  the container platform (OpenShift, Kubernetes)
-# The last three are appliances and platforms without an SBOM: OpenCVE follows them by
-# product. The products below are common enterprise examples; list what you run in
+# Ten groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
+#   sysadm     the servers (OS packages, Homebrew on the servers) and security tools
+#   users      the MacBooks (macOS, Homebrew, apps, language tools)
+#   dev        code and containers (application dependencies, container images)
+#   network    firewalls, VPN and remote-access gateways, load balancers, switches, routers
+#   virt       the virtualization platform (vCenter, ESXi) and backup/storage
+#   platform   the container platform (OpenShift, Kubernetes)
+#   workplace  Windows clients and office software
+#   msinfra    Microsoft server infrastructure (domain controllers, Exchange, SharePoint)
+#   itmgmt     endpoint management and remote-support tools (admin on every machine)
+#   apps       business applications and managed file transfer
+# All but the first three are appliances, platforms and software without an SBOM from our
+# agents: OpenCVE follows them by product. Every product name below was checked against
+# NVD's CPE dictionary, most of them on a CISA KEV entry (2026-11-25). OpenCVE rejects a
+# team's whole subscription list when one name is unknown, so check new names first
+# (docs/install.md "Describe what you run"). The products below are common enterprise examples; list what you run in
 # machines.toml ([subscriptions.<team>]) and drop the rest.
 # A machine's `team` owns its host project; its containers and code go to dev (below).
 [teams.sysadm]
@@ -43,6 +50,9 @@ vendors  = []
 debian    = ["debian_linux"]
 canonical = ["ubuntu_linux"]
 linux     = ["linux_kernel"]
+# Security tools have exploitable bugs too (both in CISA KEV).
+microsoft  = ["defender_antimalware_platform"]
+trendmicro = ["apex_one"]
 # Add what the servers run (names are NVD's; see docs/install.md "Describe what you run" for how to
 # check one): nginx, openssh, postgresql, ...
 
@@ -91,6 +101,11 @@ citrix     = ["netscaler_application_delivery_controller", "netscaler_gateway"]
 cisco      = ["adaptive_security_appliance_software", "firepower_threat_defense", "ios_xe",
               "nx-os", "identity_services_engine"]
 checkpoint = ["quantum_security_gateway_firmware", "quantum_spark_firmware", "gaia_os"]
+# Remote-access gateways: after Windows the most exploited category in CISA KEV.
+paloaltonetworks = ["pan-os"]
+ivanti     = ["connect_secure", "policy_secure"]
+sonicwall  = ["sma6200_firmware", "sma6210_firmware", "sma7200_firmware", "sma7210_firmware"]
+f5         = ["big-ip_access_policy_manager", "big-ip_local_traffic_manager"]
 
 [teams.virt]
 display_name   = "Virtualization"
@@ -104,6 +119,11 @@ vendors  = []
 
 [teams.virt.opencve.products]
 vmware = ["vcenter_server", "esxi"]   # still `vmware` in NVD after Broadcom's acquisition
+# Backup and storage: attackers go for the backups first.
+commvault = ["commvault"]
+netapp    = ["ontap"]
+# Veeam Backup & Replication is in CISA KEV, but its NVD name has an escaped `&`
+# (veeam_backup_\&_replication); check how OpenCVE spells it before adding it here.
 
 [teams.platform]
 display_name   = "Platform"
@@ -118,6 +138,75 @@ vendors  = []
 [teams.platform.opencve.products]
 redhat     = ["openshift_container_platform"]
 kubernetes = ["kubernetes"]
+
+[teams.workplace]
+display_name   = "Workplace"
+opencve_project = "workplace"
+defectdojo_product_type = "Workplace"
+dtrack_tag     = "team-workplace"
+chat_mention   = "@workplace"
+
+[teams.workplace.opencve]
+vendors  = []
+
+[teams.workplace.opencve.products]
+# Windows is the largest share of CISA KEV. NVD names each release separately; add new
+# ones (windows_11_26h2, ...) as they ship.
+microsoft = ["windows_10_22h2", "windows_11_23h2", "windows_11_24h2", "windows_11_25h2",
+             "365_apps", "office_2021", "office_2024", "edge_chromium"]
+google    = ["chrome"]
+adobe     = ["acrobat_reader_dc", "acrobat_reader"]
+
+[teams.msinfra]
+display_name   = "Microsoft infrastructure"
+opencve_project = "msinfra"
+defectdojo_product_type = "Microsoft infrastructure"
+dtrack_tag     = "team-msinfra"
+chat_mention   = "@msinfra"
+
+[teams.msinfra.opencve]
+vendors  = []
+
+[teams.msinfra.opencve.products]
+microsoft = ["windows_server_2016", "windows_server_2019", "windows_server_2022",
+             "windows_server_2025", "exchange_server", "sharepoint_server"]
+
+[teams.itmgmt]
+display_name   = "IT management"
+opencve_project = "itmgmt"
+defectdojo_product_type = "IT management"
+dtrack_tag     = "team-itmgmt"
+chat_mention   = "@itmgmt"
+
+[teams.itmgmt.opencve]
+vendors  = []
+
+[teams.itmgmt.opencve.products]
+# Admin on every machine: one bug compromises the fleet. Ransomware groups favour them.
+ivanti      = ["endpoint_manager", "endpoint_manager_mobile"]
+connectwise = ["screenconnect"]
+simple-help = ["simplehelp"]
+n-able      = ["n-central"]
+solarwinds  = ["web_help_desk"]
+
+[teams.apps]
+display_name   = "Business applications"
+opencve_project = "apps"
+defectdojo_product_type = "Business applications"
+dtrack_tag     = "team-apps"
+chat_mention   = "@apps"
+
+[teams.apps.opencve]
+vendors  = []
+
+[teams.apps.opencve.products]
+sap       = ["netweaver", "netweaver_enterprise_portal"]
+oracle    = ["e-business_suite"]
+atlassian = ["confluence_data_center", "confluence_server", "jira_data_center", "jira_server"]
+# Managed file transfer: mass data theft for extortion (MOVEit, GoAnywhere, Cleo).
+progress  = ["moveit_transfer"]
+fortra    = ["goanywhere_managed_file_transfer"]
+cleo      = ["harmony", "lexicom", "vltrader"]
 
 # ---------------------------------------------------------------------------
 # Your own hosts (servers, laptops, code directories) are NOT listed here: they go in

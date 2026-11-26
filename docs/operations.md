@@ -12,7 +12,7 @@ Two paths run side by side, and the email reports summarise both.
 changes regularly from its own knowledge base, NVD, the CVE List, Red Hat and CISA
 Vulnrichment. When a change touches a vendor or
 product in a team's subscriptions (from `inventory.toml` and `machines.toml`), OpenCVE adds
-it to that team's project (`sysadm`, `users`, `dev`, `network`, `virt`, `platform`). Each project has an alert automation
+it to that team's project (`sysadm`, `users`, `dev`, `network`, … see [the teams](concepts.md#how-the-teams-work)). Each project has an alert automation
 named `vulnflow`, created by `opencve-bootstrap`, which fires on every change and sends a
 webhook: an HTTP POST with the CVE, its CVSS score and the event types, from OpenCVE's
 worker to `http://vulnflow-receiver:8380/opencve` on the Docker network the two share, with
@@ -42,7 +42,7 @@ new critical/high/KEV findings, hosts that stopped uploading, and versions to de
 | --- | --- |
 | Which CVEs changed for the products my team follows? | OpenCVE, the team's project; `to_evaluate` = P1/P2 nobody has looked at yet |
 | Which of our hosts, images and apps have a vulnerable component? | Dependency-Track, projects tagged `team-<team>`: `host:…`, `container:…`, `code:…`, apps from CI |
-| What are we working on, who owns it, by when? | DefectDojo, the team's product type (Sysadmin, Users, Development, Network, Virtualization, Platform); filter by the `host-*` / `kind-*` / `group-*` tags |
+| What are we working on, who owns it, by when? | DefectDojo, the team's product type (Sysadmin, Network, Workplace, …); filter by the `host-*` / `kind-*` / `group-*` tags |
 | Which hosts stopped uploading? | `python3 -m vulnflow machines`, or the email report |
 | Does a team have no SBOM at all yet? | `python3 -m vulnflow sync --dry-run` |
 | How serious is CVE-X right now? | `python3 -m vulnflow enrich CVE-X` ([Look up a CVE](#look-up-a-cve)) |
