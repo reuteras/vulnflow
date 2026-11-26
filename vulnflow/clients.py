@@ -359,6 +359,21 @@ class DefectDojo:
         )
         return int(r.json()["id"])
 
+    def test_findings(self, test_id: int) -> list[dict[str, Any]]:
+        """GET findings/?test={id}: every finding of one test, following `next` pages."""
+        out: list[dict[str, Any]] = []
+        path: str | None = f"findings/?test={int(test_id)}&limit=500"
+        while path:
+            data = self.http.get(path).json() or {}
+            out.extend(data.get("results") or [])
+            path = data.get("next") or None
+        return out
+
+    def patch_finding(self, finding_id: int, body: dict[str, Any]) -> None:
+        """PATCH findings/{id}/ (FindingSerializer: tags, known_exploited, ransomware_used,
+        kev_date, planned_remediation_date are writable in 3.5.300)."""
+        self.http.request("PATCH", f"findings/{int(finding_id)}/", json_body=body)
+
     def reimport(
         self,
         *,

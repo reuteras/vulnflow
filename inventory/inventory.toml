@@ -21,6 +21,9 @@ ignore_event_types = ["references"]
 # come and go on old CVEs. Chat gets new CVEs, KEV additions, changes that raise the tier,
 # and other changes to CVEs someone follows. See docs/concepts.md "Which changes notify".
 quiet_event_types = ["title", "description", "references", "weaknesses"]
+# Days from a finding's date to its planned remediation date in DefectDojo, per tier
+# (dt2dojo sets it, and the tier-p1..p4 tag; leave a tier out for no date). Change freely.
+sla_days = { p1 = 7, p2 = 30, p3 = 90 }
 
 # ---------------------------------------------------------------------------
 # Ten groups, each with its own OpenCVE project, DefectDojo product type and DT tag:

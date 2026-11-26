@@ -63,6 +63,9 @@ class PriorityRules:
     quiet_event_types: list[str] = field(
         default_factory=lambda: ["title", "description", "references", "weaknesses"]
     )
+    # days from a finding's date to its planned remediation date in DefectDojo, per tier;
+    # a tier left out (P4 by default) gets none
+    sla_days: dict[str, int] = field(default_factory=lambda: {"p1": 7, "p2": 30, "p3": 90})
 
 
 MACHINE_KINDS = ("linux", "macos")

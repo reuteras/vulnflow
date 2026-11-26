@@ -2,10 +2,11 @@
 
 [Back to the README](../README.md).
 
-**Status: steps 1 and 2 of [What it takes](#what-it-takes-in-vulnflow) are in place**: the
-asset model and its tags ([Step 1 in use](#step-1-in-use)) and the scoring of
-Dependency-Track findings with them ([Step 2 in use](#step-2-in-use)); DefectDojo priority
-and SLA (step 3) and the rest are not. Before this, vulnflow ranked a CVE by threat alone
+**Status: steps 1 to 3 of [What it takes](#what-it-takes-in-vulnflow) are in place**: the
+asset model and its tags ([Step 1 in use](#step-1-in-use)), the scoring of
+Dependency-Track findings with them ([Step 2 in use](#step-2-in-use)) and the tiers in
+DefectDojo ([Step 3 in use](#step-3-in-use)); routing, importers and the report sections
+(steps 4 to 6) are not. Before this, vulnflow ranked a CVE by threat alone
 (KEV, CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)), so the
 same CVE got the same tier on a public web service and on a locked-down admin workstation;
 OpenCVE alerts still do, because they are per product, not per asset. This document describes how to add *asset context*, how exposed an asset is and
@@ -277,3 +278,23 @@ Where it shows: `python3 -m vulnflow priorities [--team T] [--tier N] [--json]` 
 findings by tier with the reasons; the TUI's Findings tab sorts by tier and filters with
 `p`; the email reports list new P1/P2 findings (with critical, high and KEV ones as before),
 with the tier and reasons, and a new P1 or P2 makes the daily report go out.
+
+## Step 3 in use
+
+After each re-import, `dt2dojo` ranks the project's findings (from the export it just
+uploaded) and updates the DefectDojo findings of that test through the API, matched exactly
+by Dependency-Track's finding id (`unique_id_from_tool`):
+
+- tag `tier-p1` … `tier-p4` (the previous one replaced, other tags kept): filter on it, or
+  build a dashboard on it;
+- DefectDojo's own `known_exploited`, `ransomware_used` and `kev_date` from the CISA KEV
+  catalog (its Dependency-Track parser already copies EPSS);
+- **planned remediation date** = the finding's date plus `sla_days` for its tier, in
+  `[priority]` of `inventory.toml` (default P1 7, P2 30, P3 90 days, P4 none). vulnflow only
+  changes a date it set itself (empty, or what the previous tier gave); a date someone set
+  by hand stays.
+
+DefectDojo's own SLA date and its "SLA violated" views still follow severity. Making them
+follow the tier would need code inside DefectDojo (its `FINDING_SLA_PERIOD_METHOD` hook),
+which vulnflow leaves out on purpose: nothing to maintain inside another tool. Sort and
+filter on the planned remediation date and the tier tag instead.
