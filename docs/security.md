@@ -77,7 +77,7 @@ connects in.
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
-| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`) | the alert text: CVE, tier, team, links | leave it empty, or use the local Mattermost |
+| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`, `VULNFLOW_SOC_WEBHOOK`) | the alert text: CVE, tier, team, links | leave them empty, or use the local Mattermost |
 | Mattermost's own servers | the local chat, **switched off** in `stacks/mattermost/docker-compose.yml`: diagnostics, security-fix alerts, product notices, plugin marketplace, push notification proxy; link previews (the server fetching URLs in posts) off too | nothing while those stay off | — |
 | Tailscale | `tailscaled` (coordination server and DERP relays) | node metadata, as for any tailnet member | — |
 

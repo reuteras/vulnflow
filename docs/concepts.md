@@ -33,7 +33,7 @@ The vulnflow receiver ranks every CVE change OpenCVE sends it:
 
 | Tier | Rule (defaults, tune in `[priority]`) | Action |
 | --- | --- | --- |
-| **P1 Act** | in CISA KEV, or ≥1 `exploited` sighting in CIRCL Vulnerability-Lookup | chat + OpenCVE status `to_evaluate` |
+| **P1 Act** | in CISA KEV, or ≥1 `exploited` sighting in CIRCL Vulnerability-Lookup | chat + SOC channel + OpenCVE status `to_evaluate` |
 | **P2 Attend** | EPSS ≥ 0.10, or CVSS ≥ 9.0 and EPSS ≥ 0.01 | chat + OpenCVE status `to_evaluate` |
 | **P3 Track** | CVSS ≥ 7.0 | log only |
 | **P4 Watch** | everything else, including CVEs with **no CVSS** (NVD no longer enriches most CVEs) | log only |

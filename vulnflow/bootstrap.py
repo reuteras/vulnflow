@@ -474,15 +474,15 @@ def bootstrap_mattermost(
     admin_user: str,
     admin_password: str,
     team: str = "vulnflow",
-    channel: str = "alerts",
+    channels: tuple[str, ...] = ("alerts",),
     hook_base: str = "http://mattermost:8065",
     transport: Transport | None = None,
     wait_timeout: float = 300.0,
     interval: float = 5.0,
-) -> str:
-    """Admin, team, channel and incoming webhook; returns the webhook URL as the receiver
-    reaches it (hook_base: the server's name on the chat network). Safe to rerun: finds
-    what exists and only creates what is missing; the URL stays the same."""
+) -> dict[str, str]:
+    """Admin, team, and per channel an incoming webhook; returns {channel: webhook URL as
+    the receiver reaches it} (hook_base: the server's name on the chat network). Safe to
+    rerun: finds what exists and only creates what is missing; the URLs stay the same."""
     root = base_url.rstrip("/")
     http = Http(f"{root}/api/v4", headers={"Accept": "application/json"}, transport=transport)
     wait_for(http, "system/ping", wait_timeout, interval)
@@ -515,7 +515,17 @@ def bootstrap_mattermost(
     elif not r.ok:
         raise BootstrapError(f"Mattermost: team lookup failed (HTTP {r.status})")
     team_id = str((r.json() or {})["id"])
+    return {c: _mm_channel_hook(http, team_id, c, hook_base) for c in channels}
 
+
+MM_HOOK_DESCRIPTIONS = {
+    "alerts": "P1/P2 alerts from the vulnflow receiver",
+    "soc": "P1 alerts of every team from the vulnflow receiver",
+}
+
+
+def _mm_channel_hook(http: Http, team_id: str, channel: str, hook_base: str) -> str:
+    """The channel (created if missing) and its incoming webhook named MM_HOOK_NAME."""
     r = http.get(f"teams/{team_id}/channels/name/{channel}", expect_ok=False)
     if r.status == 404:
         r = http.post(
@@ -523,7 +533,7 @@ def bootstrap_mattermost(
             json_body={
                 "team_id": team_id,
                 "name": channel,
-                "display_name": channel.title(),
+                "display_name": channel.upper() if channel == "soc" else channel.title(),
                 "type": "O",
             },
         )
@@ -546,7 +556,7 @@ def bootstrap_mattermost(
             json_body={
                 "channel_id": channel_id,
                 "display_name": MM_HOOK_NAME,
-                "description": "P1/P2 alerts from the vulnflow receiver",
+                "description": MM_HOOK_DESCRIPTIONS.get(channel, "vulnflow receiver"),
             },
         ).json()
     return f"{hook_base.rstrip('/')}/hooks/{hook['id']}"

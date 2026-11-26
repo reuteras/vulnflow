@@ -24,7 +24,11 @@ the server. The receiver then:
 2. appends every alert to `alerts.jsonl` in its data volume (for the SIEM and the reports);
 3. for P1 and P2: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`:
    your own Mattermost, Slack or Teams webhook, or the PoC's local Mattermost from
-   `./poc.sh chat-up`, channel `alerts`), and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one.
+   `./poc.sh chat-up`, channel `alerts`), and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one;
+4. for P1 (`VULNFLOW_SOC_MIN_TIER`), whatever the team and also when no team owns the
+   project: posts it to the SOC channel (`VULNFLOW_SOC_WEBHOOK`; the local Mattermost's
+   `soc` channel), naming the team instead of mentioning it. The two deliveries are
+   independent: one failing doesn't stop the other.
 
 **Match: a CVE is found in something you run (Dependency-Track).** The push agents (daily)
 and CI (per release) upload SBOMs; Dependency-Track matches every component against NVD,

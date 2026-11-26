@@ -131,6 +131,24 @@ def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> s
     return "\n".join(lines)
 
 
+def format_soc(alerts: list[Alert], min_tier: int, opencve_url: str = "") -> str | None:
+    """The SOC channel's message: every alert at or above min_tier, whatever the team
+    (unrouted included), with the team named in each line instead of mentioned."""
+    hot = [a for a in alerts if a.tier <= min_tier]
+    if not hot:
+        return None
+    lines = [f"SOC: {len(hot)} prioritised CVE change(s) from OpenCVE project '{hot[0].project}'"]
+    for a in hot:
+        epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
+        link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
+        lines.append(
+            f"- [{a.tier_name}] {a.cve} team {a.team} CVSS "
+            f"{a.cvss31 if a.cvss31 is not None else 'n/a'} EPSS {epss}: "
+            f"{'; '.join(a.reasons)}{link}"
+        )
+    return "\n".join(lines)
+
+
 class Pipeline:
     """Background worker so the webhook returns 200 immediately."""
 
@@ -144,6 +162,9 @@ class Pipeline:
         chat_sender: Callable[[str], None] | None = None,
         opencve: OpenCVE | None = None,
         triage_max_tier: int = 0,
+        soc_webhook: str = "",
+        soc_sender: Callable[[str], None] | None = None,
+        soc_min_tier: int = 1,
     ):
         self.inv, self.enricher, self.log_path = inv, enricher, log_path
         self.opencve_url = opencve_url
@@ -152,6 +173,10 @@ class Pipeline:
         self.opencve, self.triage_max_tier = opencve, triage_max_tier
         self.q: queue.Queue[dict] = queue.Queue(maxsize=1000)
         self._send = chat_sender or (self._make_sender(chat_webhook) if chat_webhook else None)
+        # SOC channel: every alert at or above soc_min_tier, across teams; independent of
+        # the team channel, so one failing doesn't stop the other.
+        self._soc_send = soc_sender or (self._make_sender(soc_webhook) if soc_webhook else None)
+        self.soc_min_tier = soc_min_tier
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         threading.Thread(target=self._worker, daemon=True, name="vulnflow-worker").start()
 
@@ -177,6 +202,12 @@ class Pipeline:
                 self._send(msg)
             except Exception as e:
                 log.error("chat delivery failed: %s", e)
+        soc = format_soc(alerts, self.soc_min_tier, self.opencve_url)
+        if soc and self._soc_send:
+            try:
+                self._soc_send(soc)
+            except Exception as e:
+                log.error("SOC chat delivery failed: %s", e)
         log.info(
             "project=%s changes=%d top=%s",
             payload.get("project"),

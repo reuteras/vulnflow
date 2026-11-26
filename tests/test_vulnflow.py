@@ -225,6 +225,43 @@ def test_format_chat_only_hot_tiers(inv, tmp_path):
     assert "CVE-2026-0001" not in msg and "lower-tier" in msg
 
 
+def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
+    from vulnflow.receiver import format_soc
+
+    e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94, "CVE-2026-0001": 0.2})
+    alerts = process_payload(PAYLOAD, inv, e)
+    assert {a.cve: a.tier for a in alerts}["CVE-2024-3400"] == 1
+    msg = format_soc(alerts, 1, "http://opencve.local")
+    assert msg is not None and msg.startswith("SOC: 1 prioritised")
+    assert "@sysadm" not in msg and "team sysadm" in msg
+    assert "http://opencve.local/cve/CVE-2024-3400" in msg and "CVE-2026-0001" not in msg
+    assert "CVE-2026-0001" in (format_soc(alerts, 2) or "")  # P2 only with min tier 2
+
+    team: list[str] = []
+    soc: list[str] = []
+
+    def broken(text: str) -> None:
+        raise OSError("chat down")
+
+    # an unknown project is unrouted: no team mention, but the SOC still sees its P1
+    pipe = Pipeline(inv, e, tmp_path / "a.jsonl", chat_sender=team.append, soc_sender=soc.append)
+    pipe.handle({**PAYLOAD, "project": "nope"})
+    assert len(soc) == 1 and "team unrouted" in soc[0]
+    # one failing sender doesn't stop the other, either way round
+    Pipeline(inv, e, tmp_path / "b.jsonl", chat_sender=broken, soc_sender=soc.append).handle(PAYLOAD)
+    assert len(soc) == 2 and "team sysadm" in soc[1]
+    team.clear()
+    Pipeline(inv, e, tmp_path / "c.jsonl", chat_sender=team.append, soc_sender=broken).handle(PAYLOAD)
+    assert len(team) == 1 and team[0].startswith("@sysadm")
+    # nothing at the SOC's tier: no SOC message
+    quiet = {
+        **PAYLOAD,
+        "changes": [c for c in PAYLOAD["changes"] if c["cve"]["cve_id"] != "CVE-2024-3400"],
+    }
+    Pipeline(inv, e, tmp_path / "d.jsonl", soc_sender=soc.append).handle(quiet)
+    assert len(soc) == 2
+
+
 def test_http_receiver_auth_and_pipeline(inv, tmp_path):
     from http.server import ThreadingHTTPServer
 
@@ -4216,9 +4253,9 @@ def test_bootstrap_mattermost_creates_admin_team_channel_hook_and_reruns_cleanly
 
     mm = FakeMattermost()
     pw = secrets.token_hex(12)
-    url = bootstrap_mattermost(
+    (url,) = bootstrap_mattermost(
         "http://localhost:8065", admin_user="admin", admin_password=pw, transport=mm
-    )
+    ).values()
     (hook_id,) = mm.hooks
     assert url == f"http://mattermost:8065/hooks/{hook_id}"
     assert mm.users["admin"]["email"] == "admin@vulnflow.invalid"
@@ -4230,12 +4267,33 @@ def test_bootstrap_mattermost_creates_admin_team_channel_hook_and_reruns_cleanly
 
     # rerun: logs in, finds everything, creates nothing, same URL
     mm.calls.clear()
-    assert (
-        bootstrap_mattermost(
-            "http://localhost:8065", admin_user="admin", admin_password=pw, transport=mm
-        )
-        == url
+    assert bootstrap_mattermost(
+        "http://localhost:8065", admin_user="admin", admin_password=pw, transport=mm
+    ) == {"alerts": url}
+    assert [c for c in mm.calls if c[0] == "POST"] == [("POST", "users/login")]
+
+    # the SOC channel: alerts is kept, soc gets its own channel and hook; a rerun is a no-op
+    both = bootstrap_mattermost(
+        "http://localhost:8065",
+        admin_user="admin",
+        admin_password=pw,
+        channels=("alerts", "soc"),
+        transport=mm,
     )
+    assert both["alerts"] == url and both["soc"] != url and len(mm.hooks) == 2
+    soc = next(c for c in mm.channels.values() if c["name"] == "soc")
+    assert soc["display_name"] == "SOC"
+    soc_hook = next(h for h in mm.hooks.values() if h["channel_id"] == soc["id"])
+    assert both["soc"] == f"http://mattermost:8065/hooks/{soc_hook['id']}"
+    mm.calls.clear()
+    again = bootstrap_mattermost(
+        "http://localhost:8065",
+        admin_user="admin",
+        admin_password=pw,
+        channels=("alerts", "soc"),
+        transport=mm,
+    )
+    assert again == both
     assert [c for c in mm.calls if c[0] == "POST"] == [("POST", "users/login")]
 
     # someone else's install: the admin exists with another password, signup is closed
