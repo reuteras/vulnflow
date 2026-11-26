@@ -607,35 +607,46 @@ ts_env_values() {
   fi
 }
 
-# OpenCVE's Django compares the browser's Origin (https://<host>) with the plain-HTTP
-# request nginx forwards, so the tailnet origin must be trusted. Its local settings.py
-# (from install.sh prepare, bind-mounted into the webserver) gets a marked block. Written
-# in place, not with sed -i: a file bind mount keeps pointing at the old inode.
+# OpenCVE's local settings.py (from install.sh prepare, bind-mounted into the webserver)
+# gets a marked block:
+#  - its own cookie names. Cookies don't separate by port, and OpenCVE (https://<host>) and
+#    DefectDojo (https://<host>:8280) are both Django apps with the default `sessionid` and
+#    `csrftoken`: logging into one logged you out of the other. DefectDojo has no setting
+#    for the names, so OpenCVE's change (one new login there, once).
+#  - with tailscale serve, the HTTPS origin: Django compares the browser's Origin with the
+#    plain-HTTP request nginx forwards.
+# Written in place, not with sed -i: a file bind mount keeps pointing at the old inode.
 OPENCVE_SETTINGS_CHANGED=0
-opencve_set_origins() { # tailnet name, or empty to remove the block
+opencve_set_origins() { # tailnet name, or empty for no trusted origin
   local f="$UP/opencve/web/opencve/conf/settings.py" before new
   [[ -f "$f" ]] || return 0
   before="$(cat "$f")"
   new="$(sed '/^# BEGIN vulnflow/,/^# END vulnflow/d' "$f")"
+  new+=$'\n'"# BEGIN vulnflow (poc.sh): own cookie names (DefectDojo uses the defaults on the"
+  new+=$'\n'"# same host), and with tailscale serve the HTTPS origin"
+  new+=$'\n'"SESSION_COOKIE_NAME = \"opencve_sessionid\""
+  new+=$'\n'"CSRF_COOKIE_NAME = \"opencve_csrftoken\""
   if [[ -n "$1" ]]; then
-    new+=$'\n'"# BEGIN vulnflow (poc.sh): trust the tailscale serve HTTPS origin"
     new+=$'\n'"CSRF_TRUSTED_ORIGINS = [\"https://$1\"]"
-    new+=$'\n'"# END vulnflow"
   fi
+  new+=$'\n'"# END vulnflow"
   [[ "$new" == "$before" ]] && return 0
   printf '%s\n' "$new" >"$f"
   OPENCVE_SETTINGS_CHANGED=1
   if [[ -n "$1" ]]; then
-    log "OpenCVE: settings.py trusts origin https://$1"
+    log "OpenCVE: settings.py: own cookie names, trusts origin https://$1"
   else
-    log "OpenCVE: tailnet origin removed from settings.py"
+    log "OpenCVE: settings.py: own cookie names, no tailnet origin"
   fi
 }
 
 # Resolve the tailnet name and write the URLs that depend on it (no-op when unset).
 # Returns 1 when VULNFLOW_TS_HOST is set but can't be resolved.
 ts_prepare() {
-  [[ -n "${VULNFLOW_TS_HOST:-}" ]] || return 0
+  if [[ -z "${VULNFLOW_TS_HOST:-}" ]]; then
+    opencve_set_origins "" # the cookie names apply without tailscale too
+    return 0
+  fi
   ts_resolve || return 1
   ts_env_values "$TS_HOST" | vulnflow env-set
   load_env

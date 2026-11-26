@@ -168,8 +168,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
   only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
   `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.
   The serve setup also writes the browser-facing URLs (`DT_PUBLIC_API_URL`, `DD_SITE_URL`,
-  `DD_CSRF_TRUSTED_ORIGINS`, `OPENCVE_URL`) and a marked `CSRF_TRUSTED_ORIGINS` block in
-  OpenCVE's local `settings.py`. When bumping a stack, check its `ports:` lines and
+  `DD_CSRF_TRUSTED_ORIGINS`, `OPENCVE_URL`) and a marked block in OpenCVE's local
+  `settings.py` (`CSRF_TRUSTED_ORIGINS`, and always its own `SESSION_COOKIE_NAME` /
+  `CSRF_COOKIE_NAME`: cookies don't separate by port, and DefectDojo uses Django's default
+  names on the same host). When bumping a stack, check its `ports:` lines and
   whether a new browser-facing service needs a serve entry; `check_exposure` flags
   listeners outside loopback/tailnet.
 
