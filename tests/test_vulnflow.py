@@ -3610,6 +3610,30 @@ def test_context_toml_for_the_unknown_projects(inv, tmp_path):
     assert not m3.hosts["web01"].context and not m3.hosts["web01"].images["nginx"]
 
 
+def test_machines_schema_is_up_to_date_and_matches_the_parser(inv):
+    """schemas/machines.schema.json drives editor completion (taplo); regenerate it with
+    `python3 -m vulnflow schema > schemas/machines.schema.json` when this fails."""
+    from pathlib import Path
+
+    from vulnflow.config import CRITICALITIES, EXPOSURES, INPUTS
+    from vulnflow.schema import machines_schema, render
+
+    root = Path(__file__).resolve().parent.parent
+    assert (root / "schemas" / "machines.schema.json").read_text() == render(inv)
+    assert (
+        (root / "machines.example.toml")
+        .read_text()
+        .startswith("#:schema ./schemas/machines.schema.json\n")
+    )
+    props = machines_schema(inv)["properties"]
+    host = props["hosts"]["additionalProperties"]["properties"]
+    assert host["exposure"]["enum"] == [*EXPOSURES, ""] and host["input"]["enum"] == [*INPUTS, ""]
+    assert host["criticality"]["enum"] == [*CRITICALITIES, ""]
+    group = props["groups"]["additionalProperties"]["properties"]
+    assert not {"exposure", "input", "criticality", "eol", "certified", "images"} & set(group)
+    assert host["team"]["enum"] == sorted(inv.teams)
+
+
 def test_set_tags_304_is_checked_by_reading_back():
     t = FakeTransport(
         {

@@ -1,3 +1,4 @@
+#:schema ./schemas/machines.schema.json
 # Own hosts that push their SBOMs to Dependency-Track (scripts/vulnflow-agent.py).
 #
 #   cp machines.example.toml machines.toml

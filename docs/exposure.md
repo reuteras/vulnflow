@@ -223,3 +223,11 @@ are empty (empty is unknown, so the lines load as they are). Fill in what you kn
 the lines into `machines.toml`. A table that already exists there (`[hosts.web01]`,
 `[hosts.web01.images]`) comes as a comment saying where its lines go, because TOML doesn't
 allow the same table twice. Images that run in several versions get one line.
+
+Editor help: `schemas/machines.schema.json` describes every key and allowed value of
+`machines.toml`. With `#:schema ./schemas/machines.schema.json` as the first line (as in
+`machines.example.toml`), a TOML language server completes keys and values, shows what each
+value means and marks mistakes while you type: taplo, which LazyVim's TOML extra and
+VS Code's Even Better TOML use. `taplo lint machines.toml` checks the file from the
+command line. `python3 -m vulnflow schema` regenerates the schema (the teams come from
+`inventory/inventory.toml`); a test fails when the committed file is out of date.

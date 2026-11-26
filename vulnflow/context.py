@@ -170,6 +170,8 @@ def unknown_toml(machines: Machines, raw: dict[str, Any], projects: list[DTProje
         f"#   input:       {' | '.join(INPUTS)}",
         f"#   criticality: {' | '.join(CRITICALITIES)}",
         "#   eol, certified: true (leave out otherwise)",
+        "# Editor help: with `#:schema ./schemas/machines.schema.json` as the first line of",
+        "# machines.toml, a TOML language server (taplo) completes these values and flags typos.",
     ]
     for h in sorted(hosts):
         entry = hosts[h]
