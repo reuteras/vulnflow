@@ -3390,6 +3390,7 @@ def test_machines_github_verify(inv, tmp_path):
         '[github.x]\nrepo = "a/b"\nverify = { identity = "https://github.com/a/b/*@refs/tags/*" }\n'
     )
     v = load_machines(mf, inv.teams).github["x"].verify
+    assert v is not None
     assert v.identity.endswith("refs/tags/*") and v.issuer.endswith("githubusercontent.com")
     mf.write_text('[github.x]\nrepo = "a/b"\n')
     assert load_machines(mf, inv.teams).github["x"].verify is None
@@ -3422,6 +3423,11 @@ def test_github_sboms_cosign_verification(inv, tmp_path):
     bundle_asset = {"name": "m.cdx.json.sig.bundle", "browser_download_url": base + "m.sig"}
     release = {"tag_name": "v1", "draft": False, "prerelease": False, "assets": assets}
     uploads: list[bytes] = []
+
+    def upload(m, u, h, b):
+        uploads.append(b)
+        return Response(200, b"{}", {})
+
     t = FakeTransport(
         {
             "GET api.github.com/repos/a/b/releases?per_page=20": lambda m, u, h, b: Response(
@@ -3433,12 +3439,13 @@ def test_github_sboms_cosign_verification(inv, tmp_path):
             "GET https://github.com/a/b/releases/download/v1/m.sig": lambda m, u, h, b: Response(
                 200, b"BUNDLE", {}
             ),
-            "PUT /api/v1/bom": lambda m, u, h, b: (uploads.append(b), Response(200, b"{}", {}))[1],
+            "PUT /api/v1/bom": upload,
         }
     )
     gh, dt = GitHub(transport=t), DependencyTrack("http://dt", "k", transport=t)
     ident = "https://github.com/a/b/*"
-    src = GithubSource("m", "a/b", "*.cdx.json", "users", verify=CosignVerify(ident))
+    verify = CosignVerify(ident)
+    src = GithubSource("m", "a/b", "*.cdx.json", "users", verify=verify)
     machines = Machines(github={"m": src})
     state = tmp_path / "s.json"
     calls: list[tuple[Any, ...]] = []
@@ -3460,7 +3467,7 @@ def test_github_sboms_cosign_verification(inv, tmp_path):
     # good signature: uploaded; the verifier saw the asset, bundle, anchored regexp and issuer
     res = pull(machines, inv, gh, dt, state, verifier=good)
     assert not res.errors and len(uploads) == 1 and "signature verified" in res.uploaded[0]
-    assert calls == [(bom, b"BUNDLE", identity_regexp(ident), src.verify.issuer)]
+    assert calls == [(bom, b"BUNDLE", identity_regexp(ident), verify.issuer)]
     # without `verify` the verifier is never called and no bundle is needed
     machines.github["m"] = GithubSource("m", "a/b", "*.cdx.json", "users")
     release["assets"] = assets
