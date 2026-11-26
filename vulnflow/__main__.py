@@ -128,20 +128,22 @@ def _mm_bootstrap(env_file: str, wait: float) -> int:
     from .bootstrap import BootstrapError, bootstrap_mattermost, set_env_values
 
     try:
-        url = bootstrap_mattermost(
+        urls = bootstrap_mattermost(
             env("MM_URL", f"http://localhost:{env('MM_PORT', '8065')}"),
             admin_user=env("MM_ADMIN_USER", "admin"),
             admin_password=env("MM_ADMIN_PASSWORD", required=True),
+            channels=("alerts", "soc"),
             wait_timeout=wait,
         )
     except BootstrapError as e:
         print(f"  error {e}", file=sys.stderr)
         return 1
-    if env("VULNFLOW_CHAT_WEBHOOK") == url:
-        print("  ok    VULNFLOW_CHAT_WEBHOOK already points at Mattermost's alerts channel")
-    else:
-        set_env_values(env_file, {"VULNFLOW_CHAT_WEBHOOK": url})
-        print(f"  set   VULNFLOW_CHAT_WEBHOOK in {env_file} (Mattermost, channel alerts)")
+    for key, channel in (("VULNFLOW_CHAT_WEBHOOK", "alerts"), ("VULNFLOW_SOC_WEBHOOK", "soc")):
+        if env(key) == urls[channel]:
+            print(f"  ok    {key} already points at Mattermost's {channel} channel")
+        else:
+            set_env_values(env_file, {key: urls[channel]})
+            print(f"  set   {key} in {env_file} (Mattermost, channel {channel})")
     return 0
 
 
@@ -822,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mmb = sub.add_parser(
         "mm-bootstrap",
-        help="local chat (Mattermost): admin, team, channel 'alerts', webhook -> VULNFLOW_CHAT_WEBHOOK",
+        help="local chat (Mattermost): admin, team, channels 'alerts' and 'soc', their webhooks",
     )
     mmb.add_argument("--wait", type=float, default=300, metavar="SECONDS")
     ddb = sub.add_parser("dd-bootstrap", help="first-run DefectDojo setup: API key for admin")
@@ -1210,6 +1212,8 @@ def main(argv: list[str] | None = None) -> int:
             _enricher(data_dir),
             data_dir / "alerts.jsonl",
             chat_webhook=env("VULNFLOW_CHAT_WEBHOOK"),
+            soc_webhook=env("VULNFLOW_SOC_WEBHOOK"),
+            soc_min_tier=int(env("VULNFLOW_SOC_MIN_TIER", "1") or 1),
             opencve_url=env("OPENCVE_URL"),
             opencve=_opencve() if triage else None,
             triage_max_tier=triage,

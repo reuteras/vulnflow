@@ -256,9 +256,10 @@ Edition, bound to 127.0.0.1 and served on the tailnet like the other UIs.
 ```
 
 It starts Mattermost and its Postgres (`stacks/mattermost`), creates the admin
-`MM_ADMIN_USER` (password `MM_ADMIN_PASSWORD` in `.env`), team `vulnflow`, channel `alerts`
-and an incoming webhook, writes the webhook to `VULNFLOW_CHAT_WEBHOOK`, and recreates the
-receiver on the chat's network. Log in at `http://localhost:8065` (or
+`MM_ADMIN_USER` (password `MM_ADMIN_PASSWORD` in `.env`), team `vulnflow`, channels `alerts`
+(the teams' P1/P2) and `soc` (every P1, for the SOC), each with an incoming webhook, writes
+them to `VULNFLOW_CHAT_WEBHOOK` and `VULNFLOW_SOC_WEBHOOK`, and recreates the receiver on the
+chat's network. Log in at `http://localhost:8065` (or
 `https://<host>:8065` with `VULNFLOW_TS_HOST`), and rerun the check above: the P1 alert
 appears in `alerts`. Invite the others from the System Console (Users) or with an invite
 link; open signup is off. Mattermost's phone-home features are switched off

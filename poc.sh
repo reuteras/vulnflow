@@ -510,7 +510,8 @@ cmd_glue_up() {
 # ---- Optional local chat (stacks/mattermost) ------------------------------------
 # Mattermost Team Edition, so the P1/P2 alerts can be seen without an outside chat
 # service. chat-up starts it, has `vulnflow mm-bootstrap` create the admin, team
-# `vulnflow`, channel `alerts` and an incoming webhook (VULNFLOW_CHAT_WEBHOOK in .env),
+# `vulnflow`, channels `alerts` and `soc` with incoming webhooks (VULNFLOW_CHAT_WEBHOOK and
+# VULNFLOW_SOC_WEBHOOK in .env),
 # and recreates the receiver on the chat network. Not part of setup; rerunnable.
 chat_compose() { docker compose --env-file .env -f stacks/mattermost/docker-compose.yml "$@"; }
 chat_installed() { docker volume inspect vulnflow-chat_mattermost-data >/dev/null 2>&1; }
@@ -526,11 +527,11 @@ cmd_chat_up() {
   log "Mattermost (local chat)"
   chat_compose up -d
   vulnflow mm-bootstrap
-  load_env # VULNFLOW_CHAT_WEBHOOK
+  load_env # VULNFLOW_CHAT_WEBHOOK, VULNFLOW_SOC_WEBHOOK
   log "Receiver on the chat network"
   glue_compose up -d --force-recreate receiver
   if [[ -n "$TS_HOST" ]]; then ts_serve on; fi
-  log "Chat: $(chat_url)  ${MM_ADMIN_USER:-admin} / MM_ADMIN_PASSWORD, team vulnflow, channel alerts"
+  log "Chat: $(chat_url)  ${MM_ADMIN_USER:-admin} / MM_ADMIN_PASSWORD, team vulnflow, channels alerts and soc"
 }
 
 # ---- Tailscale -------------------------------------------------------------------
