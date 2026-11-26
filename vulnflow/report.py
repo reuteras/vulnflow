@@ -38,13 +38,14 @@ import os
 import re
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .clients import DependencyTrack
 from .config import Inventory, Machines
@@ -125,6 +126,7 @@ class OpenFinding:
     severity: str
     tier: int = 0  # 1-4 from ranking.py; 0 = not ranked
     reasons: list[str] = field(default_factory=list)
+    component_uuid: str = ""  # for the paths on disk and the Dependency-Track link
 
     @property
     def key(self) -> str:
@@ -306,12 +308,34 @@ def collect_findings(
             severity=str(vuln.get("severity") or "UNASSIGNED").upper(),
             tier=tier,
             reasons=reasons,
+            component_uuid=str(comp.get("uuid", "")),
         )
         if of.key not in out or 0 < of.tier < (out[of.key].tier or 9):
             out[of.key] = of  # the same finding on two versions: keep the higher tier
     if vectors is not None:
         vectors.save()
     return out
+
+
+@dataclass
+class Links:
+    """Where the report links to: your own DefectDojo and Dependency-Track UI (the
+    browser-facing URLs, DD_SITE_URL and the DT UI); empty = no link."""
+
+    defectdojo: str = ""
+    dependency_track: str = ""
+
+    def finding(self, f: OpenFinding, paths: list[str]) -> str:
+        """The Where cell: up to three paths on disk, then the links."""
+        shown = [code(p) for p in paths[:3]] + ([f"+{len(paths) - 3} more"] if len(paths) > 3 else [])
+        links = []
+        if self.defectdojo and f.vuln_id:
+            q = quote(f.vuln_id, safe="")
+            links.append(f"[DefectDojo]({self.defectdojo.rstrip('/')}/simple_search?query={q})")
+        if self.dependency_track and f.component_uuid:
+            uuid = quote(f.component_uuid, safe="")
+            links.append(f"[Dependency-Track]({self.dependency_track.rstrip('/')}/components/{uuid})")
+        return " ".join([*shown, *links])
 
 
 def _sev_rank(sev: str) -> int:
@@ -324,6 +348,8 @@ def findings_section(
     kev: set[str],
     *,
     weekly: bool,
+    links: Links | None = None,
+    paths: Callable[[str], list[str]] | None = None,
 ) -> Section:
     s = Section("Dependency-Track findings")
     if previous is None:
@@ -350,11 +376,15 @@ def findings_section(
         )
     )
     if important:
-        _table(
-            s,
-            ["Tier", "Severity", "CVE", "KEV", "Component", "Project", "Why"],
-            [f.row(f.vuln_id in kev) for f in important],
-        )
+        header = ["Tier", "Severity", "CVE", "KEV", "Component", "Project", "Why"]
+        rows = [f.row(f.vuln_id in kev) for f in important]
+        if links is not None or paths is not None:
+            header.append("Where")
+            shown = important[:LIST_MAX]  # paths only for the rows that are listed
+            for f, row in zip(shown, rows, strict=False):
+                on_disk = paths(f.component_uuid) if paths and f.component_uuid else []
+                row.append((links or Links()).finding(f, on_disk))
+        _table(s, header, rows)
     if weekly:
         listed = {f.key for f in important}
         rest = Counter(f.team for f in new if f.key not in listed)
@@ -464,6 +494,8 @@ def render_markdown(
 
 
 _CODE = re.compile(r"`([^`]+)`")
+# [text](url), only http(s): links to your own DefectDojo and Dependency-Track
+_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _TD = 'style="border:1px solid #ccc;padding:3px 8px;text-align:left;vertical-align:top"'
 _CODE_STYLE = 'style="font-family:Menlo,Consolas,monospace;font-size:90%"'
@@ -472,6 +504,7 @@ _CODE_STYLE = 'style="font-family:Menlo,Consolas,monospace;font-size:90%"'
 def _inline(s: str) -> str:
     """Escape, then turn the two marks this module writes into tags."""
     t = html.escape(s, quote=False)
+    t = _LINK.sub(lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>', t)
     t = _CODE.sub(lambda m: f"<code {_CODE_STYLE}>{m.group(1)}</code>", t)
     return _BOLD.sub(r"<strong>\1</strong>", t)
 
@@ -480,7 +513,7 @@ def render_html(
     kind: str, sections: list[Section], now: datetime | None = None, heading: str = ""
 ) -> str:
     """The same report as HTML for mail clients: inline styles only (many clients drop
-    <style>), no images, no links out."""
+    <style>), no images, and links only to your own DefectDojo and Dependency-Track."""
     now = now or datetime.now(UTC)
     title = heading or _title(kind, now)
     out = [

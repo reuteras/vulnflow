@@ -358,6 +358,12 @@ python3 -m vulnflow env-set <<<'VULNFLOW_REPORT_TO=you@example.org'
 ./poc.sh report daily --always   # a daily even when there is nothing to act on
 ```
 
+Each finding listed in a report has a **Where** column: up to three paths on disk (syft's
+locations, as `vulnflow where` shows them) and links to the CVE in DefectDojo (its search,
+`DD_SITE_URL`) and to the component in Dependency-Track (the UI on `DT_PUBLIC_API_URL`'s
+host and `DT_UI_PORT`, or `DT_PUBLIC_UI_URL`). In the HTML part they are clickable; they
+point only at your own servers.
+
 The alerts and the new KEV entries carry the same information as the chat messages: the
 CVE's title, the products it matched and why it notified (new, added to KEV, more serious,
 followed), and for a KEV entry the findings and teams it hits. A KEV entry that hits nothing

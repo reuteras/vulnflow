@@ -201,6 +201,21 @@ def _github_sboms(
     return 1 if res.errors else 0
 
 
+def _dt_ui_url() -> str:
+    """The Dependency-Track UI as the browser reaches it: DT_PUBLIC_UI_URL, else
+    DT_PUBLIC_API_URL with the UI port (the tailscale serve setup gives both the same host)."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    if env("DT_PUBLIC_UI_URL"):
+        return env("DT_PUBLIC_UI_URL")
+    api = env("DT_PUBLIC_API_URL")
+    if not api:
+        return ""
+    u = urlsplit(api)
+    host = u.hostname or ""
+    return urlunsplit((u.scheme, f"{host}:{env('DT_UI_PORT', '8181') or '8181'}", "", "", ""))
+
+
 def _kev_ids(data_dir: Path) -> set[str]:
     """The cached CISA KEV catalog's CVE ids (empty when off or unavailable)."""
     from .intel import KevCache
@@ -761,6 +776,7 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
     from . import report as rp
     from .machines import last_pushes
     from .upstreams import check
+    from .where import paths_of
 
     if a.mime and not a.to:
         print("report --mime needs --to", file=sys.stderr)
@@ -824,7 +840,23 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         if errors:  # a partial list would report everything it missed as resolved
             sections.append(rp.error_section("Dependency-Track findings", "; ".join(errors)[:500]))
         else:
-            sections.append(rp.findings_section(mine.get("findings"), current, kev, weekly=weekly))
+
+            def on_disk(component_uuid: str) -> list[str]:
+                try:
+                    return paths_of(dt.component_properties(component_uuid)) if dt else []
+                except Exception:  # a missing path must not stop the report
+                    return []
+
+            sections.append(
+                rp.findings_section(
+                    mine.get("findings"),
+                    current,
+                    kev,
+                    weekly=weekly,
+                    links=rp.Links(env("DD_SITE_URL"), _dt_ui_url()),
+                    paths=on_disk,
+                )
+            )
             mine["findings"] = {k: f.to_json() for k, f in current.items()}
 
     machines = load_machines(a.machines, inv.teams)
