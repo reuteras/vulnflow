@@ -9,19 +9,8 @@ ARG TARGETARCH
 ARG COSIGN_VERSION=3.1.4
 ARG COSIGN_SHA256_AMD64=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
 ARG COSIGN_SHA256_ARM64=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
-RUN python - <<'EOF'
-import hashlib, os, urllib.request
-arch = os.environ.get("TARGETARCH") or "amd64"
-want = os.environ["COSIGN_SHA256_" + arch.upper()]
-url = f"https://github.com/sigstore/cosign/releases/download/v{os.environ['COSIGN_VERSION']}/cosign-linux-{arch}"
-data = urllib.request.urlopen(url, timeout=120).read()
-got = hashlib.sha256(data).hexdigest()
-if got != want:
-    raise SystemExit(f"cosign {arch}: sha256 {got} != {want}")
-with open("/usr/local/bin/cosign", "wb") as f:
-    f.write(data)
-os.chmod("/usr/local/bin/cosign", 0o755)
-EOF
+COPY deploy/install-cosign.py /tmp/install-cosign.py
+RUN python /tmp/install-cosign.py && rm /tmp/install-cosign.py
 # apt-get upgrade: Debian security updates the official image does not have yet.
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /app vulnflow \
