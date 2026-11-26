@@ -58,6 +58,11 @@ class PriorityRules:
     cvss_high: float = 7.0
     chat_min_tier: int = 2
     ignore_event_types: list[str] = field(default_factory=list)
+    # Changes that never notify on their own, even for a followed CVE: OpenCVE's generated
+    # titles come and go, descriptions and references get edited. Still logged.
+    quiet_event_types: list[str] = field(
+        default_factory=lambda: ["title", "description", "references", "weaknesses"]
+    )
 
 
 MACHINE_KINDS = ("linux", "macos")

@@ -1331,7 +1331,7 @@ def main(argv: list[str] | None = None) -> int:
             soc_webhook=env("VULNFLOW_SOC_WEBHOOK"),
             soc_min_tier=int(env("VULNFLOW_SOC_MIN_TIER", "1") or 1),
             opencve_url=env("OPENCVE_URL"),
-            opencve=_opencve() if triage else None,
+            opencve=_opencve(),  # write-back (triage) and the "followed" check
             triage_max_tier=triage,
         )
         serve(

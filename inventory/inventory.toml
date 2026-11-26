@@ -17,6 +17,10 @@ cvss_high     = 7.0
 chat_min_tier = 2
 # OpenCVE event types to ignore entirely (e.g. pure reference churn)
 ignore_event_types = ["references"]
+# Event types that never notify on their own (still logged): OpenCVE's generated titles
+# come and go on old CVEs. Chat gets new CVEs, KEV additions, changes that raise the tier,
+# and other changes to CVEs someone follows. See docs/concepts.md "Which changes notify".
+quiet_event_types = ["title", "description", "references", "weaknesses"]
 
 # ---------------------------------------------------------------------------
 # Six groups, each with its own OpenCVE project, DefectDojo product type and DT tag:
