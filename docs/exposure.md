@@ -237,7 +237,9 @@ command line. `python3 -m vulnflow schema` regenerates the schema (the teams com
 
 Every open Dependency-Track finding gets a tier from the threat (KEV from the cached
 catalog, EPSS and CVSS v3 as Dependency-Track reports them on the finding) and its
-project's context tags, by the matrix in
+context, read from `machines.toml` as it is now (the project's tags only when
+`machines.toml` has nothing for it, so an edit ranks at once, before the next `context`
+run updates the tags), by the matrix in
 [Combining threat and context](#combining-threat-and-context-into-a-tier):
 
 - no context: the `internal` column, which is the threat-only tier vulnflow always had;
