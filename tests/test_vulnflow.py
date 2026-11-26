@@ -4938,6 +4938,60 @@ def test_tui_alerts_filter_select_and_details():
     assert app.handle(scr, scr.getch()) is False
 
 
+def test_tui_alerts_show_title_and_why_and_hide_logged_only():
+    """Log lines since the receiver records title, products and notify (#90)."""
+    from vulnflow import tui
+
+    def line(day: str, cve: str, notify: str | None, title: str) -> str:
+        a: dict[str, Any] = {"received_at": f"2026-11-{day}T10:00:00Z", "cve": cve, "team": "users"}
+        a["project"] = "users"
+        a |= {"tier": 1, "tier_name": "P1 Act", "kev": True, "title": title, "products": ["Apple Macos"]}
+        if notify is not None:
+            a["notify"] = notify
+        return json.dumps(a)
+
+    log = [
+        line("20", "CVE-2026-0050", None, ""),  # before #90: no notify, counts as notified
+        line("25", "CVE-2026-0051", "new", "Apple macOS Improper Authentication Vulnerability"),
+        line("26", "CVE-2026-65400", "", "Apple macOS Screen Sharing auth bypass"),  # title churn
+    ]
+    _, rows = tui.parse_alerts(log)
+    by = {r.cve: r for r in rows}
+    assert by["CVE-2026-0050"].notified and by["CVE-2026-0051"].notified
+    assert not by["CVE-2026-65400"].notified
+    assert tui.alert_line(by["CVE-2026-0051"], 200).endswith(
+        "P1 Act     KEV new   CVE-2026-0051      users    "
+        "Apple macOS Improper Authentication Vulnerability"
+    )
+    assert " log   CVE-2026-65400 " in tui.alert_line(by["CVE-2026-65400"], 200)
+    assert [r.cve for r in tui.filter_alerts(rows, text="screen sharing")] == ["CVE-2026-65400"]
+    details = tui.alert_details(by["CVE-2026-0051"])
+    assert details[0] == "Apple macOS Improper Authentication Vulnerability"
+    assert "Why:        new to the project" in details and "Products:   Apple Macos" in details
+    assert "Why:        not recorded" in tui.alert_details(by["CVE-2026-0050"])
+    assert "Why:        logged only (not sent to chat)" in tui.alert_details(by["CVE-2026-65400"])
+
+    app = tui.App(
+        tui.Sources(
+            findings=lambda: ([], []),
+            alerts=lambda: log,
+            hosts=lambda w: [],
+            updates=lambda: [],
+            details=lambda r: [],
+            write=None,
+        )
+    )
+    scr = FakeScreen(["2", "n", "q"])
+    assert app.handle(scr, scr.getch())
+    app.draw(scr)
+    assert "2 of 3 alerts shown" in scr.lines[1] and "show=notified" in scr.lines[1]
+    assert "CVE-2026-65400" not in scr.text()  # the title churn is hidden by default
+    assert app.handle(scr, scr.getch())  # n: all logged changes
+    app.draw(scr)
+    assert "3 of 3 alerts shown" in scr.lines[1] and "CVE-2026-65400" in scr.text()
+    assert app.handle(scr, scr.getch()) is False
+
+
 def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
     from vulnflow import tui
 
@@ -4955,7 +5009,8 @@ def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
     second |= {"team": "sysadm", "kev": True, "epss": 0.9}
     log_lines = [json.dumps(first), json.dumps(second), "garbage"]
     lines = tui.alert_lines(log_lines, 100)
-    assert lines[0].startswith("2026-11-25T10:00 P1 Act     KEV CVE-2") and "EPSS 0.900" in lines[0]
+    # an older log line: no notify recorded, so no reason column and it counts as notified
+    assert lines[0].startswith("2026-11-25T10:00 P1 Act     KEV       CVE-2              sysadm")
     assert lines[1].startswith("2026-11-24T10:00 P2 Attend")
     assert tui.alert_lines(tui.read_alerts(tmp_path / "gone.jsonl"), 100)[0].startswith("(cannot read")
 
