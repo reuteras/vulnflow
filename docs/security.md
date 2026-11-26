@@ -8,7 +8,9 @@
   unpatched, is targeting data. Keep all of this self-hosted, behind SSO and a TLS reverse
   proxy, on an admin network. Don't put the subscriptions in a SaaS.
 - **Your host list stays out of git.** `machines.toml` (hosts, groups, code paths) is
-  gitignored and dockerignored like `.env`, and isn't mounted into the glue containers.
+  gitignored and dockerignored like `.env`, and isn't baked into the image. Only
+  `dt2dojo` reads it, mounted read-only, for `github-sboms` and `kev-watch`; the receiver
+  doesn't get it.
   Agent bundles in `data/agents/` hold one upload-only DT key per host (files 600); revoke a
   host with `python3 -m vulnflow agent-revoke <host>`. CI pipelines get the same kind of key
   per repository in `data/ci/` (`ci-key`; `ci-revoke <name>`).

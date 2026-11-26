@@ -1000,8 +1000,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     inv = load_inventory(a.inventory)
     data_dir = Path(a.data_dir)
-    if a.cmd in ("sync", "opencve-bootstrap", "suggest-subscriptions"):
-        # the detailed subscriptions live in machines.toml (not in git)
+    if a.cmd in ("sync", "opencve-bootstrap", "suggest-subscriptions", "dt2dojo", "kev-watch"):
+        # the detailed subscriptions live in machines.toml (not in git); kev-watch matches
+        # new KEV entries against them
         add_subscriptions(inv, load_machines(a.machines, inv.teams))
 
     if a.cmd == "suggest-subscriptions":

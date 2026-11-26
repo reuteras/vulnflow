@@ -494,6 +494,13 @@ glue_compose() {
   if docker network inspect "$CHAT_NET" >/dev/null 2>&1; then
     files+=(-f deploy/docker-compose.glue-chat.yml)
   fi
+  # machines.toml ([github.*], [subscriptions.*]) into dt2dojo, read-only, only if it exists
+  local machines="${VULNFLOW_MACHINES:-machines.toml}"
+  if [[ -f "$machines" ]]; then
+    VULNFLOW_MACHINES_HOST="$(cd "$(dirname "$machines")" && pwd)/$(basename "$machines")"
+    export VULNFLOW_MACHINES_HOST
+    files+=(-f deploy/docker-compose.glue-machines.yml)
+  fi
   docker compose --env-file .env "${files[@]}" "$@"
 }
 
