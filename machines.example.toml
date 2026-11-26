@@ -65,3 +65,12 @@ path = "/srv/myapp"
 # [subscriptions.sysadm.products]
 # openbsd = ["openssh"]
 # postgresql = ["postgresql"]
+
+# ---- SBOMs from GitHub releases --------------------------------------------------------
+# Projects that build on GitHub and attach a CycloneDX SBOM to each release. vulnflow pulls
+# the newest one (python3 -m vulnflow github-sboms; dt2dojo every round), so GitHub needs no
+# Dependency-Track key and no tailnet access. See docs/sboms.md "From GitHub releases".
+# [github.someapp]                 # the Dependency-Track project name
+# repo  = "owner/someapp"
+# asset = "*.cdx.json"             # glob on the release asset names (default)
+# team  = "dev"

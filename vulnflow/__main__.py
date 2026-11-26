@@ -170,6 +170,33 @@ def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_r
     return 1 if res.errors else 0
 
 
+def _github_sboms(
+    a: argparse.Namespace, inv: Inventory, dt: DependencyTrack, *, dry_run: bool, force: bool
+) -> int:
+    """`github-sboms` (and every dt2dojo round): SBOMs from GitHub releases, see github.py."""
+    from .github import STATE_FILE, GitHub, pull
+
+    machines = load_machines(a.machines, inv.teams)
+    if not machines.github:
+        return 0
+    res = pull(
+        machines,
+        inv,
+        GitHub(env("VULNFLOW_GITHUB_TOKEN")),
+        dt,
+        Path(a.data_dir) / STATE_FILE,
+        dry_run=dry_run,
+        force=force,
+    )
+    for line in res.uploaded:
+        print(f"  upl   github {line}")
+    if res.unchanged:
+        print(f"  ok    github: {', '.join(res.unchanged)} already uploaded today")
+    for msg in res.errors:
+        print(f"  error github {msg}", file=sys.stderr)
+    return 1 if res.errors else 0
+
+
 def _maintenance_dt() -> DependencyTrack | None:
     key = env("DT_MAINTENANCE_API_KEY")
     return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
@@ -648,6 +675,18 @@ def main(argv: list[str] | None = None) -> int:
         "(dt2dojo runs this every round; the first run only records the catalog)",
     )
     kw.add_argument("--dry-run", action="store_true", help="show what is new; post and record nothing")
+    d.add_argument(
+        "--no-github-sboms",
+        action="store_true",
+        help="skip `github-sboms` in each round (SBOMs from the [github.*] releases)",
+    )
+    gs = sub.add_parser(
+        "github-sboms",
+        help="upload the CycloneDX SBOM of each [github.*] repository's newest release "
+        "(machines.toml) to Dependency-Track; dt2dojo runs this every round",
+    )
+    gs.add_argument("--dry-run", action="store_true", help="download and check, upload nothing")
+    gs.add_argument("--force", action="store_true", help="upload even if done today")
     pr = sub.add_parser(
         "prune",
         help="carry Not Affected/False Positive decisions to new project versions, deactivate "
@@ -1011,8 +1050,11 @@ def main(argv: list[str] | None = None) -> int:
             rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint)
             rep.print()
             kev_rc = 0 if a.no_kev_watch else _kev_watch(inv, dt, data_dir, a.dry_run)
+            gh_rc = 0
+            if not a.no_github_sboms:
+                gh_rc = _github_sboms(a, inv, dt, dry_run=a.dry_run, force=False)
             if not a.loop:
-                return 1 if rep.errors or kev_rc else 0
+                return 1 if rep.errors or kev_rc or gh_rc else 0
             time.sleep(a.loop)
 
     if a.cmd == "kev-watch":
@@ -1065,6 +1107,15 @@ def main(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
+
+    if a.cmd == "github-sboms":
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        if not load_machines(a.machines, inv.teams).github:
+            print(f"  skip  github-sboms: no [github.*] in {a.machines}")
+            return 0
+        return _github_sboms(a, inv, dt, dry_run=a.dry_run, force=a.force)
 
     if a.cmd == "prune":
         from .prune import prune

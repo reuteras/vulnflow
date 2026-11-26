@@ -88,15 +88,11 @@ def followers(inv: Inventory, vendor: str) -> list[str]:
     """Teams whose OpenCVE subscriptions (vendors, or products of a vendor) name it."""
     v = _norm(vendor)
     return sorted(
-        key
-        for key, t in inv.teams.items()
-        if v and v in {_norm(x) for x in [*t.vendors, *t.products]}
+        key for key, t in inv.teams.items() if v and v in {_norm(x) for x in [*t.vendors, *t.products]}
     )
 
 
-def match(
-    inv: Inventory, entries: list[dict[str, Any]], findings: Iterable[Finding]
-) -> list[KevHit]:
+def match(inv: Inventory, entries: list[dict[str, Any]], findings: Iterable[Finding]) -> list[KevHit]:
     by_cve: dict[str, dict[str, list[str]]] = {}
     for team, project, component, cve in findings:
         by_cve.setdefault(cve.upper(), {}).setdefault(team, []).append(f"{project}: {component}")
@@ -130,8 +126,7 @@ def format_team(hits: list[KevHit], inv: Inventory, opencve_url: str = "") -> st
     if not hot:
         return None
     mentions = sorted(
-        {inv.teams[t].chat_mention for h in hot for t in h.teams() if t in inv.teams}
-        - {""}
+        {inv.teams[t].chat_mention for h in hot for t in h.teams() if t in inv.teams} - {""}
     )
     lines = [f"{' '.join(mentions) + ' ' if mentions else ''}New in CISA KEV ({len(hot)}):"]
     for h in hot:

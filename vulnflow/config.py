@@ -96,6 +96,16 @@ class CodeTarget:
 
 
 @dataclass
+class GithubSource:
+    """[github.<name>]: a GitHub repository whose releases carry a CycloneDX SBOM."""
+
+    name: str  # the Dependency-Track project name
+    repo: str  # owner/repo
+    asset: str  # glob on the release asset names
+    team: str
+
+
+@dataclass
 class Machines:
     """machines.toml: the operator's own hosts. Not in git (like .env)."""
 
@@ -107,6 +117,10 @@ class Machines:
     # extra OpenCVE subscriptions per team: (vendors, {vendor: [products]}); kept here, out of
     # git, because a detailed list shows the software stack
     subscriptions: dict[str, tuple[list[str], dict[str, list[str]]]] = field(default_factory=dict)
+    github: dict[str, GithubSource] = field(default_factory=dict)
+
+
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
 
 
 @dataclass
@@ -166,7 +180,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     if not p.is_file():
         return Machines()
     data: dict[str, Any] = tomllib.loads(p.read_text(encoding="utf-8"))
-    unknown = sorted(set(data) - {"groups", "hosts", "code", "cpe_map", "subscriptions"})
+    unknown = sorted(set(data) - {"groups", "hosts", "code", "cpe_map", "subscriptions", "github"})
     if unknown:
         raise SystemExit(f"{path}: unknown sections {unknown}")
 
@@ -240,7 +254,28 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
             if not _CPE_PART_RE.match(name):
                 raise SystemExit(f"{where}: {name!r} is not an NVD vendor/product name")
         subscriptions[team] = (vendors, products)
-    return Machines(hosts=hosts, groups=groups, code=code, cpe_map=cpe_map, subscriptions=subscriptions)
+    github: dict[str, GithubSource] = {}
+    for name, g in (data.get("github") or {}).items():
+        _check_name("github", name, path)
+        where = f"[github.{name}] in {path}"
+        bad = sorted(set(g) - {"repo", "asset", "team"})
+        if bad:
+            raise SystemExit(f"{where}: unknown keys {bad}")
+        repo = str(g.get("repo", ""))
+        if not _REPO_RE.match(repo) or ".." in repo:
+            raise SystemExit(f"{where}: repo must be 'owner/repo', got {repo!r}")
+        team = str(g.get("team", "dev"))
+        if team not in teams:
+            raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
+        github[name] = GithubSource(name, repo, str(g.get("asset", "*.cdx.json")), team)
+    return Machines(
+        hosts=hosts,
+        groups=groups,
+        code=code,
+        cpe_map=cpe_map,
+        subscriptions=subscriptions,
+        github=github,
+    )
 
 
 def add_subscriptions(inv: Inventory, machines: Machines) -> None:
