@@ -276,10 +276,8 @@ def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
     Pipeline(inv, e, tmp_path / "c.jsonl", chat_sender=team.append, soc_sender=broken).handle(PAYLOAD)
     assert len(team) == 1 and team[0].startswith("@sysadm")
     # nothing at the SOC's tier: no SOC message
-    quiet = {
-        **PAYLOAD,
-        "changes": [c for c in PAYLOAD["changes"] if c["cve"]["cve_id"] != "CVE-2024-3400"],
-    }
+    changes: Any = PAYLOAD["changes"]
+    quiet = {**PAYLOAD, "changes": [c for c in changes if c["cve"]["cve_id"] != "CVE-2024-3400"]}
     Pipeline(inv, e, tmp_path / "d.jsonl", soc_sender=soc.append).handle(quiet)
     assert len(soc) == 2
 
