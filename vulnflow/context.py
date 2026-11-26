@@ -68,7 +68,9 @@ def _context_for(machines: Machines, p: DTProject) -> AssetContext | None:
         # an exact name wins over a glob, a longer glob over a shorter one ("*" last)
         globs = sorted((k for k in images if k not in exact), key=len, reverse=True)
         for pattern in [*exact, *globs]:
-            if _image_matches(pattern, rest):
+            # an entry with no values (e.g. a `context --toml` stub not filled in yet) doesn't
+            # hide a broader one that has them
+            if _image_matches(pattern, rest) and images[pattern]:
                 return images[pattern]
         return None
     if kind == "code" and rest in machines.code:

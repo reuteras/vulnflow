@@ -3453,6 +3453,7 @@ def test_machines_asset_context_never_on_a_group(inv, tmp_path):
 
 def test_context_tags_on_dependency_track_projects(inv, tmp_path):
     from vulnflow.clients import DTProject
+    from vulnflow.config import AssetContext
     from vulnflow.context import apply_context, context_for, desired_tags
 
     mf = tmp_path / "m.toml"
@@ -3480,6 +3481,13 @@ def test_context_tags_on_dependency_track_projects(inv, tmp_path):
     # "*" is the host's catch-all: an exact name or a longer glob wins over it
     assert ctx(proj("container:redis", "host-web01")) == "exposure-internal,crit-normal"
     assert ctx(proj("host:web03", "team-sysadm")) == "unknown"  # in machines.toml, no keys
+    # an exact entry left empty (a `context --toml` stub) doesn't hide the glob or "*"
+    m.hosts["web01"].images = {"ghcr.io/acme/admin-ui": AssetContext(), **m.hosts["web01"].images}
+    m.hosts["web01"].images["postgres"] = AssetContext()
+    assert (
+        ctx(proj("container:ghcr.io/acme/admin-ui", "host-web01")) == "exposure-restricted,input-staff"
+    )
+    assert ctx(proj("container:postgres", "host-web01")) == "exposure-internal,crit-normal"
     assert ctx(proj("container:nginx", "host-web02")) == "unknown"  # images are per host
     assert (
         ctx(proj("code:portal", "host-web01")) == "exposure-external-auth,crit-critical,flag-certified"
