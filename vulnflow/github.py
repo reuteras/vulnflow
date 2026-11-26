@@ -12,6 +12,10 @@ tags team-<team>, kind-app and source-github.
 - The newest release is uploaded again once a day, also when nothing changed: `prune`
   deactivates the newest version of a `kind-*` project after 7 days without an upload,
   and releases are rarer than that.
+- With `verify = { identity = ..., issuer = ... }` the asset's `<asset>.sig.bundle` is
+  downloaded too and checked with `cosign verify-blob` (the cosign binary of the glue
+  image; the Sigstore bundle can't be verified with the standard library). A missing
+  bundle or a failed check means no upload and an error, and the previous upload stays.
 - Only https://github.com/<repo>/releases/download/... is downloaded, whatever the API
   answers. Public repositories need no token; VULNFLOW_GITHUB_TOKEN (read-only) only
   raises the API rate limit (60 requests an hour without one) and is not sent with the
@@ -25,7 +29,12 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
+import shutil
+import subprocess
+import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +66,48 @@ class GitHub:
             raise ValueError(f"refusing download URL outside {repo}'s releases: {url!r}")
         # no API headers (and no token): the release download redirects to a signed URL
         return Http(url, transport=self.transport, timeout=60).get("").body
+
+
+def identity_regexp(glob: str) -> str:
+    """Anchored regexp for a certificate identity glob: only `*` is a wildcard."""
+    return "^" + ".*".join(re.escape(part) for part in glob.split("*")) + "$"
+
+
+# (blob, bundle, identity regexp, issuer) -> raises VerifyError when the signature is bad
+Verifier = Callable[[bytes, bytes, str, str], None]
+
+
+class VerifyError(Exception):
+    pass
+
+
+def cosign_verify(blob: bytes, bundle: bytes, identity_re: str, issuer: str) -> None:
+    """`cosign verify-blob` on a temporary copy; needs the cosign binary (glue image)."""
+    cosign = shutil.which("cosign")
+    if cosign is None:
+        raise VerifyError("cosign is not installed (it is part of the glue image)")
+    with tempfile.TemporaryDirectory() as tmp:
+        blob_path, bundle_path = Path(tmp, "asset"), Path(tmp, "asset.sig.bundle")
+        blob_path.write_bytes(blob)
+        bundle_path.write_bytes(bundle)
+        cmd = [
+            cosign,
+            "verify-blob",
+            "--bundle",
+            str(bundle_path),
+            "--certificate-identity-regexp",
+            identity_re,
+            "--certificate-oidc-issuer",
+            issuer,
+            str(blob_path),
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)  # noqa: S603
+        except subprocess.TimeoutExpired as e:
+            raise VerifyError("cosign timed out") from e
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout).strip().splitlines()
+        raise VerifyError(detail[-1] if detail else f"cosign exited {r.returncode}")
 
 
 def count_packages(bom: bytes) -> int:
@@ -94,6 +145,7 @@ def pull(
     now: float | None = None,
     dry_run: bool = False,
     force: bool = False,
+    verifier: Verifier = cosign_verify,
 ) -> PullResult:
     res = PullResult()
     now = time.time() if now is None else now
@@ -126,6 +178,27 @@ def pull(
                 res.errors.append(f"{name}: release {tag} has no asset matching {src.asset!r}")
                 continue
             bom = gh.download(src.repo, str(asset.get("browser_download_url", "")))
+            signed = ""
+            if src.verify is not None:
+                bundle_name = f"{asset.get('name')}.sig.bundle"
+                bundle_asset = next(
+                    (a for a in rel.get("assets") or [] if a.get("name") == bundle_name), None
+                )
+                if bundle_asset is None:
+                    res.errors.append(
+                        f"{name}: release {tag} has no {bundle_name} to verify; not uploaded"
+                    )
+                    continue
+                bundle = gh.download(src.repo, str(bundle_asset.get("browser_download_url", "")))
+                try:
+                    verifier(bom, bundle, identity_regexp(src.verify.identity), src.verify.issuer)
+                except VerifyError as e:
+                    res.errors.append(
+                        f"{name}: signature of {asset.get('name')} in {tag} not verified, "
+                        f"not uploaded: {e}"
+                    )
+                    continue
+                signed = ", signature verified"
             n = count_packages(bom)
             if n == 0:
                 res.errors.append(
@@ -133,7 +206,7 @@ def pull(
                     "(an empty SBOM would close every finding of the project)"
                 )
                 continue
-            label = f"{name}@{tag} ({n} packages, {asset.get('name')})"
+            label = f"{name}@{tag} ({n} packages, {asset.get('name')}{signed})"
             if dry_run:
                 res.uploaded.append(f"{label} [dry run]")
                 continue

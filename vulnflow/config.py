@@ -160,6 +160,17 @@ class CodeTarget:
     context: AssetContext = AssetContext()
 
 
+GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+@dataclass(frozen=True)
+class CosignVerify:
+    """`verify = { identity = ..., issuer = ... }` of a [github.<name>] entry."""
+
+    identity: str  # glob on the signing certificate's identity (`*` matches anything)
+    issuer: str = GITHUB_OIDC_ISSUER
+
+
 @dataclass
 class GithubSource:
     """[github.<name>]: a GitHub repository whose releases carry a CycloneDX SBOM."""
@@ -169,6 +180,7 @@ class GithubSource:
     asset: str  # glob on the release asset names
     team: str
     context: AssetContext = AssetContext()
+    verify: CosignVerify | None = None  # check the asset's cosign bundle before uploading
 
 
 NEWS_KINDS = ("advisory", "cert", "exploit", "news")
@@ -376,9 +388,20 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     for name, g in (data.get("github") or {}).items():
         _check_name("github", name, path)
         where = f"[github.{name}] in {path}"
-        bad = sorted(set(g) - {"repo", "asset", "team"} - CONTEXT_KEYS)
+        bad = sorted(set(g) - {"repo", "asset", "team", "verify"} - CONTEXT_KEYS)
         if bad:
             raise SystemExit(f"{where}: unknown keys {bad}")
+        verify = None
+        if "verify" in g:
+            v = g["verify"]
+            if not isinstance(v, dict) or set(v) - {"identity", "issuer"}:
+                raise SystemExit(f"{where}: verify takes only identity and issuer")
+            identity, issuer = str(v.get("identity", "")), str(v.get("issuer", GITHUB_OIDC_ISSUER))
+            if not identity.strip():
+                raise SystemExit(f"{where}: verify needs an identity (the signing workflow)")
+            if not issuer.startswith("https://"):
+                raise SystemExit(f"{where}: verify issuer must be an https URL, got {issuer!r}")
+            verify = CosignVerify(identity, issuer)
         repo = str(g.get("repo", ""))
         if not _REPO_RE.match(repo) or ".." in repo:
             raise SystemExit(f"{where}: repo must be 'owner/repo', got {repo!r}")
@@ -386,7 +409,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         if team not in teams:
             raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
         github[name] = GithubSource(
-            name, repo, str(g.get("asset", "*.cdx.json")), team, _context(g, where)
+            name, repo, str(g.get("asset", "*.cdx.json")), team, _context(g, where), verify
         )
     projects: dict[str, AssetContext] = {}
     for name, pc in (data.get("projects") or {}).items():
