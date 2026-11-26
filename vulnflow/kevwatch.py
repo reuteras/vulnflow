@@ -23,6 +23,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from .config import Inventory
 
 log = logging.getLogger(__name__)
 STATE_FILE = "kev-seen.json"
+LOG_FILE = "kev-new.jsonl"  # next to the state: one line per entry posted, for the reports
 
 # (team, project label, component and version, CVE id) of one open finding
 Finding = tuple[str, str, str, str]
@@ -195,5 +197,26 @@ def watch(
             delivered = False
             res.errors.append(f"{what} delivery failed: {e}")
     if delivered:
+        append_log(state.parent / LOG_FILE, res.new)
         save_seen(state, seen | set(fresh))
     return res
+
+
+def append_log(path: Path, hits: list[KevHit], now: datetime | None = None) -> None:
+    """One JSON line per new entry, read by `vulnflow report` (the new-KEV section)."""
+    at = (now or datetime.now(UTC)).isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for h in hits:
+            line = {
+                "seen_at": at,
+                "cve": h.cve,
+                "vendor": h.vendor,
+                "product": h.product,
+                "name": h.name,
+                "date_added": h.date_added,
+                "ransomware": h.ransomware,
+                "findings": h.findings,
+                "follows": h.follows,
+            }
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")

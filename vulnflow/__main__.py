@@ -596,6 +596,23 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
             sections.append(sec)
             mine["alerts_since"] = newest
 
+    if a.kev_log is not None:
+        # kev-watch's log of the new KEV entries it posted to chat; a missing file is no
+        # entries yet (kev-watch writes it on its first post)
+        try:
+            text = a.kev_log.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            text = ""
+        except OSError as e:
+            sections.append(rp.error_section("New in CISA KEV", f"cannot read {a.kev_log}: {e}"))
+            text = None
+        if text is not None:
+            sec, newest = rp.kev_section(text.splitlines(), str(mine.get("kev_since", "")))
+            if "kev_since" not in mine:
+                sec = rp.Section(sec.title, [rp.Para("First report: listed from the next one.")])
+            sections.append(sec)
+            mine["kev_since"] = newest
+
     dt = None
     if env("DT_API_KEY"):
         dt = DependencyTrack(env("DT_URL", "http://localhost:8180"), env("DT_API_KEY"))
@@ -955,6 +972,9 @@ def main(argv: list[str] | None = None) -> int:
     rpt.add_argument("kind", choices=("daily", "weekly"))
     rpt.add_argument(
         "--alerts", type=Path, default=None, metavar="FILE", help="the receiver's alerts.jsonl"
+    )
+    rpt.add_argument(
+        "--kev-log", type=Path, default=None, metavar="FILE", help="kev-watch's kev-new.jsonl"
     )
     rpt.add_argument("--stale-days", type=float, default=2.0, metavar="DAYS")
     rpt.add_argument(

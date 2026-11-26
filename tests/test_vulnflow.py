@@ -357,6 +357,8 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
         inv, index, state, findings, team.append, soc.append, opencve_url="https://o.example"
     )
     assert not res.errors and kevwatch.load_seen(state) == set(index)
+    logged = [json.loads(x)["cve"] for x in (tmp_path / kevwatch.LOG_FILE).read_text().splitlines()]
+    assert logged == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]  # once, after delivery
     (msg,) = team
     assert msg.startswith("@dev @network New in CISA KEV (2):")
     assert "CVE-2026-0012" not in msg  # matches nothing of ours: SOC only
@@ -4376,7 +4378,17 @@ def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
     log_lines = [
         line("2026-11-24T10:00:00Z", "CVE-2021-44228", 1, cvss31=10.0, kev=True, epss=0.97),
         line("2026-11-25T08:00:00Z", "CVE-2026-1111", 2, cvss31=8.1),
-        line("2026-11-25T09:00:00Z", "CVE-2026-1111", 1, cvss31=8.1, kev=True, epss=0.5),
+        line(
+            "2026-11-25T09:00:00Z",
+            "CVE-2026-1111",
+            1,
+            cvss31=8.1,
+            kev=True,
+            epss=0.5,
+            title="FortiOS heap overflow",
+            products=["Fortinet Fortios"],
+            notify="kev",
+        ),
         line("2026-11-25T09:30:00Z", "CVE-2026-2222", 3, cvss31=5.0),
         "not json",
         "",
@@ -4386,9 +4398,64 @@ def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
     assert sec.notable
     (table,) = sec.blocks
     assert isinstance(table, Table)
-    assert table.rows == [["**P1**", "`CVE-2026-1111`", "sysadm", "8.1", "**KEV**", "0.500"]]
+    # the same what/why as the chat line (receiver.alert_line)
+    assert table.header == ["Tier", "CVE", "What", "Why", "Team", "CVSS", "KEV", "EPSS"]
+    assert table.rows == [
+        [
+            "**P1**",
+            "`CVE-2026-1111`",
+            "FortiOS heap overflow (Fortinet Fortios)",
+            "added to KEV",
+            "sysadm",
+            "8.1",
+            "**KEV**",
+            "0.500",
+        ]
+    ]
     quiet, newest2 = alerts_section(log_lines, newest)
     assert (quiet.notable, quiet.blocks, newest2) == (False, [Para("None.")], newest)
+
+
+def test_report_kev_section_from_kev_watch_log(inv, tmp_path):
+    from datetime import UTC, datetime
+
+    from vulnflow import kevwatch
+    from vulnflow.report import Para, Table, kev_section
+
+    log = tmp_path / "kev-new.jsonl"
+    hits = kevwatch.match(
+        inv,
+        [
+            _kev_entry("CVE-2026-0011", "Citrix", "NetScaler", "2026-11-25", "Known"),
+            _kev_entry("CVE-2026-0012", "Acme", "Widget", "2026-11-24"),
+        ],
+        [("dev", "code:web@2", "openssl 3.0.1", "CVE-2026-0012")],
+    )
+    kevwatch.append_log(log, hits, now=datetime(2026, 11, 26, 6, 0, tzinfo=UTC))
+    sec, newest = kev_section(log.read_text().splitlines(), "2026-11-25T00:00:00+00:00")
+    assert newest == "2026-11-26T06:00:00+00:00" and sec.notable
+    (table,) = sec.blocks
+    assert isinstance(table, Table) and table.header == ["Added", "CVE", "Vulnerability", "Hits"]
+    assert table.rows == [
+        [
+            "2026-11-25",
+            "`CVE-2026-0011`",
+            "Citrix NetScaler: NetScaler bug **(ransomware use)**",
+            "network follows",
+        ],
+        ["2026-11-24", "`CVE-2026-0012`", "Acme Widget: Widget bug", "findings in dev"],
+    ]
+    again, _ = kev_section(log.read_text().splitlines(), newest)
+    assert (again.notable, again.blocks) == (False, [Para("None.")])
+    # an entry that hits nothing is listed, but doesn't make a quiet daily report go out
+    kevwatch.append_log(
+        log,
+        kevwatch.match(inv, [_kev_entry("CVE-2026-0013", "Acme", "Gadget", "2026-11-26")], []),
+        now=datetime(2026, 11, 27, tzinfo=UTC),
+    )
+    lone, _ = kev_section(log.read_text().splitlines(), newest)
+    assert not lone.notable and isinstance(lone.blocks[0], Table)
+    assert lone.blocks[0].rows[0][3] == "nothing of ours"
 
 
 def test_report_machines_and_updates_sections(tmp_path, inv):
