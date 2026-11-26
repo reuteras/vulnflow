@@ -5378,6 +5378,61 @@ def test_report_kev_section_from_kev_watch_log(inv, tmp_path):
     assert lone.blocks[0].rows[0][3] == "nothing of ours"
 
 
+def test_report_findings_link_to_defectdojo_and_dt_with_paths(monkeypatch):
+    from vulnflow import report as rp
+    from vulnflow.__main__ import _dt_ui_url
+
+    f = rp.OpenFinding(
+        "users",
+        "host:mbp13",
+        "macos-27.2.1",
+        "ffmpeg",
+        "9.0.2",
+        "CVE-2026-125181",
+        "HIGH",
+        tier=3,
+        reasons=["CVSS 7.0 >= 7.0"],
+        component_uuid="c-uuid",
+    )
+    links = rp.Links("https://vf.example.ts.net:8280/", "https://vf.example.ts.net:8181")
+    paths = ["/opt/homebrew/Cellar/ffmpeg/9.0.2/bin/ffmpeg", "/b", "/c", "/d"]
+    cell = links.finding(f, paths)
+    assert cell == (
+        "`/opt/homebrew/Cellar/ffmpeg/9.0.2/bin/ffmpeg` `/b` `/c` +1 more "
+        "[DefectDojo](https://vf.example.ts.net:8280/simple_search?query=CVE-2026-125181) "
+        "[Dependency-Track](https://vf.example.ts.net:8181/components/c-uuid)"
+    )
+    html_cell = rp._inline(cell)
+    assert (
+        '<a href="https://vf.example.ts.net:8280/simple_search?query=CVE-2026-125181">DefectDojo</a>'
+        in html_cell
+    )
+    assert '<a href="https://vf.example.ts.net:8181/components/c-uuid">Dependency-Track</a>' in html_cell
+    assert "<a " not in rp._inline("[x](javascript:alert(1))")  # only http(s) becomes a link
+    # the findings table: a Where column, paths only for listed rows
+    asked: list[str] = []
+
+    def on_disk(uuid: str) -> list[str]:
+        asked.append(uuid)
+        return ["/opt/homebrew/bin/ffmpeg"]
+
+    sec = rp.findings_section({}, {f.key: f}, set(), weekly=False, links=links, paths=on_disk)
+    table = sec.blocks[1]
+    assert isinstance(table, rp.Table) and table.header[-1] == "Where"
+    assert table.rows[0][-1].startswith("`/opt/homebrew/bin/ffmpeg` [DefectDojo](") and asked == [
+        "c-uuid"
+    ]
+    plain = rp.findings_section({}, {f.key: f}, set(), weekly=False)
+    assert isinstance(plain.blocks[1], rp.Table) and plain.blocks[1].header[-1] == "Why"
+    # the DT UI: the API's host with the UI port, unless set
+    monkeypatch.setenv("DT_PUBLIC_API_URL", "https://vf.example.ts.net:8180")
+    monkeypatch.setenv("DT_UI_PORT", "8181")
+    monkeypatch.delenv("DT_PUBLIC_UI_URL", raising=False)
+    assert _dt_ui_url() == "https://vf.example.ts.net:8181"
+    monkeypatch.setenv("DT_PUBLIC_UI_URL", "https://dt.example")
+    assert _dt_ui_url() == "https://dt.example"
+
+
 def test_report_machines_and_updates_sections(tmp_path, inv):
     from vulnflow.report import Items, Para, Table, machines_section, updates_section
     from vulnflow.upstreams import COMPONENTS, Release, Status
