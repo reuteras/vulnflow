@@ -1480,7 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
         if dt is None:  # unreachable: required=True exits first
             return 2
         errors: list[str] = []
-        rows = rank_findings(
+        ranked = rank_findings(
             inv,
             dt,
             _kev_ids(data_dir),
@@ -1490,7 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         for msg in errors:
             print(f"  error finding-watch: {msg}", file=sys.stderr)
-        return _finding_watch(inv, rows, data_dir, a.dry_run) or (1 if errors else 0)
+        return _finding_watch(inv, ranked, data_dir, a.dry_run) or (1 if errors else 0)
 
     if a.cmd == "patches":
         from .patches import patched_findings
