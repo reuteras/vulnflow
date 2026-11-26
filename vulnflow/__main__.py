@@ -688,6 +688,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
     )
+    sub.add_parser(
+        "schema",
+        help="print the JSON Schema of machines.toml (schemas/machines.schema.json) for editor "
+        "completion with a TOML language server such as taplo",
+    )
     cx = sub.add_parser(
         "context",
         help="exposure/criticality tags from machines.toml on the Dependency-Track projects "
@@ -1093,6 +1098,12 @@ def main(argv: list[str] | None = None) -> int:
             if not a.loop:
                 return 1 if rep.errors or kev_rc or gh_rc else 0
             time.sleep(a.loop)
+
+    if a.cmd == "schema":
+        from .schema import render
+
+        sys.stdout.write(render(inv))
+        return 0
 
     if a.cmd == "context":
         from .context import apply_context, unknown_toml
