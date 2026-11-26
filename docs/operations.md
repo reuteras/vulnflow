@@ -97,8 +97,9 @@ The same data without a browser, on the server (over ssh):
 | `j`/`k`, arrows, PgUp/PgDn | move |
 | `/`, `t`, `s` | filter findings by text (CVE, component, project), team, minimum severity |
 | Enter | the finding: project, component, purl, description, KEV, where on disk |
-| `/`, `t`, `p`, `e` (Alerts) | filter alerts by text (CVE, project, description), team, tier (P1, P1-P2, P1-P3, all), KEV only |
-| Enter (Alerts) | the alert: tier and reasons, team and OpenCVE project, events, CVSS, EPSS, KEV, sightings, description, OpenCVE link (`OPENCVE_URL`) |
+| `/`, `t`, `p`, `e` (Alerts) | filter alerts by text (CVE, title, project, description), team, tier (P1, P1-P2, P1-P3, all), KEV only |
+| `n` (Alerts) | show all logged changes, not only those that notified ([Which changes notify](concepts.md#which-changes-notify)); each line says why: `new`, `kev`, `worse`, `fol` (followed) or `log` (logged only) |
+| Enter (Alerts) | the alert: title, tier and reasons, why it notified, products it matched, team and OpenCVE project, events, CVSS, EPSS, KEV, sightings, description, OpenCVE link (`OPENCVE_URL`) |
 | `J`/`K` (in a finding or alert) | the next/previous one in the list |
 | `J`/`K` (in the finding) | the next / previous finding in the current list; the list cursor follows |
 | space | select several findings |

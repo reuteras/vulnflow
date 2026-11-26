@@ -5,8 +5,10 @@ Four tabs, read from the same places as the reports:
     1 Findings   open Dependency-Track findings of every team (active projects,
                  unsuppressed), with KEV marks; filter by team, severity and text;
                  Enter shows one (description, where on disk), `m` marks it
-    2 Alerts     the receiver's alerts.jsonl, newest first; filter by team, tier, KEV
-                 and text; Enter shows one (reasons, scores, description, OpenCVE link)
+    2 Alerts     the receiver's alerts.jsonl, newest first, with each CVE's title and why
+                 it notified; by default only changes that notified (`n` shows all
+                 logged ones); filter by team, tier, KEV and text; Enter shows one
+                 (reasons, scores, products, description, OpenCVE link)
     3 Hosts      own machines and their last SBOM upload
     4 Updates    check-updates (asks GitHub, so only when the tab is opened)
 
@@ -60,9 +62,18 @@ HELP = (
     "Enter show (J/K next/prev)  m mark  r reload  q quit"
 )
 ALERT_HELP = (
-    "1-4 tabs  j/k move  / text  t team  p tier  e KEV only  "
+    "1-4 tabs  j/k move  / text  t team  p tier  e KEV only  n all/notified  "
     "Enter show (J/K next/prev)  r reload  q quit"
 )
+# receiver.Alert.notify, shortened for the list; "" = logged only
+NOTIFY_SHORT = {"new": "new", "kev": "kev", "worse": "worse", "followed": "fol", "": "log"}
+NOTIFY_LONG = {
+    "new": "new to the project",
+    "kev": "added to CISA KEV",
+    "worse": "more serious (its tier went up)",
+    "followed": "update to a CVE someone follows in OpenCVE",
+    "": "logged only (not sent to chat)",
+}
 TIER_LIMITS = (0, 1, 2, 3)  # `p` steps through: all, P1, P1-P2, P1-P3
 
 
@@ -227,6 +238,15 @@ class AlertRow:
     sightings: dict[str, int] = field(default_factory=dict)
     description: str = ""
     enrichment_errors: list[str] = field(default_factory=list)
+    title: str = ""
+    products: list[str] = field(default_factory=list)
+    # why it notified (receiver.Alert.notify); None for log lines written before the receiver
+    # recorded it, which count as notified (the daily report does the same)
+    notify: str | None = None
+
+    @property
+    def notified(self) -> bool:
+        return self.notify is None or self.notify != ""
 
 
 def _num(v: Any) -> float | None:
@@ -268,6 +288,9 @@ def parse_alerts(raw: Iterable[str]) -> tuple[list[str], list[AlertRow]]:
                 },
                 description=" ".join(str(a.get("description") or "").split()),
                 enrichment_errors=[str(e) for e in a.get("enrichment_errors") or []],
+                title=" ".join(str(a.get("title") or "").split()),
+                products=[str(x) for x in a.get("products") or []],
+                notify=str(a["notify"]) if "notify" in a and a["notify"] is not None else None,
             )
         )
     rows.sort(key=lambda r: r.received_at, reverse=True)
@@ -275,7 +298,12 @@ def parse_alerts(raw: Iterable[str]) -> tuple[list[str], list[AlertRow]]:
 
 
 def filter_alerts(
-    rows: list[AlertRow], team: str = "", max_tier: int = 0, kev_only: bool = False, text: str = ""
+    rows: list[AlertRow],
+    team: str = "",
+    max_tier: int = 0,
+    kev_only: bool = False,
+    text: str = "",
+    notified_only: bool = False,
 ) -> list[AlertRow]:
     needle = text.lower()
     return [
@@ -284,14 +312,17 @@ def filter_alerts(
         if (not team or r.team == team)
         and (not max_tier or r.tier <= max_tier)
         and (not kev_only or r.kev)
-        and (not needle or needle in f"{r.cve} {r.project} {r.description}".lower())
+        and (not notified_only or r.notified)
+        and (not needle or needle in f"{r.cve} {r.project} {r.title} {r.description}".lower())
     ]
 
 
 def alert_line(r: AlertRow, width: int) -> str:
     kev = "KEV" if r.kev else "   "
-    e = f"EPSS {r.epss:.3f}" if r.epss is not None else ""
-    return f"{r.received_at[:16]} {r.tier_name:<10} {kev} {r.cve:<18} {r.team:<8} {e}"[:width]
+    why = NOTIFY_SHORT.get(r.notify, r.notify[:5]) if r.notify is not None else ""
+    what = r.title or r.description
+    head = f"{r.received_at[:16]} {r.tier_name:<10} {kev} {why:<5} {r.cve:<18} {r.team:<8}"
+    return f"{head} {what}"[:width]
 
 
 def alert_lines(raw: Iterable[str], width: int) -> list[str]:
@@ -307,8 +338,11 @@ def alert_details(r: AlertRow, opencve_url: str = "") -> list[str]:
         )
     sightings = ", ".join(f"{k} {v}" for k, v in sorted(r.sightings.items())) or "none"
     out = [
+        *([r.title, ""] if r.title else []),
         f"Tier:       {r.tier_name or f'P{r.tier}'}",
         *(f"  - {reason}" for reason in r.reasons),
+        f"Why:        {NOTIFY_LONG.get(r.notify, r.notify) if r.notify is not None else 'not recorded'}",
+        f"Products:   {', '.join(r.products) or '-'}",
         f"Team:       {r.team or '-'} (OpenCVE project {r.project or '-'}"
         + (f", organization {r.organization})" if r.organization else ")"),
         f"Received:   {r.received_at}",
@@ -374,6 +408,7 @@ class App:
     a_team: str = ""
     a_tier: int = 0
     a_kev: bool = False
+    a_all: bool = False  # `n`: also the changes that were only logged
     a_text: str = ""
 
     # ---- data
@@ -399,7 +434,14 @@ class App:
         return self.alerts
 
     def visible_alerts(self) -> list[AlertRow]:
-        return filter_alerts(self.all_alerts(), self.a_team, self.a_tier, self.a_kev, self.a_text)
+        return filter_alerts(
+            self.all_alerts(),
+            self.a_team,
+            self.a_tier,
+            self.a_kev,
+            self.a_text,
+            notified_only=not self.a_all,
+        )
 
     def tab_lines(self, width: int, height: int) -> list[str]:
         if self.tab not in self.cache:
@@ -426,7 +468,7 @@ class App:
             tier = f"<=P{self.a_tier}" if self.a_tier else "all"
             filt = (
                 f"team={self.a_team or 'all'} tier={tier} kev={'only' if self.a_kev else 'any'} "
-                f"text={self.a_text or '-'}"
+                f"show={'all logged' if self.a_all else 'notified'} text={self.a_text or '-'}"
             )
             _put(scr, 1, f"{len(alerts)} of {len(self.all_alerts())} alerts shown   {filt}", w)
             for i, n in enumerate(notes):
@@ -519,6 +561,9 @@ class App:
             self.pos = self.top = 0
         elif k == ord("e"):
             self.a_kev = not self.a_kev
+            self.pos = self.top = 0
+        elif k == ord("n"):
+            self.a_all = not self.a_all
             self.pos = self.top = 0
         elif k in ENTER_KEYS:
             self._view_alert(scr)
