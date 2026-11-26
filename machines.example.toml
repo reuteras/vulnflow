@@ -48,6 +48,24 @@ scans = ["system", "brew", "containers"]   # this one also has Homebrew
 host = "server1"
 path = "/srv/myapp"
 
+# ---- Asset context: exposure and criticality (docs/exposure.md) ------------------------
+# Set on what runs, never on a group: one group can run a public service and an internal
+# admin page. Keys: exposure (internet | external-auth | internal | restricted |
+# hostile-device), input (public | partner | staff), criticality (critical | high | normal |
+# low), eol and certified (true/false). Unset stays unknown. They become Dependency-Track
+# tags (exposure-internet, crit-high, ...) at the next dt2dojo round; preview with
+# `python3 -m vulnflow context --unknown`.
+# [hosts.server1]                  # the host project host:server1
+# exposure = "internal"
+# criticality = "normal"
+# [hosts.server1.images]           # container projects on server1, by image name or glob
+# "nginx" = { exposure = "internet", input = "public", criticality = "high" }
+# "ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
+# [code.myapp] / [github.<name>] take the same keys.
+# [projects."someapp"]             # any other project, e.g. uploaded from CI
+# exposure = "external-auth"
+# criticality = "critical"
+
 # ---- CPE overrides for Homebrew and macOS apps ------------------------------------------
 # Matched by CPE only; NVD's vendor can't be derived from Homebrew metadata (default guess:
 # vendor = product). "<formula | cask | bundle id>" = "<nvd vendor>:<nvd product>".

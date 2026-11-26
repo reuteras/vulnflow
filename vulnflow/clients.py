@@ -265,6 +265,21 @@ class DependencyTrack:
                 return
         raise HttpError("PATCH", self.http.url(path), r)
 
+    def set_tags(self, project_uuid: str, tags: list[str]) -> None:
+        """PATCH /api/v1/project/{uuid} {"tags": [...]}: replaces the project's whole tag set
+        (ProjectResource.patchProject, DT 5.2.2: setTags when the collection differs); needs
+        PORTFOLIO_MANAGEMENT. A 304 is checked by reading the tags back, as in set_active."""
+        path = f"api/v1/project/{project_uuid}"
+        body = {"tags": [{"name": t} for t in tags]}
+        r = self.http.request("PATCH", path, json_body=body, expect_ok=False)
+        if r.ok:
+            return
+        if r.status == 304:
+            p = self.http.get(path).json() or {}
+            if sorted(t.get("name", "") for t in p.get("tags") or []) == sorted(tags):
+                return
+        raise HttpError("PATCH", self.http.url(path), r)
+
     def export_fpf(self, project_uuid: str) -> bytes:
         return self.http.get(f"api/v1/finding/project/{project_uuid}/export").body
 

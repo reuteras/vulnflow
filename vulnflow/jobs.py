@@ -7,12 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .clients import DefectDojo, DependencyTrack, DTProject, OpenCVE
-from .config import Inventory, Team
+from .config import Inventory, Machines, Team
 
 log = logging.getLogger(__name__)
 
 # DT project tags copied to DefectDojo (the agent sets them; team-* is there already)
-DOJO_TAG_PREFIXES = ("host-", "kind-", "group-")
+# carried to DefectDojo: where it runs, what it is, and its asset context (context.py)
+DOJO_TAG_PREFIXES = ("host-", "kind-", "group-", "exposure-", "input-", "crit-", "flag-")
 
 
 @dataclass
@@ -127,6 +128,7 @@ def dt_to_dojo(
     engagement: str = "Dependency-Track",
     dry_run: bool = False,
     maintenance: DependencyTrack | None = None,
+    machines: Machines | None = None,
 ) -> Report:
     """Copy findings per DT project into DefectDojo, routed to the owning team's product type.
 
@@ -146,6 +148,12 @@ def dt_to_dojo(
         rep.done += [f"{tag}prune: reactivated {line}" for line in pr.reactivated]
         rep.done += [f"{tag}prune: review date passed, shown again: {line}" for line in pr.reopened]
         rep.errors += [f"prune: {e}" for e in pr.errors]
+        if machines is not None:
+            from .context import apply_context
+
+            cx = apply_context(inv, machines, maintenance, apply=not dry_run)
+            rep.done += [f"{tag}context: {line}" for line in cx.changed]
+            rep.errors += [f"context: {e}" for e in cx.errors]
     inactive = 0
     for team in inv.teams.values():
         try:

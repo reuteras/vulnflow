@@ -3381,6 +3381,190 @@ def test_github_sboms_pull_check_upload_and_refresh(inv, tmp_path):
     assert json.loads(state.read_text())["mini-app"]["tag"] == "v1.9.0"
 
 
+CONTEXT_TOML = """
+[groups.web]
+team = "sysadm"
+hosts = ["web01", "web02"]
+
+[hosts.web01]
+exposure = "internet"
+input = "public"
+criticality = "high"
+scans = ["system", "containers"]
+[hosts.web01.images]
+"nginx" = { exposure = "internet", input = "public", criticality = "high" }
+"ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
+"ghcr.io/acme/admin-special" = { exposure = "internal" }
+
+[hosts.web02]
+eol = true
+
+[code.portal]
+host = "web01"
+path = "/srv/portal"
+exposure = "external-auth"
+criticality = "critical"
+certified = true
+
+[github.miniapp]
+repo = "someone/mini-app"
+team = "users"
+exposure = "hostile-device"
+
+[projects."mycalcli"]
+exposure = "internal"
+input = "staff"
+criticality = "low"
+"""
+
+
+def test_machines_asset_context_never_on_a_group(inv, tmp_path):
+    from vulnflow.config import AssetContext
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(CONTEXT_TOML)
+    m = load_machines(mf, inv.teams)
+    assert m.hosts["web01"].context == AssetContext("internet", "public", "high")
+    assert m.hosts["web02"].context == AssetContext(eol=True)  # its group gives it nothing
+    assert m.hosts["web01"].images["nginx"].tags() == ["exposure-internet", "input-public", "crit-high"]
+    assert m.code["portal"].context.tags() == [
+        "exposure-external-auth",
+        "crit-critical",
+        "flag-certified",
+    ]
+    assert m.github["miniapp"].context.exposure == "hostile-device"
+    assert m.projects["mycalcli"].tags() == ["exposure-internal", "input-staff", "crit-low"]
+    for bad, msg in (
+        ('[groups.g]\nteam = "dev"\nexposure = "internet"\nhosts = ["a"]\n', "can't be set on a group"),
+        (
+            '[groups.g]\nteam = "dev"\nhosts = ["a"]\n[groups.g.images]\nx = {}\n',
+            "can't be set on a group",
+        ),
+        ('[hosts.a]\nteam = "dev"\nexposure = "public"\n', "exposure must be one of"),
+        ('[hosts.a]\nteam = "dev"\neol = "yes"\n', "eol must be true or false"),
+        ('[hosts.a]\nteam = "dev"\n[hosts.a.images]\nx = { team = "dev" }\n', "takes only"),
+        ('[projects.x]\nowner = "me"\n', "takes only"),
+    ):
+        mf.write_text(bad)
+        with pytest.raises(SystemExit, match=msg):
+            load_machines(mf, inv.teams)
+
+
+def test_context_tags_on_dependency_track_projects(inv, tmp_path):
+    from vulnflow.clients import DTProject
+    from vulnflow.context import apply_context, context_for, desired_tags
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(CONTEXT_TOML)
+    m = load_machines(mf, inv.teams)
+
+    def proj(name: str, *tags: str, version: str = "1") -> DTProject:
+        return DTProject(f"u-{name}", name, version, True, list(tags))
+
+    def ctx(p: DTProject) -> str:
+        c = context_for(m, p)
+        return ",".join(c.tags()) if c else "unknown"
+
+    assert ctx(proj("host:web01", "team-sysadm")) == "exposure-internet,input-public,crit-high"
+    assert (
+        ctx(proj("container:docker.io/library/nginx", "host-web01"))
+        == "exposure-internet,input-public,crit-high"
+    )
+    assert (
+        ctx(proj("container:ghcr.io/acme/admin-ui", "host-web01")) == "exposure-restricted,input-staff"
+    )
+    assert (
+        ctx(proj("container:ghcr.io/acme/admin-special", "host-web01")) == "exposure-internal"
+    )  # exact wins
+    assert ctx(proj("container:redis", "host-web01")) == "unknown"
+    assert ctx(proj("container:nginx", "host-web02")) == "unknown"  # images are per host
+    assert (
+        ctx(proj("code:portal", "host-web01")) == "exposure-external-auth,crit-critical,flag-certified"
+    )
+    assert ctx(proj("miniapp", "source-github")) == "exposure-hostile-device"
+    assert ctx(proj("mycalcli", "ci-forgejo")) == "exposure-internal,input-staff,crit-low"
+    assert ctx(proj("somethingelse")) == "unknown"
+    # only the context tags are replaced; the others are kept
+    stale = proj("host:web01", "team-sysadm", "kind-host", "exposure-internal", "crit-low")
+    assert desired_tags(m, stale) == [
+        "crit-high",
+        "exposure-internet",
+        "input-public",
+        "kind-host",
+        "team-sysadm",
+    ]
+
+    rows = {
+        "team-sysadm": [
+            {
+                "uuid": "h1",
+                "name": "host:web01",
+                "version": "debian-13",
+                "active": True,
+                "tags": [{"name": "team-sysadm"}, {"name": "kind-host"}, {"name": "exposure-internal"}],
+            },
+            {
+                "uuid": "c1",
+                "name": "container:redis",
+                "version": "8",
+                "active": True,
+                "tags": [{"name": "team-sysadm"}, {"name": "host-web01"}],
+            },
+            {"uuid": "old", "name": "host:web01", "version": "debian-12", "active": False, "tags": []},
+        ],
+    }
+    patches: list[tuple[str, Any]] = []
+
+    def by_tag(meth, url, h, b):
+        tag = url.split("/tag/")[1].split("?")[0]
+        data = rows.get(tag, [])
+        return Response(200, json.dumps(data).encode(), {"X-Total-Count": str(len(data))})
+
+    def patch(meth, url, h, b):
+        patches.append((url.rsplit("/", 1)[1], json.loads(b)))
+        return Response(200, b"{}", {})
+
+    t = FakeTransport({"GET /api/v1/project/tag/": by_tag, "PATCH /api/v1/project/": patch})
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    dry = apply_context(inv, m, dt)
+    assert dry.changed == [
+        "host:web01@debian-13: exposure-internal -> crit-high, exposure-internet, input-public"
+    ]
+    assert dry.unknown == ["container:redis@8"] and not patches
+    done = apply_context(inv, m, dt, apply=True)
+    assert done.changed == dry.changed and not done.errors
+    assert patches == [
+        (
+            "h1",
+            {
+                "tags": [
+                    {"name": n}
+                    for n in (
+                        "crit-high",
+                        "exposure-internet",
+                        "input-public",
+                        "kind-host",
+                        "team-sysadm",
+                    )
+                ]
+            },
+        )
+    ]
+
+
+def test_set_tags_304_is_checked_by_reading_back():
+    t = FakeTransport(
+        {
+            "PATCH /api/v1/project/p1": Response(304, b"", {}),
+            "GET /api/v1/project/p1": {"uuid": "p1", "tags": [{"name": "b"}, {"name": "a"}]},
+        }
+    )
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    dt.set_tags("p1", ["a", "b"])  # 304, and the tags are there: fine
+    with pytest.raises(Exception, match="PATCH"):
+        dt.set_tags("p1", ["a", "c"])
+
+
 def test_agent_keys_per_host_team_keep_rotate_revoke():
     from vulnflow.bootstrap import DT_AGENT_PERMISSIONS, agent_key, dt_admin_http, revoke_agent
 
