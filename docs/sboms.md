@@ -104,6 +104,37 @@ The daily run matters: `prune` deactivates the newest version of a `kind-*` proj
 the lists. Each commit makes a new version; the old ones are retired two days after a
 newer one is uploaded.
 
+## From GitHub releases
+
+A project that builds on GitHub can't reach Dependency-Track when vulnflow is only on the
+tailnet. vulnflow pulls instead: the project's release workflow attaches a CycloneDX SBOM
+to each release, and every `dt2dojo` round (`python3 -m vulnflow github-sboms` by hand)
+downloads the newest one and uploads it. GitHub holds no Dependency-Track key and no
+tailnet access, so a compromised workflow or a fork's pull request can't reach your
+network.
+
+```toml
+# machines.toml (not in git)
+[github.someapp]                 # the Dependency-Track project name
+repo  = "owner/someapp"
+asset = "*.cdx.json"             # default
+team  = "dev"
+```
+
+- The newest release that is neither a draft nor a prerelease, project `<name>`, version
+  = the release tag, tags `team-<team>`, `kind-app` and `source-github`.
+- An SBOM that isn't CycloneDX JSON, or lists no package, is refused. Check yours: an SBOM
+  of the built wheel (`syft scan dir:dist/`) has no components. Scan an environment the
+  release is installed in instead.
+- The newest release is uploaded again once a day, also when nothing changed, because
+  `prune` retires the newest version after 7 days without an upload; older releases are
+  retired two days after a newer one arrives. `data/github-sboms.json` records what was
+  uploaded when; `--force` uploads now, `--dry-run` downloads and checks only.
+- Public repositories need no token. `VULNFLOW_GITHUB_TOKEN` (read-only) only raises the
+  API limit and is never sent with the download, which must be under
+  `https://github.com/<repo>/releases/download/`.
+- Not done yet: checking the release's cosign signature before the upload.
+
 ## Own machines (push agents)
 
 The vulnflow server is always on and every machine **pushes** to it; nothing connects to

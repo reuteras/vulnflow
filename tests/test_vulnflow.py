@@ -3139,6 +3139,95 @@ def test_agent_config_projects_and_tags(tmp_path):
     ]
 
 
+def test_machines_github_section(inv, tmp_path):
+    mf = tmp_path / "m.toml"
+    mf.write_text('[github.miniapp]\nrepo = "someone/mini-app"\nteam = "users"\n')
+    g = load_machines(mf, inv.teams).github["miniapp"]
+    assert (g.repo, g.asset, g.team) == ("someone/mini-app", "*.cdx.json", "users")
+    for bad, msg in (
+        ('repo = "../etc"', "owner/repo"),
+        ('repo = "a/b"\nteam = "nope"', "team 'nope'"),
+        ('repo = "a/b"\ntoken = "x"', "unknown keys"),
+    ):
+        mf.write_text(f"[github.x]\n{bad}\n")
+        with pytest.raises(SystemExit, match=msg):
+            load_machines(mf, inv.teams)
+
+
+def test_github_sboms_pull_check_upload_and_refresh(inv, tmp_path):
+    from vulnflow.config import GithubSource, Machines
+    from vulnflow.github import REFRESH_SECONDS, GitHub, count_packages, pull
+
+    def bom(n: int) -> bytes:
+        comps = [{"type": "library", "name": f"p{i}", "purl": f"pkg:pypi/p{i}@1"} for i in range(n)]
+        return json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6", "components": comps}).encode()
+
+    def release(tag: str, **kw: Any) -> dict[str, Any]:
+        url = f"https://github.com/someone/mini-app/releases/download/{tag}/mini.cdx.json"
+        assets = [{"name": "mini.spdx.json"}, {"name": "mini.cdx.json", "browser_download_url": url}]
+        return {"tag_name": tag, "draft": False, "prerelease": False, "assets": assets} | kw
+
+    releases = [release("v2.0.0-rc1", prerelease=True), release("v1.9.0"), release("v1.8.0")]
+    files = {"v1.9.0": bom(3), "v2.0.0": bom(0)}
+    uploads: list[dict[str, Any]] = []
+
+    def api(m, url, h, b):
+        assert h["Accept"] == "application/vnd.github+json" and "Authorization" not in h
+        return Response(200, json.dumps(releases).encode(), {})
+
+    def download(m, url, h, b):
+        assert "Authorization" not in h and "X-GitHub-Api-Version" not in h
+        return Response(200, files[url.split("/")[-2]], {})
+
+    def upload(m, url, h, b):
+        uploads.append(json.loads(b))
+        return Response(200, b'{"token": "t"}', {})
+
+    t = FakeTransport(
+        {
+            "GET api.github.com/repos/someone/mini-app/releases?per_page=20": api,
+            "GET https://github.com/someone/mini-app/releases/download/": download,
+            "PUT /api/v1/bom": upload,
+        }
+    )
+    gh, dt = GitHub(transport=t), DependencyTrack("http://dt", "k", transport=t)
+    machines = Machines(
+        github={"mini-app": GithubSource("mini-app", "someone/mini-app", "*.cdx.json", "users")}
+    )
+    state = tmp_path / "github-sboms.json"
+    assert count_packages(bom(2)) == 2
+    with pytest.raises(ValueError, match="CycloneDX"):
+        count_packages(b'{"spdxVersion": "SPDX-2.3"}')
+
+    res = pull(machines, inv, gh, dt, state, now=1000.0, dry_run=True)
+    assert res.uploaded == ["mini-app@v1.9.0 (3 packages, mini.cdx.json) [dry run]"] and not uploads
+    res = pull(machines, inv, gh, dt, state, now=1000.0)
+    assert not res.errors and len(uploads) == 1  # the prerelease is skipped
+    body = uploads[0]
+    assert (body["projectName"], body["projectVersion"]) == ("mini-app", "v1.9.0")
+    assert [x["name"] for x in body["projectTags"]] == ["team-users", "kind-app", "source-github"]
+    assert json.loads(base64.b64decode(body["bom"]))["components"][0]["purl"] == "pkg:pypi/p0@1"
+    # same release later that day: nothing; a day later: uploaded again (keeps prune off it)
+    assert pull(machines, inv, gh, dt, state, now=2000.0).unchanged == ["mini-app@v1.9.0"]
+    assert pull(machines, inv, gh, dt, state, now=2000.0, force=True).uploaded
+    assert pull(machines, inv, gh, dt, state, now=2000.0 + REFRESH_SECONDS - 1).unchanged
+    assert pull(machines, inv, gh, dt, state, now=2000.0 + REFRESH_SECONDS).uploaded
+    assert len(uploads) == 3
+
+    # a new release whose SBOM is empty (the bug miniflux-tui-py had): refused
+    releases.insert(0, release("v2.0.0"))
+    res = pull(machines, inv, gh, dt, state, now=3000.0)
+    assert len(uploads) == 3 and "lists no packages; not uploaded" in res.errors[0]
+    # no matching asset, and a download URL outside the repository's releases
+    releases[0] = release("v2.0.0", assets=[{"name": "notes.txt"}])
+    assert "no asset matching '*.cdx.json'" in pull(machines, inv, gh, dt, state).errors[0]
+    evil = {"name": "x.cdx.json", "browser_download_url": "https://evil.example/x.cdx.json"}
+    releases[0] = release("v2.0.0", assets=[evil])
+    assert "refusing download URL" in pull(machines, inv, gh, dt, state).errors[0]
+    assert len(uploads) == 3
+    assert json.loads(state.read_text())["mini-app"]["tag"] == "v1.9.0"
+
+
 def test_agent_keys_per_host_team_keep_rotate_revoke():
     from vulnflow.bootstrap import DT_AGENT_PERMISSIONS, agent_key, dt_admin_http, revoke_agent
 
