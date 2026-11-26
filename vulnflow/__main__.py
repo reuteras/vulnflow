@@ -119,6 +119,57 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
     return 0
 
 
+def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_run: bool) -> int:
+    """`kev-watch` (and every dt2dojo round): new CISA KEV entries -> chat, see kevwatch.py."""
+    from .intel import KevCache
+    from .kevwatch import STATE_FILE, Finding, watch
+    from .patches import open_findings
+    from .receiver import chat_sender
+
+    if not env_flag("VULNFLOW_ENRICH_KEV"):
+        print("  skip  kev-watch (VULNFLOW_ENRICH_KEV=0)")
+        return 0
+    try:
+        index = KevCache(data_dir, ttl_seconds=3600).index()
+    except Exception as e:
+        print(f"  error kev-watch: KEV catalog unavailable: {e}", file=sys.stderr)
+        return 1
+
+    def findings() -> list[Finding]:
+        if dt is None:
+            return []
+        errors: list[str] = []
+        out: list[Finding] = []
+        for team, p, f in open_findings(inv, dt, None, errors):
+            c, v = f.get("component") or {}, f.get("vulnerability") or {}
+            component = f"{c.get('name', '')} {c.get('version', '')}"
+            out.append((team, project_label(p.name, p.version), component, str(v.get("vulnId", ""))))
+        if errors:
+            raise RuntimeError("; ".join(errors[:3]))
+        return out
+
+    team_hook, soc_hook = env("VULNFLOW_CHAT_WEBHOOK"), env("VULNFLOW_SOC_WEBHOOK")
+    res = watch(
+        inv,
+        index,
+        data_dir / STATE_FILE,
+        findings,
+        chat_sender(team_hook) if team_hook else None,
+        chat_sender(soc_hook) if soc_hook else None,
+        opencve_url=env("OPENCVE_URL"),
+        dry_run=dry_run,
+    )
+    if res.baseline:
+        print(f"  ok    kev-watch: first run, {res.baseline} KEV entries recorded, nothing posted")
+    for h in res.new:
+        print(f"  new   {h.cve} {h.vendor} {h.product} -> {h.where()}")
+    if not res.baseline and not res.new:
+        print("  ok    kev-watch: nothing new in CISA KEV")
+    for msg in res.errors:
+        print(f"  error kev-watch: {msg}", file=sys.stderr)
+    return 1 if res.errors else 0
+
+
 def _maintenance_dt() -> DependencyTrack | None:
     key = env("DT_MAINTENANCE_API_KEY")
     return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
@@ -585,6 +636,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `prune` at the start of each round (it runs when DT_MAINTENANCE_API_KEY is set)",
     )
+    d.add_argument(
+        "--no-kev-watch",
+        action="store_true",
+        help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
+    )
+    kw = sub.add_parser(
+        "kev-watch",
+        help="post new CISA KEV entries to chat with the findings and teams they hit "
+        "(dt2dojo runs this every round; the first run only records the catalog)",
+    )
+    kw.add_argument("--dry-run", action="store_true", help="show what is new; post and record nothing")
     pr = sub.add_parser(
         "prune",
         help="carry Not Affected/False Positive decisions to new project versions, deactivate "
@@ -947,9 +1009,13 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint)
             rep.print()
+            kev_rc = 0 if a.no_kev_watch else _kev_watch(inv, dt, data_dir, a.dry_run)
             if not a.loop:
-                return 1 if rep.errors else 0
+                return 1 if rep.errors or kev_rc else 0
             time.sleep(a.loop)
+
+    if a.cmd == "kev-watch":
+        return _kev_watch(inv, _dtrack(), data_dir, a.dry_run)
 
     if a.cmd == "patches":
         from .patches import patched_findings

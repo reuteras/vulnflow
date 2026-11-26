@@ -36,6 +36,33 @@ OSV and the GitHub advisories, also when a new CVE arrives later for an SBOM it 
 Every 30 minutes `dt2dojo` copies the open findings into DefectDojo, one product per DT
 project under the team's product type, and closes the ones that are gone.
 
+**New in KEV: the catalog itself.** OpenCVE only reports a KEV addition for a product a team
+follows, and only when its knowledge base records it (up to a day and a half later). So
+every `dt2dojo` round (every 30 minutes) also runs `kev-watch`: it compares CISA's catalog
+with the entries it has seen (`kev-seen.json` in the data directory) and, for each new one,
+looks for open Dependency-Track findings with that CVE and for teams whose OpenCVE
+subscriptions name the vendor. Entries that hit something go to chat
+(`VULNFLOW_CHAT_WEBHOOK`), mentioning those teams:
+
+```text
+@dev @network New in CISA KEV (2):
+- CVE-2026-0010 OpenSSL OpenSSL: OpenSSL bug (added 2026-11-25)
+  open finding, team dev: code:web@2: openssl 3.0.1; container:app@1.0: openssl 3.0.1
+- CVE-2026-0011 Citrix NetScaler: NetScaler bug (added 2026-11-25, ransomware use)
+  vendor followed by: network
+```
+
+Every new entry, also those that match nothing of ours, goes to the SOC channel
+(`VULNFLOW_SOC_WEBHOOK`) when it is set. The first run only records the catalog. An entry
+counts as seen once its messages were delivered, so a chat outage is retried.
+`python3 -m vulnflow kev-watch --dry-run` shows what is new without posting;
+`dt2dojo --no-kev-watch` turns it off. The vendor match is by name only (KEV's "Palo Alto
+Networks" against NVD's `paloaltonetworks`), not by product or version.
+
+When OpenCVE does report the addition (its event `metrics` with `added.kev`), the receiver
+counts the CVE as KEV even if its own copy of the catalog, cached for 6 hours, doesn't have
+it yet, so the alert is P1.
+
 **Email reports** (daily when something needs action, weekly always): new P1/P2 alerts,
 new critical/high/KEV findings, hosts that stopped uploading, and versions to deploy. See
 [Email reports](#email-reports).

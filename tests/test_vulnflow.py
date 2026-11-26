@@ -211,6 +211,28 @@ def test_process_payload_routes_ranks_and_filters(inv, tmp_path):
     assert by["CVE-2026-0003"].cvss31 is None and by["CVE-2026-0003"].tier == 4
 
 
+def test_opencve_kev_added_event_makes_p1_before_our_kev_copy_has_it(inv, tmp_path):
+    from vulnflow.receiver import kev_added
+
+    # the shape in opencve-kb (2026-11-26) and v3.1.0's kev_added trigger
+    event = {
+        "type": "metrics",
+        "details": {
+            "added": {"kev": {"dateAdded": "2026-11-24T00:00:00+00:00", "dueDate": "x"}},
+            "removed": {},
+            "updated": {},
+        },
+    }
+    assert kev_added([event]) == "2026-11-24T00:00:00+00:00"
+    assert kev_added([{"type": "metrics", "details": {"added": {"epss": {}}}}]) is None
+    junk: list[Any] = [{"type": "metrics", "details": None}, "junk"]
+    assert kev_added(junk) is None
+    e, _ = make_enricher(tmp_path)  # CVE-2026-0001 is not in the cached KEV file
+    change = {"cve": {"cve_id": "CVE-2026-0001", "cvss31": 4.3}, "events": [event]}
+    (a,) = process_payload({**PAYLOAD, "changes": [change]}, inv, e)
+    assert a.tier == 1 and a.kev and a.reasons == ["in CISA KEV"]
+
+
 def test_unknown_project_is_unrouted(inv, tmp_path):
     e, _ = make_enricher(tmp_path)
     alerts = process_payload({**PAYLOAD, "project": "nope"}, inv, e)
@@ -260,6 +282,120 @@ def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
     }
     Pipeline(inv, e, tmp_path / "d.jsonl", soc_sender=soc.append).handle(quiet)
     assert len(soc) == 2
+
+
+def _kev_entry(cve: str, vendor: str, product: str, added: str, ransomware: str = "Unknown"):
+    return {
+        "cveID": cve,
+        "vendorProject": vendor,
+        "product": product,
+        "vulnerabilityName": f"{product} bug",
+        "dateAdded": added,
+        "knownRansomwareCampaignUse": ransomware,
+    }
+
+
+def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
+    from vulnflow import kevwatch
+
+    state = tmp_path / "kev-seen.json"
+    index = {"CVE-2020-0001": _kev_entry("CVE-2020-0001", "Microsoft", "Windows", "2020-01-01")}
+    asked: list[str] = []
+
+    def findings():
+        asked.append("dt")
+        return [
+            ("dev", "container:app@1.0", "openssl 3.0.1", "CVE-2026-0010"),
+            ("dev", "code:web@2", "openssl 3.0.1", "CVE-2026-0010"),
+        ]
+
+    team: list[str] = []
+    soc: list[str] = []
+    # first run: record, post nothing, don't ask DT
+    res = kevwatch.watch(inv, index, state, findings, team.append, soc.append)
+    assert res.baseline == 1 and not res.new and not team and not soc and not asked
+    assert kevwatch.load_seen(state) == {"CVE-2020-0001"}
+
+    index |= {
+        "CVE-2026-0010": _kev_entry("CVE-2026-0010", "OpenSSL", "OpenSSL", "2026-11-25"),
+        # "Palo Alto Networks" matches the NVD slug paloaltonetworks only after normalising;
+        # here the network team follows citrix, and "Citrix" does
+        "CVE-2026-0011": _kev_entry("CVE-2026-0011", "Citrix", "NetScaler", "2026-11-25", "Known"),
+        "CVE-2026-0012": _kev_entry("CVE-2026-0012", "Acme", "Widget", "2026-11-24"),
+    }
+    assert kevwatch.followers(inv, "Citrix") == ["network"]
+    assert kevwatch.followers(inv, "Debian ") == ["sysadm"]
+    # dry run: shows, posts and records nothing
+    res = kevwatch.watch(inv, index, state, findings, team.append, soc.append, dry_run=True)
+    assert [h.cve for h in res.new] == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]
+    assert not team and kevwatch.load_seen(state) == {"CVE-2020-0001"}
+
+    # a failed delivery keeps them unseen, so the next run retries
+    def broken(text):
+        raise OSError("chat down")
+
+    res = kevwatch.watch(inv, index, state, findings, broken, soc.append)
+    assert res.errors == ["chat delivery failed: chat down"] and len(soc) == 1
+    assert kevwatch.load_seen(state) == {"CVE-2020-0001"}
+    soc.clear()
+    res = kevwatch.watch(
+        inv, index, state, findings, team.append, soc.append, opencve_url="https://o.example"
+    )
+    assert not res.errors and kevwatch.load_seen(state) == set(index)
+    (msg,) = team
+    assert msg.startswith("@dev @network New in CISA KEV (2):")
+    assert "CVE-2026-0012" not in msg  # matches nothing of ours: SOC only
+    assert "open finding, team dev: code:web@2: openssl 3.0.1; container:app@1.0: openssl 3.0.1" in msg
+    assert "CVE-2026-0011 Citrix NetScaler: NetScaler bug (added 2026-11-25, ransomware use)" in msg
+    assert "vendor followed by: network" in msg and "https://o.example/cve/CVE-2026-0010" in msg
+    (s,) = soc
+    assert "CVE-2026-0012 Acme Widget: Widget bug (added 2026-11-24) -> nothing of ours" in s
+    assert "CVE-2026-0010" in s and "findings in dev" in s
+    # nothing new: no message, DT not asked again
+    asked.clear()
+    team.clear()
+    assert not kevwatch.watch(inv, index, state, findings, team.append).new
+    assert not team and not asked
+
+
+def test_kev_watch_cli_posts_to_both_webhooks(inv, tmp_path, monkeypatch, capsys):
+    from vulnflow.__main__ import main
+
+    catalog = {"vulnerabilities": [_kev_entry("CVE-2020-0001", "Microsoft", "Windows", "2020-01-01")]}
+    posted: list[tuple[str, str]] = []
+
+    def hook(m, url, h, b):
+        posted.append((url, json.loads(b)["text"]))
+        return Response(200, b"ok", {})
+
+    t = FakeTransport(
+        {
+            "GET known_exploited_vulnerabilities.json": lambda m, u, h, b: Response(
+                200, json.dumps(catalog).encode(), {}
+            ),
+            "POST chat.example/hooks/team": hook,
+            "POST chat.example/hooks/soc": hook,
+        }
+    )
+    monkeypatch.setattr("vulnflow.net.urllib_transport", t)
+    for k, v in {
+        "VULNFLOW_CHAT_WEBHOOK": "http://chat.example/hooks/team",
+        "VULNFLOW_SOC_WEBHOOK": "http://chat.example/hooks/soc",
+        "VULNFLOW_ENRICH_KEV": "1",
+        "DT_API_KEY": "",
+    }.items():
+        monkeypatch.setenv(k, v)
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    args = ["--env-file", str(env_file), "--inventory", str(INV), "--data-dir", str(tmp_path)]
+    assert main([*args, "kev-watch"]) == 0
+    assert "first run, 1 KEV entries recorded" in capsys.readouterr().out and not posted
+    catalog["vulnerabilities"].append(_kev_entry("CVE-2026-0011", "Citrix", "NetScaler", "2026-11-25"))
+    (tmp_path / "kev.json").unlink()  # the cache would hide the new catalog for an hour
+    assert main([*args, "kev-watch"]) == 0
+    assert "new   CVE-2026-0011 Citrix NetScaler -> network follows" in capsys.readouterr().out
+    assert [u.rsplit("/", 1)[1] for u, _ in posted] == ["team", "soc"]
+    assert posted[0][1].startswith("@network New in CISA KEV (1):")
 
 
 def test_http_receiver_auth_and_pipeline(inv, tmp_path):

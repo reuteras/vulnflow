@@ -60,27 +60,57 @@ def _cvss(v: Any) -> float | None:
         return None
 
 
+def chat_sender(url: str) -> Callable[[str], None]:
+    """POST {"text": ...} to a Mattermost/Slack/Teams-style incoming webhook."""
+    http = Http(url, timeout=15)
+
+    def send(text: str) -> None:
+        http.post("", json_body={"text": text})
+
+    return send
+
+
+def kev_added(events: list[dict[str, Any]]) -> str | None:
+    """OpenCVE's own word that the change added the CVE to KEV: an event of type `metrics`
+    with details.added.kev = {dateAdded, dueDate} (the `kev_added` trigger's test in v3.1.0;
+    seen in opencve-kb on 2026-11-26). Returns dateAdded ("" if absent), or None."""
+    for e in events:
+        if not isinstance(e, dict) or e.get("type") != "metrics":
+            continue
+        details = e.get("details")
+        added = details.get("added") if isinstance(details, dict) else None
+        kev = added.get("kev") if isinstance(added, dict) else None
+        if kev:
+            return str(kev.get("dateAdded", "")) if isinstance(kev, dict) else ""
+    return None
+
+
 def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher) -> list[Alert]:
     project = str(payload.get("project", ""))
     team = inv.team_for_opencve_project(project)
     ignore = set(inv.rules.ignore_event_types)
 
-    wanted: list[tuple[dict, list[str]]] = []
+    wanted: list[tuple[dict, list[str], str | None]] = []
     for ch in payload.get("changes") or []:
         cve = ch.get("cve") or {}
-        types = [e.get("type", "") for e in ch.get("events") or []]
+        events = [e for e in ch.get("events") or [] if isinstance(e, dict)]
+        types = [e.get("type", "") for e in events]
         relevant = [t for t in types if t not in ignore]
         if types and not relevant:
             continue  # only ignored event types (e.g. reference churn)
         if cve.get("cve_id"):
-            wanted.append((cve, relevant or types))
+            wanted.append((cve, relevant or types, kev_added(events)))
 
-    signals = enricher.enrich(c["cve_id"] for c, _ in wanted)
+    signals = enricher.enrich(c["cve_id"] for c, _, _ in wanted)
     now = datetime.now(UTC).isoformat(timespec="seconds")
     alerts: list[Alert] = []
-    for cve, types in wanted:
+    for cve, types, kev_date in wanted:
         cid = cve["cve_id"].upper()
         sig = signals[cid]
+        if kev_date is not None and not sig.kev:
+            # OpenCVE saw the KEV addition before our cached copy of the catalog did
+            sig.kev = True
+            sig.kev_date_added = sig.kev_date_added or kev_date[:10]
         cvss = _cvss(cve.get("cvss31"))
         v = assess(cvss, sig, inv.rules)
         alerts.append(
@@ -182,12 +212,7 @@ class Pipeline:
 
     @staticmethod
     def _make_sender(url: str) -> Callable[[str], None]:
-        http = Http(url, timeout=15)
-
-        def send(text: str) -> None:
-            http.post("", json_body={"text": text})
-
-        return send
+        return chat_sender(url)
 
     def handle(self, payload: dict) -> list[Alert]:
         alerts = process_payload(payload, self.inv, self.enricher)
