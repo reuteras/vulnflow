@@ -61,6 +61,9 @@ The same data without a browser, on the server (over ssh):
 | `j`/`k`, arrows, PgUp/PgDn | move |
 | `/`, `t`, `s` | filter findings by text (CVE, component, project), team, minimum severity |
 | Enter | the finding: project, component, purl, description, KEV, where on disk |
+| `/`, `t`, `p`, `e` (Alerts) | filter alerts by text (CVE, project, description), team, tier (P1, P1-P2, P1-P3, all), KEV only |
+| Enter (Alerts) | the alert: tier and reasons, team and OpenCVE project, events, CVSS, EPSS, KEV, sightings, description, OpenCVE link (`OPENCVE_URL`) |
+| `J`/`K` (in a finding or alert) | the next/previous one in the list |
 | `J`/`K` (in the finding) | the next / previous finding in the current list; the list cursor follows |
 | space | select several findings |
 | `m` | mark the selected (or current) findings: Not Affected with a justification, False Positive, or an accepted risk with a review date; asks for a reason and a `y` first |

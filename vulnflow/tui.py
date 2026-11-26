@@ -5,7 +5,8 @@ Four tabs, read from the same places as the reports:
     1 Findings   open Dependency-Track findings of every team (active projects,
                  unsuppressed), with KEV marks; filter by team, severity and text;
                  Enter shows one (description, where on disk), `m` marks it
-    2 Alerts     the receiver's alerts.jsonl, newest first
+    2 Alerts     the receiver's alerts.jsonl, newest first; filter by team, tier, KEV
+                 and text; Enter shows one (reasons, scores, description, OpenCVE link)
     3 Hosts      own machines and their last SBOM upload
     4 Updates    check-updates (asks GitHub, so only when the tab is opened)
 
@@ -58,6 +59,11 @@ HELP = (
     "1-4 tabs  j/k move  / text  t team  s severity  space select  "
     "Enter show (J/K next/prev)  m mark  r reload  q quit"
 )
+ALERT_HELP = (
+    "1-4 tabs  j/k move  / text  t team  p tier  e KEV only  "
+    "Enter show (J/K next/prev)  r reload  q quit"
+)
+TIER_LIMITS = (0, 1, 2, 3)  # `p` steps through: all, P1, P1-P2, P1-P3
 
 
 class Screen(Protocol):
@@ -201,30 +207,123 @@ def ignore_item(r: FindingRow, d: Decision, today: date) -> IgnoreItem:
     )
 
 
-def alert_lines(raw: Iterable[str], width: int) -> list[str]:
-    alerts = []
-    notes = []
+@dataclass
+class AlertRow:
+    """One line of the receiver's alerts.jsonl (vulnflow.receiver.Alert as written)."""
+
+    received_at: str
+    cve: str
+    team: str
+    tier: int
+    tier_name: str
+    kev: bool = False
+    epss: float | None = None
+    epss_percentile: float | None = None
+    cvss31: float | None = None
+    project: str = ""
+    organization: str = ""
+    event_types: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    sightings: dict[str, int] = field(default_factory=dict)
+    description: str = ""
+    enrichment_errors: list[str] = field(default_factory=list)
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def parse_alerts(raw: Iterable[str]) -> tuple[list[str], list[AlertRow]]:
+    """(notes from read_alerts, alerts newest first); unreadable lines are skipped."""
+    notes: list[str] = []
+    rows: list[AlertRow] = []
     for line in raw:
         if line.startswith("("):  # a note from read_alerts, not a log line
-            notes.append(line[:width])
+            notes.append(line)
             continue
         try:
             a = json.loads(line)
         except ValueError:
             continue
-        if isinstance(a, dict):
-            alerts.append(a)
-    alerts.sort(key=lambda a: str(a.get("received_at", "")), reverse=True)
-    out = []
-    for a in alerts:
-        kev = "KEV" if a.get("kev") else "   "
-        epss = a.get("epss")
-        e = f"EPSS {epss:.3f}" if isinstance(epss, int | float) else ""
-        out.append(
-            f"{str(a.get('received_at', ''))[:16]} {a.get('tier_name', ''):<10} {kev} "
-            f"{a.get('cve', ''):<18} {a.get('team', ''):<8} {e}"[:width]
+        if not isinstance(a, dict):
+            continue
+        tier = a.get("tier")
+        rows.append(
+            AlertRow(
+                received_at=str(a.get("received_at", "")),
+                cve=str(a.get("cve", "")),
+                team=str(a.get("team", "")),
+                tier=tier if isinstance(tier, int) and not isinstance(tier, bool) else 4,
+                tier_name=str(a.get("tier_name", "")),
+                kev=bool(a.get("kev")),
+                epss=_num(a.get("epss")),
+                epss_percentile=_num(a.get("epss_percentile")),
+                cvss31=_num(a.get("cvss31")),
+                project=str(a.get("project", "")),
+                organization=str(a.get("organization", "")),
+                event_types=[str(t) for t in a.get("event_types") or []],
+                reasons=[str(r) for r in a.get("reasons") or []],
+                sightings={
+                    str(k): v for k, v in (a.get("sightings") or {}).items() if isinstance(v, int)
+                },
+                description=" ".join(str(a.get("description") or "").split()),
+                enrichment_errors=[str(e) for e in a.get("enrichment_errors") or []],
+            )
         )
-    return notes + out or ["No alerts logged."]
+    rows.sort(key=lambda r: r.received_at, reverse=True)
+    return notes, rows
+
+
+def filter_alerts(
+    rows: list[AlertRow], team: str = "", max_tier: int = 0, kev_only: bool = False, text: str = ""
+) -> list[AlertRow]:
+    needle = text.lower()
+    return [
+        r
+        for r in rows
+        if (not team or r.team == team)
+        and (not max_tier or r.tier <= max_tier)
+        and (not kev_only or r.kev)
+        and (not needle or needle in f"{r.cve} {r.project} {r.description}".lower())
+    ]
+
+
+def alert_line(r: AlertRow, width: int) -> str:
+    kev = "KEV" if r.kev else "   "
+    e = f"EPSS {r.epss:.3f}" if r.epss is not None else ""
+    return f"{r.received_at[:16]} {r.tier_name:<10} {kev} {r.cve:<18} {r.team:<8} {e}"[:width]
+
+
+def alert_lines(raw: Iterable[str], width: int) -> list[str]:
+    notes, rows = parse_alerts(raw)
+    return [n[:width] for n in notes] + [alert_line(r, width) for r in rows] or ["No alerts logged."]
+
+
+def alert_details(r: AlertRow, opencve_url: str = "") -> list[str]:
+    epss = "n/a"
+    if r.epss is not None:
+        epss = f"{r.epss:.4f}" + (
+            f" (percentile {r.epss_percentile:.2f})" if r.epss_percentile is not None else ""
+        )
+    sightings = ", ".join(f"{k} {v}" for k, v in sorted(r.sightings.items())) or "none"
+    out = [
+        f"Tier:       {r.tier_name or f'P{r.tier}'}",
+        *(f"  - {reason}" for reason in r.reasons),
+        f"Team:       {r.team or '-'} (OpenCVE project {r.project or '-'}"
+        + (f", organization {r.organization})" if r.organization else ")"),
+        f"Received:   {r.received_at}",
+        f"Events:     {', '.join(r.event_types) or 'change'}",
+        f"CVSS 3.1:   {r.cvss31 if r.cvss31 is not None else 'n/a'}",
+        f"EPSS:       {epss}",
+        f"KEV:        {'yes, in CISA KEV' if r.kev else 'no'}",
+        f"Sightings:  {sightings}",
+    ]
+    if opencve_url:
+        out.append(f"OpenCVE:    {opencve_url.rstrip('/')}/cve/{r.cve}")
+    out += ["", r.description or "(no description in the webhook)"]
+    if r.enrichment_errors:
+        out += ["", "Enrichment errors:", *(f"  {e}" for e in r.enrichment_errors)]
+    return out
 
 
 def host_lines(machines: Machines, pushes: dict[str, float] | None, width: int, now: float) -> list[str]:
@@ -252,6 +351,7 @@ class Sources:
     details: Callable[[FindingRow], list[str]]
     # (status line, keys now suppressed in that state); None: read-only
     write: Callable[[list[FindingRow], Decision], tuple[str, set[tuple[str, str, str]]]] | None
+    opencve_url: str = ""  # browser-facing, for the link in an alert's details
 
 
 @dataclass
@@ -268,10 +368,18 @@ class App:
     selected: set[tuple[str, str, str]] = field(default_factory=set)
     status: str = ""
     cache: dict[int, list[str]] = field(default_factory=dict)
+    # Alerts tab: read on first open and on `r`; its own filters
+    alerts: list[AlertRow] | None = None
+    alert_notes: list[str] = field(default_factory=list)
+    a_team: str = ""
+    a_tier: int = 0
+    a_kev: bool = False
+    a_text: str = ""
 
     # ---- data
     def reload(self) -> None:
         self.cache.clear()
+        self.alerts = None
         rows, errors = self.src.findings()
         self.rows = rows
         self.selected &= {r.key for r in rows}
@@ -285,11 +393,17 @@ class App:
     def teams(self) -> list[str]:
         return sorted({r.team for r in self.rows})
 
+    def all_alerts(self) -> list[AlertRow]:
+        if self.alerts is None:
+            self.alert_notes, self.alerts = parse_alerts(self.src.alerts())
+        return self.alerts
+
+    def visible_alerts(self) -> list[AlertRow]:
+        return filter_alerts(self.all_alerts(), self.a_team, self.a_tier, self.a_kev, self.a_text)
+
     def tab_lines(self, width: int, height: int) -> list[str]:
         if self.tab not in self.cache:
-            if self.tab == 1:
-                self.cache[1] = alert_lines(self.src.alerts(), width)
-            elif self.tab == 2:
+            if self.tab == 2:
                 self.cache[2] = self.src.hosts(width)
             else:
                 self.cache[3] = [line[:width] for line in self.src.updates()]
@@ -304,13 +418,32 @@ class App:
         )
         _put(scr, 0, tabs, w, curses.A_BOLD)
         body = h - 3
-        if self.tab == 0:
+        if self.tab == 1:
+            alerts = self.visible_alerts()
+            notes = [n for n in self.alert_notes if n]
+            body -= len(notes)
+            self._follow(len(alerts), body)
+            tier = f"<=P{self.a_tier}" if self.a_tier else "all"
+            filt = (
+                f"team={self.a_team or 'all'} tier={tier} kev={'only' if self.a_kev else 'any'} "
+                f"text={self.a_text or '-'}"
+            )
+            _put(scr, 1, f"{len(alerts)} of {len(self.all_alerts())} alerts shown   {filt}", w)
+            for i, n in enumerate(notes):
+                _put(scr, 2 + i, n, w)
+            if not alerts:
+                _put(
+                    scr,
+                    2 + len(notes),
+                    "No alerts logged." if not self.alerts else "No alert matches the filter.",
+                    w,
+                )
+            for i, a in enumerate(alerts[self.top : self.top + body]):
+                attr = curses.A_REVERSE if self.top + i == self.pos else 0
+                _put(scr, 2 + len(notes) + i, alert_line(a, w), w, attr)
+        elif self.tab == 0:
             rows = self.visible()
-            self.pos = max(0, min(self.pos, len(rows) - 1))
-            if self.pos < self.top:
-                self.top = self.pos
-            elif self.pos >= self.top + body:
-                self.top = self.pos - body + 1
+            self._follow(len(rows), body)
             filt = f"team={self.team or 'all'} severity>={self.min_sev or 'any'} text={self.text or '-'}"
             _put(scr, 1, f"{len(rows)} shown, {len(self.selected)} selected   {filt}", w)
             for i, r in enumerate(rows[self.top : self.top + body]):
@@ -322,8 +455,16 @@ class App:
             self.top = max(0, min(self.top, max(0, len(lines) - body)))
             for i, line in enumerate(lines[self.top : self.top + body]):
                 _put(scr, 1 + i, line, w)
-        _put(scr, h - 1, (self.status or HELP), w, curses.A_BOLD)
+        _put(scr, h - 1, (self.status or (ALERT_HELP if self.tab == 1 else HELP)), w, curses.A_BOLD)
         scr.refresh()
+
+    def _follow(self, n: int, body: int) -> None:
+        """Keep the cursor on a row and the view on the cursor."""
+        self.pos = max(0, min(self.pos, n - 1))
+        if self.pos < self.top:
+            self.top = self.pos
+        elif self.pos >= self.top + max(1, body):
+            self.top = self.pos - max(1, body) + 1
 
     # ---- input
     def handle(self, scr: Screen, k: int) -> bool:
@@ -333,17 +474,18 @@ class App:
         self.status = ""
         if k in (ord("q"), ord("Q")):
             return False
+        scroll = self.tab >= 2  # Hosts and Updates scroll; Findings and Alerts move a cursor
         if ord("1") <= k <= ord("4"):
             self.tab, self.pos, self.top = k - ord("1"), 0, 0
         elif k in (ord("j"), curses.KEY_DOWN):
             self.pos += 1
-            if self.tab:
+            if scroll:
                 self.top += 1
         elif k in (ord("k"), curses.KEY_UP):
             self.pos = max(0, self.pos - 1)
-            if self.tab:
+            if scroll:
                 self.top = max(0, self.top - 1)
-        elif k in (curses.KEY_NPAGE, ord(" ")) and self.tab:
+        elif k in (curses.KEY_NPAGE, ord(" ")) and scroll:
             self.top += page
         elif k == curses.KEY_NPAGE:
             self.pos += page
@@ -353,7 +495,47 @@ class App:
             self.reload()
         elif self.tab == 0:
             self._findings_key(scr, k)
+        elif self.tab == 1:
+            self._alerts_key(scr, k)
         return True
+
+    def current_alert(self) -> AlertRow | None:
+        rows = self.visible_alerts()
+        return rows[self.pos] if 0 <= self.pos < len(rows) else None
+
+    def _alerts_key(self, scr: Screen, k: int) -> None:
+        if k == ord("/"):
+            got = prompt(scr, "Filter (CVE, project, description; empty = none): ", self.a_text)
+            if got is not None:
+                self.a_text, self.pos, self.top = got.strip(), 0, 0
+        elif k == ord("t"):
+            teams = ["", *sorted({a.team for a in self.all_alerts()})]
+            self.a_team = (
+                teams[(teams.index(self.a_team) + 1) % len(teams)] if self.a_team in teams else ""
+            )
+            self.pos = self.top = 0
+        elif k == ord("p"):
+            self.a_tier = TIER_LIMITS[(TIER_LIMITS.index(self.a_tier) + 1) % len(TIER_LIMITS)]
+            self.pos = self.top = 0
+        elif k == ord("e"):
+            self.a_kev = not self.a_kev
+            self.pos = self.top = 0
+        elif k in ENTER_KEYS:
+            self._view_alert(scr)
+
+    def _view_alert(self, scr: Screen) -> None:
+        """Details of the current alert; J/K step to the next/previous one in the list."""
+        while (a := self.current_alert()) is not None:
+            k = pager(scr, f"{a.tier_name} {a.cve} ({a.team})", alert_details(a, self.src.opencve_url))
+            n = len(self.visible_alerts())
+            if k == ord("J") and self.pos < n - 1:
+                self.pos += 1
+            elif k == ord("K") and self.pos > 0:
+                self.pos -= 1
+            elif k in (ord("J"), ord("K")):
+                continue  # already at the end of the list
+            else:
+                return
 
     def current(self) -> FindingRow | None:
         rows = self.visible()
@@ -515,7 +697,7 @@ def pager(scr: Screen, title: str, lines: list[str], confirm: bool = False) -> i
         for i, line in enumerate(wrapped[top : top + h - 3]):
             _put(scr, 2 + i, line, w)
         if not confirm:
-            _put(scr, h - 1, "j/k/space scroll, J/K next/prev finding, q/Enter close", w, curses.A_BOLD)
+            _put(scr, h - 1, "j/k/space scroll, J/K next/prev, q/Enter close", w, curses.A_BOLD)
         scr.refresh()
         k = scr.getch()
         if confirm:

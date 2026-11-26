@@ -4360,6 +4360,92 @@ def test_tui_details_step_with_J_and_K(inv):
     assert app.pos == 1  # the list cursor follows, so closing leaves it on the last viewed one
 
 
+def test_tui_alerts_filter_select_and_details():
+    from vulnflow import tui
+
+    def alert(day: str, cve: str, team: str, tier: int, **kw: Any) -> str:
+        names = {1: "P1 Act", 2: "P2 Attend", 3: "P3 Track", 4: "P4 Watch"}
+        a = {"received_at": f"2026-11-{day}T10:00:00Z", "cve": cve, "team": team}
+        return json.dumps(a | {"tier": tier, "tier_name": names[tier], "project": team} | kw)
+
+    log = [
+        alert(
+            "20",
+            "CVE-2026-0001",
+            "network",
+            1,
+            kev=True,
+            reasons=["in CISA KEV"],
+            cvss31=9.8,
+            epss=0.94,
+            epss_percentile=0.99,
+            sightings={"exploited": 3},
+            event_types=["kev_added"],
+            description="FortiOS   heap overflow",
+        ),
+        alert("21", "CVE-2026-0002", "virt", 2, epss=0.2, description="vCenter RCE"),
+        alert("22", "CVE-2026-0003", "network", 3, description="IOS XE web UI"),
+        alert("23", "CVE-2026-0004", "unrouted", 4),
+        "not json",
+    ]
+    notes, rows = tui.parse_alerts(log)
+    assert notes == [] and [r.cve[-1] for r in rows] == ["4", "3", "2", "1"]  # newest first
+    assert [r.cve[-1] for r in tui.filter_alerts(rows, team="network")] == ["3", "1"]
+    assert [r.cve[-1] for r in tui.filter_alerts(rows, max_tier=2)] == ["2", "1"]
+    assert [r.cve[-1] for r in tui.filter_alerts(rows, kev_only=True)] == ["1"]
+    assert [r.cve[-1] for r in tui.filter_alerts(rows, text="vcenter")] == ["2"]
+
+    shown: list[list[str]] = []
+
+    def pager(scr, title, lines, confirm=False):
+        shown.append(lines)
+        return scr.getch()
+
+    app = tui.App(
+        tui.Sources(
+            findings=lambda: ([], []),
+            alerts=lambda: log,
+            hosts=lambda w: [],
+            updates=lambda: [],
+            details=lambda r: [],
+            write=None,
+            opencve_url="https://opencve.example/",
+        )
+    )
+    # Alerts tab, tier filter to P1-P2 (all -> P1 -> P1-P2), move down, open, J, J (end), close
+    scr = FakeScreen(["2", "p", "p", "j", 10, "K", "J", "J", "q", "q"])
+    orig, tui.pager = tui.pager, pager
+    try:
+        for _ in range(4):
+            assert app.handle(scr, scr.getch())
+            app.draw(scr)
+        assert "2 of 4 alerts shown" in scr.lines[1] and "tier=<=P2" in scr.lines[1]
+        cur = app.current_alert()
+        assert cur is not None and cur.cve == "CVE-2026-0001"
+        assert app.handle(scr, scr.getch())  # Enter
+    finally:
+        tui.pager = orig
+    # first view is CVE-1 (pos 1); K goes to CVE-2, J back to CVE-1, J stays at the end, q
+    teams = [next(x for x in lines if x.startswith("Team:")).split()[1] for lines in shown]
+    assert teams == ["network", "virt", "network", "network"]
+    first = shown[0]
+    assert first[0] == "Tier:       P1 Act" and first[1] == "  - in CISA KEV"
+    assert "EPSS:       0.9400 (percentile 0.99)" in first and "KEV:        yes, in CISA KEV" in first
+    assert "Sightings:  exploited 3" in first and "Events:     kev_added" in first
+    assert "OpenCVE:    https://opencve.example/cve/CVE-2026-0001" in first
+    assert first[-1] == "FortiOS heap overflow"
+    assert app.pos == 1
+    # KEV only, then the team filter cycles through the teams seen in the log
+    app.handle(scr, ord("e"))
+    assert [a.cve for a in app.visible_alerts()] == ["CVE-2026-0001"]
+    app.handle(scr, ord("e"))
+    app.handle(scr, ord("p"))
+    app.handle(scr, ord("p"))  # P1-P3 -> all
+    app.handle(scr, ord("t"))
+    assert app.a_team == "network" and len(app.visible_alerts()) == 2
+    assert app.handle(scr, scr.getch()) is False
+
+
 def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
     from vulnflow import tui
 
