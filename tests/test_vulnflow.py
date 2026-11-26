@@ -3384,7 +3384,7 @@ def test_github_sboms_pull_check_upload_and_refresh(inv, tmp_path):
 CONTEXT_TOML = """
 [groups.web]
 team = "sysadm"
-hosts = ["web01", "web02"]
+hosts = ["web01", "web02", "web03"]
 
 [hosts.web01]
 exposure = "internet"
@@ -3395,6 +3395,7 @@ scans = ["system", "containers"]
 "nginx" = { exposure = "internet", input = "public", criticality = "high" }
 "ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
 "ghcr.io/acme/admin-special" = { exposure = "internal" }
+"*" = { exposure = "internal", criticality = "normal" }
 
 [hosts.web02]
 eol = true
@@ -3476,7 +3477,9 @@ def test_context_tags_on_dependency_track_projects(inv, tmp_path):
     assert (
         ctx(proj("container:ghcr.io/acme/admin-special", "host-web01")) == "exposure-internal"
     )  # exact wins
-    assert ctx(proj("container:redis", "host-web01")) == "unknown"
+    # "*" is the host's catch-all: an exact name or a longer glob wins over it
+    assert ctx(proj("container:redis", "host-web01")) == "exposure-internal,crit-normal"
+    assert ctx(proj("host:web03", "team-sysadm")) == "unknown"  # in machines.toml, no keys
     assert ctx(proj("container:nginx", "host-web02")) == "unknown"  # images are per host
     assert (
         ctx(proj("code:portal", "host-web01")) == "exposure-external-auth,crit-critical,flag-certified"
@@ -3508,7 +3511,7 @@ def test_context_tags_on_dependency_track_projects(inv, tmp_path):
                 "name": "container:redis",
                 "version": "8",
                 "active": True,
-                "tags": [{"name": "team-sysadm"}, {"name": "host-web01"}],
+                "tags": [{"name": "team-sysadm"}, {"name": "host-web02"}],
             },
             {"uuid": "old", "name": "host:web01", "version": "debian-12", "active": False, "tags": []},
         ],
@@ -3530,7 +3533,7 @@ def test_context_tags_on_dependency_track_projects(inv, tmp_path):
     assert dry.changed == [
         "host:web01@debian-13: exposure-internal -> crit-high, exposure-internet, input-public"
     ]
-    assert dry.unknown == ["container:redis@8"] and not patches
+    assert dry.unknown == ["container:redis@8 (host web02)"] and not patches
     done = apply_context(inv, m, dt, apply=True)
     assert done.changed == dry.changed and not done.errors
     assert patches == [

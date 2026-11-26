@@ -11,7 +11,8 @@ Where a project's context comes from, first match wins:
 2. host:<h>            -> [hosts.<h>] (the host project);
 3. container:<image>   -> [hosts.<h>.images] of the host in its host-<h> tag, matched on
    the image name: the whole name, its last part (`nginx` for docker.io/library/nginx),
-   or a glob (`ghcr.io/acme/*`);
+   or a glob (`ghcr.io/acme/*`); an exact name first, then the longest glob, so `"*"` is
+   a catch-all for the host's other containers;
 4. code:<name>         -> [code.<name>];
 5. <name>              -> [github.<name>].
 
@@ -42,18 +43,29 @@ def _image_matches(pattern: str, image: str) -> bool:
 
 
 def context_for(machines: Machines, p: DTProject) -> AssetContext | None:
-    """The context machines.toml gives this project, or None (unknown)."""
+    """The context machines.toml gives this project, or None (unknown: also an entry that
+    exists but sets none of the keys)."""
+    ctx = _context_for(machines, p)
+    return ctx if ctx else None
+
+
+def host_of(p: DTProject) -> str:
+    return next((t.removeprefix("host-") for t in p.tags if t.startswith("host-")), "")
+
+
+def _context_for(machines: Machines, p: DTProject) -> AssetContext | None:
     if p.name in machines.projects:
         return machines.projects[p.name]
     kind, _, rest = p.name.partition(":")
-    host = next((t.removeprefix("host-") for t in p.tags if t.startswith("host-")), "")
+    host = host_of(p)
     if kind == "host" and rest in machines.hosts:
         return machines.hosts[rest].context
     if kind == "container" and host in machines.hosts:
         images = machines.hosts[host].images
         exact = [k for k in images if not any(c in k for c in "*?[")]
-        globs = [k for k in images if k not in exact]
-        for pattern in [*exact, *globs]:  # an exact name wins over a glob
+        # an exact name wins over a glob, a longer glob over a shorter one ("*" last)
+        globs = sorted((k for k in images if k not in exact), key=len, reverse=True)
+        for pattern in [*exact, *globs]:
             if _image_matches(pattern, rest):
                 return images[pattern]
         return None
@@ -96,7 +108,8 @@ def apply_context(
             seen.add(p.uuid)
             label = project_label(p.name, p.version)
             if context_for(machines, p) is None:
-                res.unknown.append(label)
+                host = host_of(p)
+                res.unknown.append(f"{label} (host {host})" if host else label)
             want = desired_tags(machines, p)
             if want == sorted(set(p.tags)):
                 continue
