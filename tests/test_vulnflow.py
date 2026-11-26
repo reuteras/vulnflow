@@ -3952,6 +3952,23 @@ def test_priority_sla_days_from_inventory(tmp_path):
     assert load_inventory(INV).rules.sla_days == {"p1": 7, "p2": 30, "p3": 90}
 
 
+def test_ranking_reads_machines_toml_before_the_tags(inv, tmp_path):
+    """An edit to machines.toml ranks at once, before `context --apply` updates the tags."""
+    from vulnflow.clients import DTProject
+    from vulnflow.ranking import rank_finding
+
+    mf = tmp_path / "m.toml"
+    mf.write_text('[hosts.web]\nteam = "sysadm"\nexposure = "internal"\n')
+    m = load_machines(mf, inv.teams)
+    stale = DTProject("h", "host:web", "13", True, ["team-sysadm", "exposure-internet"])
+    f = {"component": {"name": "acl"}, "vulnerability": {"vulnId": "C", "cvssV3BaseScore": 8.0}}
+    assert rank_finding(stale, f, inv.rules, set(), None)[0].reasons[-1] == "internet"  # tags
+    v = rank_finding(stale, f, inv.rules, set(), None, m)[0]
+    assert v.tier == 3 and v.reasons[-1] == "internal"  # machines.toml wins
+    other = DTProject("o", "somethingelse", "1", True, ["team-dev", "exposure-internet"])
+    assert rank_finding(other, f, inv.rules, set(), None, m)[0].reasons[-1] == "internet"  # fallback
+
+
 def test_set_tags_304_is_checked_by_reading_back():
     t = FakeTransport(
         {
