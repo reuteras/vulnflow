@@ -28,7 +28,7 @@ replaced when the one in `.env` no longer works. What they do:
    `DT_ADMIN_PASSWORD`, creates team `vulnflow` with `BOM_UPLOAD`,
    `PROJECT_CREATION_UPLOAD`, `VIEW_PORTFOLIO`, `VIEW_VULNERABILITY`, writes its API
    key to `DT_API_KEY`, and enables the OSV vulnerability source for `DT_OSV_ECOSYSTEMS`
-   (default `Debian,PyPI`; OSV is off by default in DT 5.2.2).
+   (default `Debian,PyPI,crates.io`; OSV is off by default in DT 5.2.2).
 2. **DefectDojo** (`dojo-up`): starts upstream's compose plus
    [`stacks/defectdojo/override.yml`](../stacks/defectdojo/override.yml), so the admin gets
    `DD_ADMIN_PASSWORD`, the Django/AES keys come from `.env` instead of upstream's
@@ -121,7 +121,7 @@ covers Debian security advisories and PyPI, but it is **off by default**, and De
 in its default ecosystem list (`Go, Maven, npm, NuGet, PyPI`).
 
 `dtrack-up`/`dt-bootstrap` therefore enables OSV and adds the ecosystems in
-`DT_OSV_ECOSYSTEMS` (default `Debian,PyPI`; ecosystems already set are kept, and an empty
+`DT_OSV_ECOSYSTEMS` (default `Debian,PyPI,crates.io`; ecosystems already set are kept, and an empty
 value leaves OSV alone). Its output shows `OSV source: ...`; if it prints a warning
 instead, enable OSV by hand in the DT UI under Administration. The first OSV mirror takes a
 while; findings show up after it finishes. Optional: an NVD API key (faster NVD mirroring)

@@ -78,7 +78,9 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
             team_name=team_name,
             existing_key=env("DT_API_KEY"),
             osv_ecosystems=tuple(
-                e.strip() for e in env("DT_OSV_ECOSYSTEMS", "Debian,PyPI").split(",") if e.strip()
+                e.strip()
+                for e in env("DT_OSV_ECOSYSTEMS", "Debian,PyPI,crates.io").split(",")
+                if e.strip()
             ),
             wait_timeout=wait,
         )
