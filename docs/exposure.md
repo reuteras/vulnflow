@@ -2,7 +2,9 @@
 
 [Back to the README](../README.md).
 
-**Status: proposal, not implemented.** Today vulnflow ranks a CVE by threat alone (KEV,
+**Status: step 1 of [What it takes](#what-it-takes-in-vulnflow) is in place** (the asset
+model and its tags, see [Step 1 in use](#step-1-in-use)); scoring with it (step 2) and the
+rest are not. Today vulnflow ranks a CVE by threat alone (KEV,
 CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)) and routes it
 by team. The same CVE gets the same tier on a public web service and on a locked-down admin
 workstation. This document describes how to add *asset context*, how exposed an asset is and
@@ -177,3 +179,35 @@ Every alert carries its reasons, as tiers do today, extended with the context, f
 
 Steps 1–3 fit the current design and can be built and tested offline. Steps 4–6 depend on
 the paging, CMDB, MDM and attack-surface tools in use.
+
+## Step 1 in use
+
+`exposure`, `input`, `criticality`, `eol` and `certified` go in `machines.toml` on what
+runs, never on a group: a group can run a public web service and an internal admin page,
+so a group-wide exposure would be wrong for one of them. `machines.toml` refuses the keys
+on a group.
+
+| Dependency-Track project | Context from |
+| --- | --- |
+| any, by name | `[projects."<name>"]`, e.g. a project uploaded from CI (wins over the rest) |
+| `host:<h>` | `[hosts.<h>]` |
+| `container:<image>` | `[hosts.<h>.images]` of the host in its `host-<h>` tag: the image name, its last part (`nginx`), or a glob (`ghcr.io/acme/admin-*`); an exact name wins over a glob |
+| `code:<name>` | `[code.<name>]` |
+| `<name>` from a GitHub release | `[github.<name>]` |
+
+```toml
+[hosts.web01]
+exposure = "internal"            # the host itself
+[hosts.web01.images]
+"nginx" = { exposure = "internet", input = "public", criticality = "high" }
+"ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
+```
+
+They become tags on the Dependency-Track project (`exposure-internet`, `input-public`,
+`crit-high`, `flag-eol`, `flag-certified`), which `dt2dojo` copies to DefectDojo. A project
+without context gets none and stays unknown. The agents can't set them: Dependency-Track
+applies tags only when it creates a project, and an upload-only key can't change them. So
+every `dt2dojo` round sets them with the maintenance key (`DT_MAINTENANCE_API_KEY`),
+replacing only the context tags and keeping the others; an edit to `machines.toml` takes
+effect at the next round. `python3 -m vulnflow context --unknown` shows what would change
+and which projects have no context yet; `--apply` writes it now.

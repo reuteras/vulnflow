@@ -74,6 +74,52 @@ _CPE_PART_RE = re.compile(r"^[a-z0-9][a-z0-9._~+-]*$")  # an OpenCVE/NVD vendor 
 # settings a [groups.*] entry gives its hosts and a [hosts.*] entry can override
 _MACHINE_KEYS = {"team", "kind", "scans", "language_paths", "containers_team"}
 
+# Asset context (docs/exposure.md): set on what runs (a host, an image on a host, code, a
+# GitHub repository, a named project), never on a group, because one group can run a
+# public service and an internal admin page. Unset stays unknown: no default is guessed.
+EXPOSURES = ("internet", "external-auth", "internal", "restricted", "hostile-device")
+INPUTS = ("public", "partner", "staff")
+CRITICALITIES = ("critical", "high", "normal", "low")
+CONTEXT_KEYS = {"exposure", "input", "criticality", "eol", "certified"}
+
+
+@dataclass(frozen=True)
+class AssetContext:
+    exposure: str = ""
+    input: str = ""
+    criticality: str = ""
+    eol: bool = False
+    certified: bool = False
+
+    def tags(self) -> list[str]:
+        """Dependency-Track project tags; unknown values get none."""
+        out = []
+        if self.exposure:
+            out.append(f"exposure-{self.exposure}")
+        if self.input:
+            out.append(f"input-{self.input}")
+        if self.criticality:
+            out.append(f"crit-{self.criticality}")
+        out += ["flag-eol"] * self.eol + ["flag-certified"] * self.certified
+        return out
+
+
+def _context(settings: dict[str, Any], where: str) -> AssetContext:
+    for key, allowed in (("exposure", EXPOSURES), ("input", INPUTS), ("criticality", CRITICALITIES)):
+        v = settings.get(key, "")
+        if v and v not in allowed:
+            raise SystemExit(f"{where}: {key} must be one of {allowed}, got {v!r}")
+    for key in ("eol", "certified"):
+        if not isinstance(settings.get(key, False), bool):
+            raise SystemExit(f"{where}: {key} must be true or false")
+    return AssetContext(
+        exposure=str(settings.get("exposure", "")),
+        input=str(settings.get("input", "")),
+        criticality=str(settings.get("criticality", "")),
+        eol=bool(settings.get("eol", False)),
+        certified=bool(settings.get("certified", False)),
+    )
+
 
 @dataclass
 class Machine:
@@ -87,6 +133,9 @@ class Machine:
     language_paths: list[str] = field(default_factory=list)  # relative to $HOME
     version: str = ""  # DT project version; empty = the agent probes the OS
     containers_team: str = "dev"  # owner of the container-image projects of the `containers` scan
+    context: AssetContext = AssetContext()  # of the host project (host:<name>)
+    # per image name (or glob) running on it: the container projects' context
+    images: dict[str, AssetContext] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +147,7 @@ class CodeTarget:
     path: str  # absolute, on that machine
     team: str = "dev"
     version: str = ""  # empty = `git describe` in the directory, else "unknown"
+    context: AssetContext = AssetContext()
 
 
 @dataclass
@@ -108,6 +158,7 @@ class GithubSource:
     repo: str  # owner/repo
     asset: str  # glob on the release asset names
     team: str
+    context: AssetContext = AssetContext()
 
 
 @dataclass
@@ -123,6 +174,9 @@ class Machines:
     # git, because a detailed list shows the software stack
     subscriptions: dict[str, tuple[list[str], dict[str, list[str]]]] = field(default_factory=dict)
     github: dict[str, GithubSource] = field(default_factory=dict)
+    # [projects."<DT project name>"]: context for projects that come from elsewhere (CI,
+    # upload-sbom); wins over the context derived from hosts, images, code and github
+    projects: dict[str, AssetContext] = field(default_factory=dict)
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
@@ -165,6 +219,11 @@ def _machine(
     containers_team = str(settings.get("containers_team", "dev"))
     if containers_team not in teams:
         raise SystemExit(f"{where}: containers_team {containers_team!r} is not one of {sorted(teams)}")
+    images: dict[str, AssetContext] = {}
+    for image, ctx in (settings.get("images") or {}).items():
+        if not isinstance(ctx, dict) or set(ctx) - CONTEXT_KEYS:
+            raise SystemExit(f"{where}: images.{image!r} takes only {sorted(CONTEXT_KEYS)}")
+        images[str(image)] = _context(ctx, f"{where}, image {image!r}")
     return Machine(
         name=name,
         team=team,
@@ -174,6 +233,8 @@ def _machine(
         language_paths=paths,
         version=str(settings.get("version", "")),
         containers_team=containers_team,
+        context=_context(settings, where),
+        images=images,
     )
 
 
@@ -185,7 +246,8 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     if not p.is_file():
         return Machines()
     data: dict[str, Any] = tomllib.loads(p.read_text(encoding="utf-8"))
-    unknown = sorted(set(data) - {"groups", "hosts", "code", "cpe_map", "subscriptions", "github"})
+    sections = {"groups", "hosts", "code", "cpe_map", "subscriptions", "github", "projects"}
+    unknown = sorted(set(data) - sections)
     if unknown:
         raise SystemExit(f"{path}: unknown sections {unknown}")
 
@@ -194,6 +256,13 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     group_settings: dict[str, dict[str, Any]] = {}
     for g, gs in (data.get("groups") or {}).items():
         _check_name("groups", g, path)
+        on_group = sorted(set(gs) & (CONTEXT_KEYS | {"images"}))
+        if on_group:
+            raise SystemExit(
+                f"[groups.{g}] in {path}: {on_group} can't be set on a group (one group can run "
+                "a public service and an internal admin page); set them on each host, image, "
+                "[code.*], [github.*] or [projects.*]"
+            )
         bad = sorted(set(gs) - _MACHINE_KEYS - {"hosts"})
         if bad:
             raise SystemExit(f"[groups.{g}] in {path}: unknown keys {bad}")
@@ -211,7 +280,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     for h in [*member_of, *(x for x in overrides if x not in member_of)]:
         _check_name("hosts", h, path)
         o = overrides.get(h) or {}
-        bad = sorted(set(o) - _MACHINE_KEYS - {"group", "version"})
+        bad = sorted(set(o) - _MACHINE_KEYS - CONTEXT_KEYS - {"group", "version", "images"})
         if bad:
             raise SystemExit(f"[hosts.{h}] in {path}: unknown keys {bad}")
         g = member_of.get(h) or str(o.get("group", ""))
@@ -239,7 +308,10 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         team = str(c.get("team", "dev"))
         if team not in teams:
             raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
-        code[name] = CodeTarget(name, host, cpath, team, str(c.get("version", "")))
+        bad = sorted(set(c) - {"host", "path", "team", "version"} - CONTEXT_KEYS)
+        if bad:
+            raise SystemExit(f"{where}: unknown keys {bad}")
+        code[name] = CodeTarget(name, host, cpath, team, str(c.get("version", "")), _context(c, where))
 
     cpe_map = {str(k): str(v) for k, v in (data.get("cpe_map") or {}).items()}
     for k, v in cpe_map.items():
@@ -263,7 +335,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     for name, g in (data.get("github") or {}).items():
         _check_name("github", name, path)
         where = f"[github.{name}] in {path}"
-        bad = sorted(set(g) - {"repo", "asset", "team"})
+        bad = sorted(set(g) - {"repo", "asset", "team"} - CONTEXT_KEYS)
         if bad:
             raise SystemExit(f"{where}: unknown keys {bad}")
         repo = str(g.get("repo", ""))
@@ -272,7 +344,15 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         team = str(g.get("team", "dev"))
         if team not in teams:
             raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
-        github[name] = GithubSource(name, repo, str(g.get("asset", "*.cdx.json")), team)
+        github[name] = GithubSource(
+            name, repo, str(g.get("asset", "*.cdx.json")), team, _context(g, where)
+        )
+    projects: dict[str, AssetContext] = {}
+    for name, pc in (data.get("projects") or {}).items():
+        where = f"[projects.{name!r}] in {path}"
+        if not isinstance(pc, dict) or set(pc) - CONTEXT_KEYS:
+            raise SystemExit(f"{where}: takes only {sorted(CONTEXT_KEYS)}")
+        projects[str(name)] = _context(pc, where)
     return Machines(
         hosts=hosts,
         groups=groups,
@@ -280,6 +360,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         cpe_map=cpe_map,
         subscriptions=subscriptions,
         github=github,
+        projects=projects,
     )
 
 

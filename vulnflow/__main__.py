@@ -688,6 +688,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
     )
+    cx = sub.add_parser(
+        "context",
+        help="exposure/criticality tags from machines.toml on the Dependency-Track projects "
+        "(dt2dojo does this every round); dry run unless --apply",
+    )
+    cx.add_argument("--apply", action="store_true", help="write the tags (DT_MAINTENANCE_API_KEY)")
+    cx.add_argument("--unknown", action="store_true", help="also list projects without context")
     kw = sub.add_parser(
         "kev-watch",
         help="post new CISA KEV entries to chat with the findings and teams they hit "
@@ -1070,7 +1077,8 @@ def main(argv: list[str] | None = None) -> int:
         if maint is None and not a.no_prune:
             print("  skip  prune (DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates it)")
         while True:
-            rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint)
+            machines = load_machines(a.machines, inv.teams)  # reread: edits apply next round
+            rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint, machines=machines)
             rep.print()
             kev_rc = 0 if a.no_kev_watch else _kev_watch(inv, dt, data_dir, a.dry_run)
             gh_rc = 0
@@ -1079,6 +1087,29 @@ def main(argv: list[str] | None = None) -> int:
             if not a.loop:
                 return 1 if rep.errors or kev_rc or gh_rc else 0
             time.sleep(a.loop)
+
+    if a.cmd == "context":
+        from .context import apply_context
+
+        maint = _maintenance_dt()
+        if maint is None:
+            print(
+                "  error context needs DT_MAINTENANCE_API_KEY (./poc.sh dt-bootstrap)", file=sys.stderr
+            )
+            return 2
+        cxr = apply_context(inv, load_machines(a.machines, inv.teams), maint, apply=a.apply)
+        for line in cxr.changed:
+            print(f"  {'set ' if a.apply else 'would'}  {line}")
+        if a.unknown:
+            for label in cxr.unknown:
+                print(f"  ?     {label}: no exposure/criticality in machines.toml")
+        print(
+            f"  {len(cxr.changed)} project(s) {'changed' if a.apply else 'to change'}, "
+            f"{len(cxr.unknown)} without context" + ("" if a.apply else " (dry run; --apply writes)")
+        )
+        for msg in cxr.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if cxr.errors else 0
 
     if a.cmd == "kev-watch":
         return _kev_watch(inv, _dtrack(), data_dir, a.dry_run)
