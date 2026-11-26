@@ -248,3 +248,17 @@ def rank_findings(
         key=lambda r: (r.tier, sev.index(r.severity) if r.severity in sev else 9, r.team, r.vuln_id)
     )
     return out
+
+
+@dataclass
+class Ranker:
+    """What ranking needs, bundled for dt2dojo: the rules, the KEV catalog (id -> entry),
+    the vector cache and machines.toml."""
+
+    rules: PriorityRules
+    kev: dict[str, dict[str, Any]] = field(default_factory=dict)
+    vectors: VectorCache | None = None
+    machines: Machines | None = None
+
+    def rank(self, p: DTProject, f: dict[str, Any]) -> Verdict:
+        return rank_finding(p, f, self.rules, set(self.kev), self.vectors, self.machines)[0]

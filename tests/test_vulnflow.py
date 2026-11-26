@@ -3792,6 +3792,166 @@ def test_ranking_packages_severity_fallback_and_criticality_only_on_threats(inv,
         load_machines(mf, inv.teams)
 
 
+def test_dojo_tiers_desired_patch():
+    from vulnflow.dojo_tiers import desired
+
+    sla = {"p1": 7, "p2": 30, "p3": 90}
+    kev = {"cveID": "CVE-1", "dateAdded": "2026-11-20", "knownRansomwareCampaignUse": "Known"}
+    new = {"id": 1, "date": "2026-11-26", "tags": ["team-dev", "host-h1"]}
+    assert desired(new, 1, kev, sla) == {
+        "tags": ["host-h1", "team-dev", "tier-p1"],
+        "known_exploited": True,
+        "ransomware_used": True,
+        "kev_date": "2026-11-20",
+        "planned_remediation_date": "2026-12-03",
+    }
+    # in line already: nothing to send
+    done = {**new, "tags": ["host-h1", "team-dev", "tier-p1"], "known_exploited": True}
+    done |= {"ransomware_used": True, "kev_date": "2026-11-20", "planned_remediation_date": "2026-12-03"}
+    assert desired(done, 1, kev, sla) == {}
+    # the tier rose from P2: tag replaced, our date (date + 30) moved to date + 7
+    was_p2 = {
+        "id": 2,
+        "date": "2026-11-01",
+        "tags": ["tier-p2"],
+        "planned_remediation_date": "2026-12-01",
+    }
+    assert desired(was_p2, 1, None, sla) == {
+        "tags": ["tier-p1"],
+        "planned_remediation_date": "2026-11-08",
+    }
+    # a date someone set by hand stays
+    by_hand = {**was_p2, "planned_remediation_date": "2027-01-15"}
+    assert "planned_remediation_date" not in desired(by_hand, 1, None, sla)
+    # P4 has no SLA: our date is cleared; a finding that left KEV loses the flags
+    p4 = {"id": 3, "date": "2026-11-01", "tags": ["tier-p3"], "planned_remediation_date": "2027-01-30"}
+    p4 |= {"known_exploited": True, "kev_date": "2026-10-01"}
+    assert desired(p4, 4, None, sla) == {
+        "tags": ["tier-p4"],
+        "known_exploited": False,
+        "kev_date": None,
+        "planned_remediation_date": None,
+    }
+
+
+def test_dojo_tiers_applied_after_reimport(inv):
+    from vulnflow.clients import DefectDojo, DTProject
+    from vulnflow.dojo_tiers import apply_tiers
+    from vulnflow.ranking import Ranker
+
+    def dt_finding(matrix: str, vid: str, cvss: float) -> dict[str, Any]:
+        v = {"vulnId": vid, "source": "NVD", "severity": "HIGH", "cvssV3BaseScore": cvss}
+        return {"component": {"name": "lib"}, "vulnerability": v, "matrix": matrix}
+
+    fpf = json.dumps(
+        {"findings": [dt_finding("p:c1:v1", "CVE-1", 9.8), dt_finding("p:c2:v2", "CVE-2", 5.0)]}
+    ).encode()
+    dd_rows = [
+        {"id": 11, "unique_id_from_tool": "p:c1:v1", "date": "2026-11-26", "tags": ["team-dev"]},
+        {"id": 12, "unique_id_from_tool": "p:c2:v2", "date": "2026-11-26", "tags": ["tier-p4"]},
+        {"id": 13, "unique_id_from_tool": "other", "date": "2026-11-26", "tags": []},
+    ]
+    patches: list[tuple[str, Any]] = []
+    pages = {
+        "findings/?test=7&limit=500": {
+            "results": dd_rows[:2],
+            "next": "http://dd/api/v2/findings/?test=7&limit=500&offset=2",
+        },
+        "offset=2": {"results": dd_rows[2:], "next": None},
+    }
+
+    def get(m, url, h, b):
+        key = "offset=2" if "offset=2" in url else "findings/?test=7&limit=500"
+        return Response(200, json.dumps(pages[key]).encode(), {})
+
+    def patch(m, url, h, b):
+        patches.append((url.rstrip("/").rsplit("/", 1)[1], json.loads(b)))
+        return Response(200, b"{}", {})
+
+    t = FakeTransport({"GET /api/v2/findings/": get, "PATCH /api/v2/findings/": patch})
+    dojo = DefectDojo("http://dd", "k", transport=t)
+    p = DTProject("p", "host:web", "13", True, ["team-sysadm", "exposure-internet"])
+    ranker = Ranker(inv.rules, {"CVE-1": {"cveID": "CVE-1", "dateAdded": "2026-11-20"}})
+    assert apply_tiers(dojo, 7, p, fpf, ranker) == (2, 2)  # both pages read, "other" skipped
+    assert patches == [
+        # CVE-1: in KEV -> P1, with the KEV fields and date + 7
+        (
+            "11",
+            {
+                "tags": ["team-dev", "tier-p1"],
+                "known_exploited": True,
+                "kev_date": "2026-11-20",
+                "planned_remediation_date": "2026-12-03",
+            },
+        ),
+        # CVE-2: CVSS 5 on an internet host -> P3 (was tagged P4): tag and date + 90
+        ("12", {"tags": ["tier-p3"], "planned_remediation_date": "2027-02-24"}),
+    ]
+
+
+def test_dt_to_dojo_sets_tiers_after_the_reimport(inv):
+    from vulnflow.clients import DefectDojo
+    from vulnflow.ranking import Ranker
+
+    finding = {
+        "component": {"name": "lib"},
+        "vulnerability": {"vulnId": "CVE-1", "severity": "HIGH", "cvssV3BaseScore": 8.0},
+        "matrix": "p1:c:v",
+    }
+
+    def by_tag(m, url, h, b):
+        if "/tag/team-sysadm" not in url:
+            return Response(200, b"[]", {"X-Total-Count": "0"})
+        row = {
+            "uuid": "p1",
+            "name": "host:web",
+            "version": "13",
+            "active": True,
+            "tags": [{"name": "team-sysadm"}],
+        }
+        return Response(200, json.dumps([row]).encode(), {"X-Total-Count": "1"})
+
+    patched: list[Any] = []
+
+    def patch(m, url, h, b):
+        patched.append(json.loads(b))
+        return Response(200, b"{}", {})
+
+    t = FakeTransport(
+        {
+            "GET /api/v1/project/tag/": by_tag,
+            "GET /export": {"version": "1.2", "findings": [finding]},
+            "POST /reimport-scan/": {"test_id": 7, "statistics": {"after": {"total": {"active": 1}}}},
+            "GET /api/v2/findings/": {
+                "results": [
+                    {"id": 5, "unique_id_from_tool": "p1:c:v", "date": "2026-11-26", "tags": []}
+                ],
+                "next": None,
+            },
+            "PATCH /api/v2/findings/5/": patch,
+        }
+    )
+    rep = dt_to_dojo(
+        inv,
+        DependencyTrack("http://dt", "k", transport=t),
+        DefectDojo("http://dd", "k", transport=t),
+        ranker=Ranker(inv.rules),
+    )
+    assert not rep.errors
+    assert rep.done[0] == "host:web@13 -> Sysadmin (active findings: 1, tiers: 1 of 1 updated)"
+    assert patched == [{"tags": ["tier-p3"], "planned_remediation_date": "2027-02-24"}]
+
+
+def test_priority_sla_days_from_inventory(tmp_path):
+    src = Path(INV).read_text()
+    f = tmp_path / "inv.toml"
+    old = "sla_days = { p1 = 7, p2 = 30, p3 = 90 }"
+    assert old in src
+    f.write_text(src.replace(old, "sla_days = { p1 = 3, p2 = 14 }", 1))
+    assert load_inventory(f).rules.sla_days == {"p1": 3, "p2": 14}
+    assert load_inventory(INV).rules.sla_days == {"p1": 7, "p2": 30, "p3": 90}
+
+
 def test_ranking_reads_machines_toml_before_the_tags(inv, tmp_path):
     """An edit to machines.toml ranks at once, before `context --apply` updates the tags."""
     from vulnflow.clients import DTProject

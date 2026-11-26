@@ -78,7 +78,7 @@ new critical/high/KEV findings, hosts that stopped uploading, and versions to de
 | --- | --- |
 | Which CVEs changed for the products my team follows? | OpenCVE, the team's project; `to_evaluate` = P1/P2 nobody has looked at yet |
 | Which of our hosts, images and apps have a vulnerable component? | Dependency-Track, projects tagged `team-<team>`: `host:…`, `container:…`, `code:…`, apps from CI |
-| What are we working on, who owns it, by when? | DefectDojo, the team's product type (Sysadmin, Network, Workplace, …); filter by the `host-*` / `kind-*` / `group-*` tags |
+| What are we working on, who owns it, by when? | DefectDojo, the team's product type (Sysadmin, Network, Workplace, …); filter by the `tier-p1`/`tier-p2` tags and sort by planned remediation date ([Step 3](exposure.md#step-3-in-use)), or by the `host-*` / `kind-*` / `group-*` tags |
 | Which hosts stopped uploading? | `python3 -m vulnflow machines`, or the email report |
 | Does a team have no SBOM at all yet? | `python3 -m vulnflow sync --dry-run` |
 | How serious is CVE-X right now? | `python3 -m vulnflow enrich CVE-X` ([Look up a CVE](#look-up-a-cve)) |

@@ -16,6 +16,7 @@ from pathlib import Path
 from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE, project_label
 from .config import (
     Inventory,
+    Machines,
     add_subscriptions,
     env,
     env_flag,
@@ -26,6 +27,7 @@ from .config import (
 from .intel import Enricher
 from .jobs import dt_to_dojo, sync_inventory
 from .priority import assess
+from .ranking import Ranker
 
 
 def _enricher(data_dir: Path) -> Enricher:
@@ -210,6 +212,20 @@ def _kev_ids(data_dir: Path) -> set[str]:
     except Exception as e:
         logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
         return set()
+
+
+def _ranker(inv: Inventory, dt: DependencyTrack, data_dir: Path, machines: Machines) -> Ranker:
+    """Everything ranking needs, for dt2dojo's tiers in DefectDojo (dojo_tiers.py)."""
+    from .intel import KevCache
+    from .ranking import VECTOR_FILE, VectorCache
+
+    kev: dict[str, dict] = {}
+    if env_flag("VULNFLOW_ENRICH_KEV"):
+        try:
+            kev = KevCache(data_dir).index()
+        except Exception as e:
+            logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
+    return Ranker(inv.rules, kev, VectorCache(dt, data_dir / VECTOR_FILE), machines)
 
 
 def _priorities(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
@@ -1150,7 +1166,18 @@ def main(argv: list[str] | None = None) -> int:
             print("  skip  prune (DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates it)")
         while True:
             machines = load_machines(a.machines, inv.teams)  # reread: edits apply next round
-            rep = dt_to_dojo(inv, dt, dd, dry_run=a.dry_run, maintenance=maint, machines=machines)
+            ranker = _ranker(inv, dt, data_dir, machines)
+            rep = dt_to_dojo(
+                inv,
+                dt,
+                dd,
+                dry_run=a.dry_run,
+                maintenance=maint,
+                machines=machines,
+                ranker=ranker,
+            )
+            if ranker.vectors is not None:
+                ranker.vectors.save()
             rep.print()
             kev_rc = 0 if a.no_kev_watch else _kev_watch(inv, dt, data_dir, a.dry_run)
             gh_rc = 0

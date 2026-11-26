@@ -8,6 +8,8 @@ from typing import Any
 
 from .clients import DefectDojo, DependencyTrack, DTProject, OpenCVE
 from .config import Inventory, Machines, Team
+from .dojo_tiers import apply_tiers
+from .ranking import Ranker
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +131,7 @@ def dt_to_dojo(
     dry_run: bool = False,
     maintenance: DependencyTrack | None = None,
     machines: Machines | None = None,
+    ranker: Ranker | None = None,
 ) -> Report:
     """Copy findings per DT project into DefectDojo, routed to the owning team's product type.
 
@@ -170,9 +173,18 @@ def dt_to_dojo(
                 rep.done.append(f"[dry-run] {label}")
                 continue
             try:
-                res = reimport_project(dojo, team, p, dtrack.export_fpf(p.uuid), engagement)
+                fpf = dtrack.export_fpf(p.uuid)
+                res = reimport_project(dojo, team, p, fpf, engagement)
                 stats = res.get("statistics", {}).get("after", {}).get("total", {})
-                rep.done.append(f"{label} (active findings: {stats.get('active', '?')})")
+                tiers = ""
+                test_id = res.get("test_id") or res.get("test")
+                if ranker is not None and test_id:
+                    try:
+                        updated, ranked = apply_tiers(dojo, int(test_id), p, fpf, ranker)
+                        tiers = f", tiers: {updated} of {ranked} updated" if updated else ""
+                    except Exception as e:  # the import itself worked
+                        rep.errors.append(f"{label}: tiers in DefectDojo: {e}")
+                rep.done.append(f"{label} (active findings: {stats.get('active', '?')}{tiers})")
             except Exception as e:
                 rep.errors.append(f"{label}: {e}")
     if inactive:
