@@ -68,6 +68,11 @@ When OpenCVE does report the addition (its event `metrics` with `added.kev`), th
 counts the CVE as KEV even if its own copy of the catalog, cached for 6 hours, doesn't have
 it yet, so the alert is P1.
 
+**New P1/P2 findings: chat and paging.** The same round tells the team channel about new
+P1/P2 findings, the SOC channel about new P1 findings, and pages (`VULNFLOW_PAGE_WEBHOOK`)
+for new P1 findings on a `critical` asset, once per finding and channel. See
+[Step 4 in use](exposure.md#step-4-in-use).
+
 **Email reports** (daily when something needs action, weekly always): new P1/P2 alerts,
 new critical/high/KEV findings, hosts that stopped uploading, and versions to deploy. See
 [Email reports](#email-reports).

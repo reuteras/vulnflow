@@ -73,7 +73,7 @@ def desired(
 
 
 def apply_tiers(
-    dojo: DefectDojo, test_id: int, p: DTProject, fpf: bytes, ranker: Ranker
+    dojo: DefectDojo, test_id: int, p: DTProject, fpf: bytes, ranker: Ranker, team: str = ""
 ) -> tuple[int, int]:
     """(findings updated, findings ranked) for one re-imported test."""
     findings = (json.loads(fpf) or {}).get("findings") or []
@@ -82,7 +82,7 @@ def apply_tiers(
         matrix = str(f.get("matrix") or (f.get("vulnerability") or {}).get("matrix") or "")
         if matrix:
             vid = str((f.get("vulnerability") or {}).get("vulnId", "")).upper()
-            by_matrix[matrix] = (ranker.rank(p, f).tier, vid)
+            by_matrix[matrix] = (ranker.rank(p, f, team).tier, vid)
     updated = 0
     for dd in dojo.test_findings(test_id):
         hit = by_matrix.get(str(dd.get("unique_id_from_tool") or ""))

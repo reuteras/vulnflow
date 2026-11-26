@@ -27,7 +27,7 @@ from .config import (
 from .intel import Enricher
 from .jobs import dt_to_dojo, sync_inventory
 from .priority import assess
-from .ranking import Ranker
+from .ranking import Ranked, Ranker
 
 
 def _enricher(data_dir: Path) -> Enricher:
@@ -171,6 +171,50 @@ def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_r
         print("  ok    kev-watch: nothing new in CISA KEV")
     for msg in res.errors:
         print(f"  error kev-watch: {msg}", file=sys.stderr)
+    return 1 if res.errors else 0
+
+
+def _finding_watch(inv: Inventory, ranked: list[Ranked], data_dir: Path, dry_run: bool) -> int:
+    """`finding-watch` (and every dt2dojo round): new P1/P2 findings to chat, P1 on critical
+    assets to paging, see findwatch.py."""
+    from .findwatch import STATE_FILE, page_sender, watch
+    from .receiver import chat_sender
+
+    team_hook, soc_hook = env("VULNFLOW_CHAT_WEBHOOK"), env("VULNFLOW_SOC_WEBHOOK")
+    page_hook = env("VULNFLOW_PAGE_WEBHOOK")
+    page_fmt = env("VULNFLOW_PAGE_FORMAT", "json") or "json"
+    if page_fmt not in ("json", "text"):
+        print(
+            f"  error finding-watch: VULNFLOW_PAGE_FORMAT must be json or text, not {page_fmt!r}",
+            file=sys.stderr,
+        )
+        return 1
+    res = watch(
+        inv,
+        ranked,
+        data_dir / STATE_FILE,
+        {
+            "team": chat_sender(team_hook) if team_hook else None,
+            "soc": chat_sender(soc_hook) if soc_hook else None,
+            "page": page_sender(page_hook, page_fmt) if page_hook else None,
+        },
+        soc_min_tier=int(env("VULNFLOW_SOC_MIN_TIER", "1") or 1),
+        opencve_url=env("OPENCVE_URL"),
+        dry_run=dry_run,
+    )
+    for channel, n in sorted(res.baseline.items()):
+        print(f"  ok    finding-watch {channel}: {n} finding(s) recorded, not posted")
+    for channel, notices in sorted(res.sent.items()):
+        tag = " [dry run]" if dry_run else ""
+        for x in notices:
+            r = x.finding
+            print(
+                f"  new   {channel}: [{r.tier_name}] {r.vuln_id} {r.team}/{r.where} {r.component}{tag}"
+            )
+    if not res.baseline and not res.sent:
+        print("  ok    finding-watch: no new P1/P2 findings")
+    for msg in res.errors:
+        print(f"  error finding-watch: {msg}", file=sys.stderr)
     return 1 if res.errors else 0
 
 
@@ -914,6 +958,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
     )
+    d.add_argument(
+        "--no-finding-watch",
+        action="store_true",
+        help="skip `finding-watch` in each round (new P1/P2 findings to chat, P1 on critical "
+        "assets to paging)",
+    )
     nl = sub.add_parser(
         "newsletter",
         help="per-team OSINT newsletter from [news.*] feeds and vulnflow's data: weekly, daily "
@@ -964,6 +1014,12 @@ def main(argv: list[str] | None = None) -> int:
         "(dt2dojo runs this every round; the first run only records the catalog)",
     )
     kw.add_argument("--dry-run", action="store_true", help="show what is new; post and record nothing")
+    fw = sub.add_parser(
+        "finding-watch",
+        help="post new P1/P2 Dependency-Track findings to chat and page P1 on critical assets "
+        "(dt2dojo does this every round; the first run only records what is open)",
+    )
+    fw.add_argument("--dry-run", action="store_true", help="show what is new; post and record nothing")
     d.add_argument(
         "--no-github-sboms",
         action="store_true",
@@ -1342,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             machines = load_machines(a.machines, inv.teams)  # reread: edits apply next round
             ranker = _ranker(inv, dt, data_dir, machines)
+            if not a.no_finding_watch:
+                ranker.record = []
             rep = dt_to_dojo(
                 inv,
                 dt,
@@ -1355,11 +1413,15 @@ def main(argv: list[str] | None = None) -> int:
                 ranker.vectors.save()
             rep.print()
             kev_rc = 0 if a.no_kev_watch else _kev_watch(inv, dt, data_dir, a.dry_run)
+            fw_rc = 0
+            if ranker.record is not None and not a.dry_run:
+                # dry runs import nothing, so nothing was ranked
+                fw_rc = _finding_watch(inv, ranker.record, data_dir, dry_run=False)
             gh_rc = 0
             if not a.no_github_sboms:
                 gh_rc = _github_sboms(a, inv, dt, dry_run=a.dry_run, force=False)
             if not a.loop:
-                return 1 if rep.errors or kev_rc or gh_rc else 0
+                return 1 if rep.errors or kev_rc or fw_rc or gh_rc else 0
             time.sleep(a.loop)
 
     if a.cmd == "newsletter":
@@ -1410,6 +1472,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "kev-watch":
         return _kev_watch(inv, _dtrack(), data_dir, a.dry_run)
+
+    if a.cmd == "finding-watch":
+        from .ranking import VECTOR_FILE, VectorCache, rank_findings
+
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        errors: list[str] = []
+        rows = rank_findings(
+            inv,
+            dt,
+            _kev_ids(data_dir),
+            VectorCache(dt, data_dir / VECTOR_FILE),
+            errors,
+            machines=load_machines(a.machines, inv.teams),
+        )
+        for msg in errors:
+            print(f"  error finding-watch: {msg}", file=sys.stderr)
+        return _finding_watch(inv, rows, data_dir, a.dry_run) or (1 if errors else 0)
 
     if a.cmd == "patches":
         from .patches import patched_findings

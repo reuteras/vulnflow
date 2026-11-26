@@ -172,15 +172,16 @@ Every alert carries its reasons, as tiers do today, extended with the context, f
    environmental metrics, then the matrix above. Thresholds stay in `[priority]`.
 3. **Tiers on Dependency-Track findings too**, not only on OpenCVE alerts. `dt2dojo` would
    set DefectDojo priority and SLA from the tier.
-4. **Routing.** P1 on `critical` to paging and incident handling.
+4. **Routing.** P1 on `critical` to paging and incident handling; new P1/P2 findings to
+   the team channel ([Step 4 in use](#step-4-in-use)).
 5. **Importers.** A CMDB or application register for owner, exposure and criticality
    (`machines.toml` becomes an override file on top; hand-maintaining a large estate does
    not scale), the MDM for OS versions per device, and an external attack-surface source
    for drift.
 6. **Report.** The sections listed above.
 
-Steps 1–3 fit the current design and can be built and tested offline. Steps 4–6 depend on
-the paging, CMDB, MDM and attack-surface tools in use.
+Steps 1–4 fit the current design and are built and tested offline. Steps 5–6 depend on
+the CMDB, MDM and attack-surface tools in use.
 
 ## Step 1 in use
 
@@ -300,3 +301,42 @@ DefectDojo's own SLA date and its "SLA violated" views still follow severity. Ma
 follow the tier would need code inside DefectDojo (its `FINDING_SLA_PERIOD_METHOD` hook),
 which vulnflow leaves out on purpose: nothing to maintain inside another tool. Sort and
 filter on the planned remediation date and the tier tag instead.
+
+## Step 4 in use
+
+The same round also tells people about new findings, once per finding and channel
+(`finding-watch`, `vulnflow/findwatch.py`):
+
+| Channel | Gets | Webhook |
+| --- | --- | --- |
+| team | new findings at or above `chat_min_tier` (P1/P2), one message per team, mentioning it | `VULNFLOW_CHAT_WEBHOOK` |
+| SOC | new findings at or above `VULNFLOW_SOC_MIN_TIER` (P1), every team | `VULNFLOW_SOC_WEBHOOK` |
+| paging | new P1 findings on a `critical` asset (`criticality = "critical"`, tag `crit-critical`) | `VULNFLOW_PAGE_WEBHOOK` |
+
+```text
+@sysadm 1 new finding(s) to act on for team sysadm
+- [P1 Act] CVE-2026-1: OpenSSL overflow
+  new finding: openssl 3.0.1 in host:web@13, critical asset, CVSS 9.8, EPSS 0.500: in CISA KEV; internet-facing
+```
+
+- The paging webhook gets `{"text": ...}` (Mattermost, Slack, or a paging tool's generic
+  webhook). For ntfy set `VULNFLOW_PAGE_FORMAT=text`: the message is the plain body, with
+  ntfy's `Title` and `Priority: urgent` headers. A pager that needs its own API fields
+  (Pushover's token and user) isn't supported directly; put ntfy or the tool's webhook
+  integration in front.
+- "Once" is kept in `data/findings-notified.json`, keyed by project name, component and
+  vulnerability. A new release of the same project doesn't notify again; a tier that
+  rises does (P2 to P1 pages). A finding not seen at P1/P2 for 30 days is dropped and is
+  new again if it comes back.
+- A channel is marked only once its message was delivered, so a webhook that is down is
+  retried next round without repeating the other channels.
+- The first run records what is open and posts nothing, and so does a channel without a
+  webhook: setting up paging later doesn't page every open P1 at once.
+- OpenCVE alerts aren't paged: an alert is about a product a team follows, not an asset.
+  It pages once Dependency-Track has the finding on a critical asset.
+- A new KEV entry can show twice: in `kev-watch`'s KEV message, and as new P1 findings
+  here. They answer different questions (what's new in KEV, what to act on now).
+
+`python3 -m vulnflow finding-watch --dry-run` ranks every open finding and shows what
+would be posted; `dt2dojo --no-finding-watch` turns it off. Each message lists at most 20
+findings and counts the rest; filter on the `tier-p1` tag in DefectDojo for all of them.
