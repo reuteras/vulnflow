@@ -85,7 +85,10 @@ The Airflow UI (8080) and the webhook receiver (8380) are not served; use `ssh -
 Airflow. `poc.sh` also writes the matching browser-facing URLs to `.env`
 (`DT_PUBLIC_API_URL`, `DD_SITE_URL`, `DD_CSRF_TRUSTED_ORIGINS`, `OPENCVE_URL`) and adds
 the tailnet origin to OpenCVE's `CSRF_TRUSTED_ORIGINS`; without those the DT UI can't reach
-its API and the DefectDojo/OpenCVE login forms fail Django's CSRF check. Empty
+its API and the DefectDojo/OpenCVE login forms fail Django's CSRF check. OpenCVE also gets
+its own cookie names (`opencve_sessionid`, `opencve_csrftoken`): cookies don't separate by
+port, and with Django's default `sessionid` for both, logging into OpenCVE logged you out
+of DefectDojo on the same host and the other way round. Empty
 `VULNFLOW_TS_HOST` and rerun `./poc.sh tailscale` to remove the serve entries and go back
 to localhost URLs.
 
