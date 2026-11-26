@@ -95,7 +95,7 @@ The same data without a browser, on the server (over ssh):
 | --- | --- |
 | `1`-`4` | tabs: Findings, Alerts (the receiver's log, newest first), Hosts (last SBOM upload), Updates (`check-updates`) |
 | `j`/`k`, arrows, PgUp/PgDn | move |
-| `/`, `t`, `s` | filter findings by text (CVE, component, project), team, minimum severity |
+| `/`, `t`, `s`, `p` | filter findings by text (CVE, component, project), team, minimum severity, tier (P1, P1-P2, P1-P3, all; threat and asset context, [Step 2](exposure.md#step-2-in-use)) |
 | Enter | the finding: project, component, purl, description, KEV, where on disk |
 | `/`, `t`, `p`, `e` (Alerts) | filter alerts by text (CVE, title, project, description), team, tier (P1, P1-P2, P1-P3, all), KEV only |
 | `n` (Alerts) | show all logged changes, not only those that notified ([Which changes notify](concepts.md#which-changes-notify)); each line says why: `new`, `kev`, `worse`, `fol` (followed) or `log` (logged only) |
@@ -176,6 +176,16 @@ Run [`scripts/ci-sbom-upload.sh`](../scripts/ci-sbom-upload.sh) in the release p
 workflow ([From Forgejo Actions](sboms.md#from-forgejo-actions)). Each release becomes its own project version
 in Dependency-Track and its own test in DefectDojo; `prune` retires a version two days after
 a newer one is uploaded and the old one no longer is.
+
+### What to fix first
+
+```bash
+python3 -m vulnflow priorities --tier 2              # P1 and P2 findings, every team, with reasons
+python3 -m vulnflow priorities --team sysadm --json  # one team, for scripts
+```
+
+The tier combines the threat (KEV, EPSS, CVSS) with the project's exposure and criticality
+from `machines.toml` ([Exposure and criticality](exposure.md#step-2-in-use)).
 
 ### A finding in a dependency
 

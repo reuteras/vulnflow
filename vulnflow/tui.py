@@ -39,6 +39,7 @@ from .config import Inventory, Machines
 from .machines import host_scans, project_name
 from .net import Http
 from .patches import open_findings
+from .ranking import VectorCache, rank_finding
 from .triage import ACCEPT_RESPONSES, IgnoreItem, apply_ignores
 from .where import paths_of
 
@@ -58,7 +59,7 @@ TABS = ("Findings", "Alerts", "Hosts", "Updates")
 ESC = 27
 ENTER_KEYS = (10, 13, curses.KEY_ENTER)
 HELP = (
-    "1-4 tabs  j/k move  / text  t team  s severity  space select  "
+    "1-4 tabs  j/k move  / text  t team  s severity  p tier  space select  "
     "Enter show (J/K next/prev)  m mark  r reload  q quit"
 )
 ALERT_HELP = (
@@ -101,6 +102,8 @@ class FindingRow:
     description: str = ""
     purl: str = ""
     kev: bool = False
+    tier: int = 0  # 1-4 from ranking.py (threat and asset context); 0 = not ranked
+    reasons: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -112,12 +115,17 @@ class FindingRow:
 
 
 def load_findings(
-    inv: Inventory, dt: DependencyTrack, kev: set[str], errors: list[str]
+    inv: Inventory,
+    dt: DependencyTrack,
+    kev: set[str],
+    errors: list[str],
+    vectors: VectorCache | None = None,
 ) -> list[FindingRow]:
     rows = []
     for team, p, f in open_findings(inv, dt, None, errors):
         c, v = f.get("component") or {}, f.get("vulnerability") or {}
         vid = str(v.get("vulnId", ""))
+        verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors)
         rows.append(
             FindingRow(
                 team=team,
@@ -134,8 +142,12 @@ def load_findings(
                 description=" ".join(str(v.get("description") or "").split()),
                 purl=str(c.get("purl", "")),
                 kev=vid in kev,
+                tier=verdict.tier,
+                reasons=verdict.reasons,
             )
         )
+    if vectors is not None:
+        vectors.save()
     return sort_rows(rows)
 
 
@@ -144,11 +156,13 @@ def _sev_rank(sev: str) -> int:
 
 
 def sort_rows(rows: Iterable[FindingRow]) -> list[FindingRow]:
-    return sorted(rows, key=lambda r: (not r.kev, _sev_rank(r.severity), r.team, r.vuln_id, r.where))
+    return sorted(
+        rows, key=lambda r: (r.tier or 9, not r.kev, _sev_rank(r.severity), r.team, r.vuln_id, r.where)
+    )
 
 
 def filter_rows(
-    rows: list[FindingRow], team: str = "", min_sev: str = "", text: str = ""
+    rows: list[FindingRow], team: str = "", min_sev: str = "", text: str = "", max_tier: int = 0
 ) -> list[FindingRow]:
     limit = _sev_rank(min_sev) if min_sev else len(SEVERITIES)
     needle = text.lower()
@@ -157,6 +171,7 @@ def filter_rows(
         for r in rows
         if (not team or r.team == team)
         and _sev_rank(r.severity) <= limit
+        and (not max_tier or 0 < r.tier <= max_tier)
         and (not needle or needle in f"{r.vuln_id} {r.component} {r.version} {r.where} {r.purl}".lower())
     ]
 
@@ -164,7 +179,8 @@ def filter_rows(
 def finding_line(r: FindingRow, width: int, selected: bool = False) -> str:
     mark = "*" if selected else " "
     kev = "KEV" if r.kev else "   "
-    head = f"{mark} {r.severity[:4]:<4} {kev} {r.vuln_id:<20} {r.team:<7}"
+    tier = f"P{r.tier}" if r.tier else "  "
+    head = f"{mark} {tier} {r.severity[:4]:<4} {kev} {r.vuln_id:<20} {r.team:<7}"
     return f"{head} {r.component} {r.version}  {r.where}"[:width]
 
 
@@ -396,6 +412,7 @@ class App:
     rows: list[FindingRow] = field(default_factory=list)
     team: str = ""
     min_sev: str = ""
+    max_tier: int = 0  # Findings: `p` steps through all, P1, P1-P2, P1-P3
     text: str = ""
     pos: int = 0
     top: int = 0
@@ -423,7 +440,7 @@ class App:
         )
 
     def visible(self) -> list[FindingRow]:
-        return filter_rows(self.rows, self.team, self.min_sev, self.text)
+        return filter_rows(self.rows, self.team, self.min_sev, self.text, self.max_tier)
 
     def teams(self) -> list[str]:
         return sorted({r.team for r in self.rows})
@@ -486,7 +503,11 @@ class App:
         elif self.tab == 0:
             rows = self.visible()
             self._follow(len(rows), body)
-            filt = f"team={self.team or 'all'} severity>={self.min_sev or 'any'} text={self.text or '-'}"
+            tier = f"<=P{self.max_tier}" if self.max_tier else "all"
+            filt = (
+                f"team={self.team or 'all'} tier={tier} severity>={self.min_sev or 'any'} "
+                f"text={self.text or '-'}"
+            )
             _put(scr, 1, f"{len(rows)} shown, {len(self.selected)} selected   {filt}", w)
             for i, r in enumerate(rows[self.top : self.top + body]):
                 attr = curses.A_REVERSE if self.top + i == self.pos else 0
@@ -598,6 +619,9 @@ class App:
         elif k == ord("s"):
             levels = ["", "CRITICAL", "HIGH", "MEDIUM", "LOW"]
             self.min_sev = levels[(levels.index(self.min_sev) + 1) % len(levels)]
+            self.pos = self.top = 0
+        elif k == ord("p"):
+            self.max_tier = TIER_LIMITS[(TIER_LIMITS.index(self.max_tier) + 1) % len(TIER_LIMITS)]
             self.pos = self.top = 0
         elif k == ord(" "):
             r = self.current()
@@ -770,6 +794,7 @@ def finding_details(r: FindingRow, dt: DependencyTrack | None) -> list[str]:
         f"purl:       {r.purl or '-'}",
         f"CVE:        {r.vuln_id} ({r.source or '?'}), severity {r.severity.lower()}"
         + (", in CISA KEV" if r.kev else ""),
+        *([f"Tier:       P{r.tier}", *(f"  - {x}" for x in r.reasons)] if r.tier else []),
         "",
         r.description or "(no description in Dependency-Track)",
         "",

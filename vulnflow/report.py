@@ -50,6 +50,7 @@ from .clients import DependencyTrack
 from .config import Inventory, Machines
 from .machines import host_scans, project_name
 from .patches import open_findings
+from .ranking import VectorCache, rank_finding
 from .receiver import NOTIFY_LABELS
 from .upstreams import Status
 
@@ -122,6 +123,8 @@ class OpenFinding:
     version: str
     vuln_id: str
     severity: str
+    tier: int = 0  # 1-4 from ranking.py; 0 = not ranked
+    reasons: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -137,11 +140,13 @@ class OpenFinding:
     def row(self, kev: bool) -> list[str]:
         where = f"{self.project}@{self.project_version}" if self.project_version else self.project
         return [
+            f"**P{self.tier}**" if self.tier else "",
             self.severity.lower(),
             code(self.vuln_id),
             "**KEV**" if kev else "",
             f"{code(self.component)} {self.version}".strip(),
             code(where),
+            "; ".join(self.reasons),
         ]
 
 
@@ -275,10 +280,21 @@ def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple
 # ---- findings --------------------------------------------------------------------------
 
 
-def collect_findings(inv: Inventory, dt: DependencyTrack, errors: list[str]) -> dict[str, OpenFinding]:
+def collect_findings(
+    inv: Inventory,
+    dt: DependencyTrack,
+    errors: list[str],
+    kev: set[str] | None = None,
+    vectors: VectorCache | None = None,
+) -> dict[str, OpenFinding]:
+    """Open findings by key; ranked P1-P4 (ranking.py) when `kev` is given."""
     out: dict[str, OpenFinding] = {}
     for team, p, f in open_findings(inv, dt, None, errors):
         comp, vuln = f.get("component") or {}, f.get("vulnerability") or {}
+        tier, reasons = 0, []
+        if kev is not None:
+            verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors)
+            tier, reasons = verdict.tier, verdict.reasons
         of = OpenFinding(
             team=team,
             project=p.name,
@@ -287,8 +303,13 @@ def collect_findings(inv: Inventory, dt: DependencyTrack, errors: list[str]) -> 
             version=str(comp.get("version", "")),
             vuln_id=str(vuln.get("vulnId", "")),
             severity=str(vuln.get("severity") or "UNASSIGNED").upper(),
+            tier=tier,
+            reasons=reasons,
         )
-        out.setdefault(of.key, of)
+        if of.key not in out or 0 < of.tier < (out[of.key].tier or 9):
+            out[of.key] = of  # the same finding on two versions: keep the higher tier
+    if vectors is not None:
+        vectors.save()
     return out
 
 
@@ -314,20 +335,23 @@ def findings_section(
         return s
     new = [current[k] for k in current.keys() - previous.keys()]
     gone = previous.keys() - current.keys()
-    important = [f for f in new if f.severity in IMPORTANT or f.vuln_id in kev]
-    important.sort(key=lambda f: (f.vuln_id not in kev, _sev_rank(f.severity), f.team, f.vuln_id))
+    # new P1/P2 (threat and asset context, ranking.py), and as before critical/high/KEV
+    important = [f for f in new if f.severity in IMPORTANT or f.vuln_id in kev or 0 < f.tier <= 2]
+    important.sort(
+        key=lambda f: (f.tier or 9, f.vuln_id not in kev, _sev_rank(f.severity), f.team, f.vuln_id)
+    )
     s.notable = bool(important)
     s.blocks.append(
         Para(
             f"**{len(new)}** new, **{len(gone)}** resolved or suppressed since the last "
             f"{'weekly' if weekly else 'daily'} report; **{len(important)}** new "
-            "critical/high/KEV."
+            "P1/P2, critical, high or KEV."
         )
     )
     if important:
         _table(
             s,
-            ["Severity", "CVE", "KEV", "Component", "Project"],
+            ["Tier", "Severity", "CVE", "KEV", "Component", "Project", "Why"],
             [f.row(f.vuln_id in kev) for f in important],
         )
     if weekly:
