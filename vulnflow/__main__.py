@@ -695,6 +695,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     cx.add_argument("--apply", action="store_true", help="write the tags (DT_MAINTENANCE_API_KEY)")
     cx.add_argument("--unknown", action="store_true", help="also list projects without context")
+    cx.add_argument(
+        "--toml",
+        action="store_true",
+        help="print machines.toml entries for the projects without context (names filled in, "
+        "values empty) and nothing else",
+    )
     kw = sub.add_parser(
         "kev-watch",
         help="post new CISA KEV entries to chat with the findings and teams they hit "
@@ -1089,7 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(a.loop)
 
     if a.cmd == "context":
-        from .context import apply_context
+        from .context import apply_context, unknown_toml
 
         maint = _maintenance_dt()
         if maint is None:
@@ -1097,7 +1103,18 @@ def main(argv: list[str] | None = None) -> int:
                 "  error context needs DT_MAINTENANCE_API_KEY (./poc.sh dt-bootstrap)", file=sys.stderr
             )
             return 2
-        cxr = apply_context(inv, load_machines(a.machines, inv.teams), maint, apply=a.apply)
+        machines = load_machines(a.machines, inv.teams)
+        cxr = apply_context(inv, machines, maint, apply=a.apply and not a.toml)
+        if a.toml:
+            import tomllib
+
+            mp = Path(a.machines)
+            raw = tomllib.loads(mp.read_text(encoding="utf-8")) if mp.is_file() else {}
+            sys.stdout.write(unknown_toml(machines, raw, cxr.unknown_projects))
+            print(f"  {len(cxr.unknown_projects)} project(s) without context", file=sys.stderr)
+            for msg in cxr.errors:
+                print(f"  error {msg}", file=sys.stderr)
+            return 1 if cxr.errors else 0
         for line in cxr.changed:
             print(f"  {'set ' if a.apply else 'would'}  {line}")
         if a.unknown:

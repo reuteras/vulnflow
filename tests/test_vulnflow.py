@@ -3555,6 +3555,53 @@ def test_context_tags_on_dependency_track_projects(inv, tmp_path):
     ]
 
 
+def test_context_toml_for_the_unknown_projects(inv, tmp_path):
+    import tomllib
+
+    from vulnflow.clients import DTProject
+    from vulnflow.context import unknown_toml
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(CONTEXT_TOML)
+    m = load_machines(mf, inv.teams)
+    raw = tomllib.loads(CONTEXT_TOML)
+
+    def proj(name: str, *tags: str, version: str = "1") -> DTProject:
+        return DTProject(f"u-{name}-{version}", name, version, True, list(tags))
+
+    unknown = [
+        proj("host:web03", "team-sysadm"),  # only in the group: no [hosts.web03] table yet
+        proj("container:docker.io/library/postgres", "host-web02", version="18.7"),
+        proj("container:docker.io/library/postgres", "host-web02", version="17"),  # once
+        proj("container:redis", "host-web01"),  # [hosts.web01.images] exists
+        proj("container:valkey/valkey", "host-elsewhere"),
+        proj("mycalcli2", "ci-forgejo"),
+    ]
+    text = unknown_toml(m, raw, unknown)
+    assert '\n[hosts.web03]\nexposure = ""\ninput = ""\ncriticality = ""\n' in text
+    assert (
+        "\n[hosts.web02.images]\n"
+        '"docker.io/library/postgres" = { exposure = "", input = "", criticality = "" }\n'
+    ) in text
+    assert text.count("docker.io/library/postgres") == 1
+    assert '# add to your existing [hosts.web01.images]:\n"redis" = {' in text
+    assert (
+        '# on host elsewhere, which isn\'t in machines.toml\n[projects."container:valkey/valkey"]\n'
+    ) in text
+    assert '# from CI or upload-sbom\n[projects."mycalcli2"]\n' in text
+
+    # where nothing exists yet, the output loads as it is: everything stays unknown
+    fresh = '[groups.web]\nteam = "sysadm"\nhosts = ["web01"]\n'
+    mf.write_text(fresh)
+    m2 = load_machines(mf, inv.teams)
+    out = unknown_toml(
+        m2, tomllib.loads(fresh), [proj("host:web01"), proj("container:nginx", "host-web01")]
+    )
+    mf.write_text(fresh + out)
+    m3 = load_machines(mf, inv.teams)
+    assert not m3.hosts["web01"].context and not m3.hosts["web01"].images["nginx"]
+
+
 def test_set_tags_304_is_checked_by_reading_back():
     t = FakeTransport(
         {

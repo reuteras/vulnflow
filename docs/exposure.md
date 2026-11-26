@@ -216,3 +216,10 @@ every `dt2dojo` round sets them with the maintenance key (`DT_MAINTENANCE_API_KE
 replacing only the context tags and keeping the others; an edit to `machines.toml` takes
 effect at the next round. `python3 -m vulnflow context --unknown` shows what would change
 and which projects have no context yet; `--apply` writes it now.
+
+`python3 -m vulnflow context --toml > unknown.toml` writes the `machines.toml` entries for
+the projects without context: host and image names come from Dependency-Track, the values
+are empty (empty is unknown, so the lines load as they are). Fill in what you know and move
+the lines into `machines.toml`. A table that already exists there (`[hosts.web01]`,
+`[hosts.web01.images]`) comes as a comment saying where its lines go, because TOML doesn't
+allow the same table twice. Images that run in several versions get one line.
