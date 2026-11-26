@@ -5,8 +5,9 @@ Each open finding gets a tier from priority.assess with
 - the threat: KEV (the cached CISA catalog), EPSS and CVSS v3 score as Dependency-Track
   reports them on the finding (DT keeps its own EPSS copy; no CIRCL lookups here: one
   request per CVE for thousands of findings);
-- the asset context from the project's tags (exposure-*, input-*, crit-*; set from
-  machines.toml by `context`), and `kind-laptop` for the laptop rule;
+- the asset context from machines.toml (as `context` reads it), or from the project's tags
+  (exposure-*, input-*, crit-*) when machines.toml isn't given or has nothing for the
+  project, and `kind-laptop` for the laptop rule;
 - the CVSS v3 vector, which findings leave out: read per vulnerability from Dependency-Track
   once and cached in the data directory (cvss-vectors.json, refreshed after 30 days).
 
@@ -171,6 +172,12 @@ def rank_finding(
         cve=vid, kev=vid.upper() in kev, epss=epss, epss_percentile=_num(v.get("epssPercentile"))
     )
     ctx, laptop = context_from_tags(p.tags)
+    if machines is not None:
+        # machines.toml as it is now, not the tags the last `context` run set: an edit
+        # shows at once and agrees with the package entries; tags only as a fallback
+        from .context import context_for
+
+        ctx = context_for(machines, p) or ctx
     component = str((f.get("component") or {}).get("name", ""))
     ctx, pattern = package_context(machines, p, component, ctx)
     vector = vectors.get(str(v.get("source", "")), vid) if vectors is not None and ctx else ""
