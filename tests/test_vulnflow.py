@@ -92,7 +92,19 @@ def make_enricher(tmp_path, **kw) -> tuple[Enricher, FakeTransport]:
 
 # ----------------------------------------------------------------------- inventory
 def test_inventory_loads_teams_and_rules(inv):
-    assert set(inv.teams) == {"sysadm", "users", "dev", "network", "virt", "platform"}
+    assert set(inv.teams) == {
+        "sysadm",
+        "users",
+        "dev",
+        "network",
+        "virt",
+        "platform",
+        "workplace",
+        "msinfra",
+        "itmgmt",
+        "apps",
+    }
+    assert inv.teams["itmgmt"].products["simple-help"] == ["simplehelp"]
     assert inv.teams["network"].products["citrix"] == [
         "netscaler_application_delivery_controller",
         "netscaler_gateway",

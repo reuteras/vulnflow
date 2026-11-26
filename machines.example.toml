@@ -8,7 +8,7 @@
 # lives somewhere else. After a change: python3 -m vulnflow agent-bundle --all
 #
 # Teams are the [teams.*] keys of inventory/inventory.toml (sysadm, users, dev, network,
-# virt, platform).
+# virt, platform, workplace, msinfra, itmgmt, apps).
 
 # ---- Groups: shared settings plus the hosts in them -------------------------------
 # A host belongs to at most one group. Settings:
