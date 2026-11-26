@@ -47,7 +47,13 @@ CRITICALITY_HELP = {
 
 def _enum(values: tuple[str, ...], helps: dict[str, str], what: str) -> dict[str, Any]:
     lines = "\n".join(f"- `{v}`: {helps[v]}" for v in values)
-    return {"type": "string", "enum": [*values, ""], "description": f"{what}. Empty = unknown.\n\n{lines}"}
+    desc = f"{what}. Empty = unknown.\n\n{lines}"
+    return {"type": "string", "enum": [*values, ""], "description": desc}
+
+
+def _s(description: str, **extra: Any) -> dict[str, Any]:
+    """A string property with a description (and e.g. a pattern)."""
+    return {"type": "string", **extra, "description": description}
 
 
 def machines_schema(inv: Inventory) -> dict[str, Any]:
@@ -67,7 +73,8 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
         "scans": {
             "type": "array",
             "items": {"type": "string", "enum": list(SCANS)},
-            "description": "What the agent scans (default: system on linux; brew, languages, apps on macos).",
+            "description": "What the agent scans (default: system on linux; brew, languages, "
+            "apps on macos).",
         },
         "language_paths": {
             "type": "array",
@@ -77,6 +84,8 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
         "containers_team": {**team, "description": "Owner of the container projects (default dev)."},
     }
     name = {"type": "object", "propertyNames": {"pattern": _NAME_RE.pattern}}
+    name_str = {"type": "string", "pattern": _NAME_RE.pattern}
+    cpe_str = {"type": "string", "pattern": _CPE_PART_RE.pattern}
     return {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "vulnflow machines.toml",
@@ -94,7 +103,7 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                     "additionalProperties": False,
                     "properties": {
                         **machine,
-                        "hosts": {"type": "array", "items": {"type": "string", "pattern": _NAME_RE.pattern}},
+                        "hosts": {"type": "array", "items": name_str},
                     },
                 },
             },
@@ -107,12 +116,13 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                     "properties": {
                         **machine,
                         **context,
-                        "group": {"type": "string", "description": "Join a group without being in its hosts list."},
+                        "group": _s("Join a group without being in its hosts list."),
                         "version": {"type": "string", "description": "Fixed DT project version."},
                         "images": {
                             "type": "object",
-                            "description": "Asset context of the container projects on this host, by image "
-                            "name, its last part, or a glob; `\"*\"` catches the rest.",
+                            "description": "Asset context of the container projects on this "
+                            'host, by image name, its last part, or a glob; `"*"` catches the '
+                            "rest.",
                             "additionalProperties": context_entry,
                         },
                     },
@@ -142,8 +152,8 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                     "additionalProperties": False,
                     "required": ["repo"],
                     "properties": {
-                        "repo": {"type": "string", "pattern": _REPO_RE.pattern, "description": "owner/repo"},
-                        "asset": {"type": "string", "description": "Glob on the release assets (default *.cdx.json)."},
+                        "repo": _s("owner/repo", pattern=_REPO_RE.pattern),
+                        "asset": _s("Glob on the release assets (default *.cdx.json)."),
                         "team": team,
                         **context,
                     },
@@ -151,7 +161,8 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
             },
             "projects": {
                 "type": "object",
-                "description": "Asset context for any other Dependency-Track project, by name (e.g. from CI).",
+                "description": "Asset context for any other Dependency-Track project, by name "
+                "(e.g. from CI).",
                 "additionalProperties": context_entry,
             },
             "subscriptions": {
@@ -162,7 +173,7 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "vendors": {"type": "array", "items": {"type": "string", "pattern": _CPE_PART_RE.pattern}},
+                        "vendors": {"type": "array", "items": cpe_str},
                         "products": {
                             "type": "object",
                             "propertyNames": {"pattern": _CPE_PART_RE.pattern},
