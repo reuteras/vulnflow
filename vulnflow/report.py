@@ -286,6 +286,7 @@ def collect_findings(
     errors: list[str],
     kev: set[str] | None = None,
     vectors: VectorCache | None = None,
+    machines: Machines | None = None,
 ) -> dict[str, OpenFinding]:
     """Open findings by key; ranked P1-P4 (ranking.py) when `kev` is given."""
     out: dict[str, OpenFinding] = {}
@@ -293,7 +294,7 @@ def collect_findings(
         comp, vuln = f.get("component") or {}, f.get("vulnerability") or {}
         tier, reasons = 0, []
         if kev is not None:
-            verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors)
+            verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors, machines)
             tier, reasons = verdict.tier, verdict.reasons
         of = OpenFinding(
             team=team,

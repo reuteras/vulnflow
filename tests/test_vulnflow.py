@@ -3736,6 +3736,62 @@ def test_rank_findings_with_context_tags_and_cached_vectors(inv, tmp_path):
     assert [r.tier for r in ranked] == sorted(r.tier for r in ranked)
 
 
+def test_ranking_packages_severity_fallback_and_criticality_only_on_threats(inv, tmp_path):
+    from vulnflow.clients import DTProject
+    from vulnflow.config import AssetContext as C
+    from vulnflow.priority import assess
+    from vulnflow.ranking import rank_finding
+
+    rules = PriorityRules()
+    # criticality lifts a real threat, not a finding with nothing behind it
+    other = Signals("CVE-4")
+    assert assess(5.0, other, rules, C("internet", criticality="critical")).tier == 3
+    assert assess(None, other, rules, C("internet", criticality="high")).tier == 3
+    assert assess(8.0, Signals("CVE-3"), rules, C("internet", criticality="high")).tier == 1
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(
+        '[hosts.web]\nteam = "sysadm"\nexposure = "internal"\ncriticality = "high"\n'
+        '[hosts.web.packages]\n"nginx" = { exposure = "internet", input = "public" }\n'
+        '"golang.org/x/*" = { exposure = "restricted" }\n"acl" = {}\n'
+    )
+    m = load_machines(mf, inv.teams)
+    host = DTProject(
+        "h", "host:web", "debian-13", True, ["team-sysadm", "exposure-internal", "crit-high"]
+    )
+
+    def finding(component: str, severity: str, cvss: float | None = None) -> dict[str, Any]:
+        v: dict[str, Any] = {"vulnId": "GO-2026-1", "source": "OSV", "severity": severity}
+        if cvss is not None:
+            v["cvssV3BaseScore"] = cvss
+        return {"component": {"name": component}, "vulnerability": v}
+
+    # no CVSS score: Dependency-Track's severity stands in, and says so
+    nginx, cvss, _ = rank_finding(host, finding("nginx", "HIGH"), rules, set(), None, m)
+    assert cvss is None and nginx.tier == 1  # HIGH as 7.5, internet (package), high asset
+    assert nginx.reasons == [
+        "severity HIGH (no CVSS score)",
+        "no EPSS yet",
+        "internet",
+        "high asset",
+        "package 'nginx' in machines.toml",
+    ]
+    # the rest of the host: its own context; an empty package entry changes nothing
+    acl, _, _ = rank_finding(host, finding("acl", "HIGH"), rules, set(), None, m)
+    assert acl.tier == 2 and "package" not in " ".join(acl.reasons)  # internal, high asset
+    xnet, _, _ = rank_finding(host, finding("golang.org/x/net", "HIGH"), rules, set(), None, m)
+    assert xnet.tier == 3 and "package 'golang.org/x/*' in machines.toml" in xnet.reasons
+    # MEDIUM and below don't stand in for a score; without machines.toml no packages apply
+    med, _, _ = rank_finding(host, finding("nginx", "MEDIUM"), rules, set(), None, m)
+    assert med.tier == 3 and med.reasons[0].startswith("no CVSS")  # internet "other": P3
+    assert "high asset" not in med.reasons  # nothing behind it: criticality doesn't lift it
+    assert rank_finding(host, finding("nginx", "HIGH"), rules, set(), None)[0].tier == 2
+    # packages are per host and refused on a group
+    mf.write_text('[groups.g]\nteam = "dev"\nhosts = ["a"]\n[groups.g.packages]\nx = {}\n')
+    with pytest.raises(SystemExit, match="can't be set on a group"):
+        load_machines(mf, inv.teams)
+
+
 def test_set_tags_304_is_checked_by_reading_back():
     t = FakeTransport(
         {

@@ -125,6 +125,13 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                             "rest.",
                             "additionalProperties": context_entry,
                         },
+                        "packages": {
+                            "type": "object",
+                            "description": "Asset context of packages in the host project (OS "
+                            "packages, modules in its binaries), by name or glob; overrides the "
+                            "host's context field by field when ranking their findings.",
+                            "additionalProperties": context_entry,
+                        },
                     },
                 },
             },
