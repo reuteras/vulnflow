@@ -78,6 +78,7 @@ connects in.
 | `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h); `kev-watch` in each `dt2dojo` round (cached 1 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
 | `api.github.com`, `github.com` (release downloads) | `github-sboms` in each `dt2dojo` round, only with `[github.*]` in `machines.toml` | the repository names; `VULNFLOW_GITHUB_TOKEN` to the API if set | remove the `[github.*]` entries, or `dt2dojo --no-github-sboms` |
+| the feeds in `[news.feeds.*]` (`machines.toml`) | `newsletter` (daily, weekly, `alert`) | nothing about you: each feed is downloaded whole and filtered on the server, never searched per keyword or CVE | remove or `enabled = false` the feed, or point `url` at an internal mirror |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
 | your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`, `VULNFLOW_SOC_WEBHOOK`) | the alert text: CVE, tier, team, links | leave them empty, or use the local Mattermost |

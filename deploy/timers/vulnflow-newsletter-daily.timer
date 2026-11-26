@@ -1,0 +1,13 @@
+# Daily newsletter: only what is urgent for a team (its own systems, exploited, or a public
+# exploit), mailed only when there is something. `./poc.sh schedule install`.
+[Unit]
+Description=vulnflow daily newsletter
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=vulnflow-newsletter@daily.service
+
+[Install]
+WantedBy=timers.target

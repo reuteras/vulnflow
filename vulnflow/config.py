@@ -171,6 +171,29 @@ class GithubSource:
     context: AssetContext = AssetContext()
 
 
+NEWS_KINDS = ("advisory", "cert", "exploit", "news")
+
+
+@dataclass
+class NewsFeed:
+    """[news.feeds.<name>]: an RSS, Atom or JSON Feed URL, downloaded whole and filtered
+    here (never a search query per keyword, which would show what each team runs)."""
+
+    name: str
+    url: str
+    kind: str = "advisory"  # advisory | cert | exploit | news
+    teams: list[str] = field(default_factory=list)  # empty: matched against every team
+    enabled: bool = True
+
+
+@dataclass
+class NewsTeam:
+    """[news.teams.<team>]: where the team's newsletter goes and extra keywords."""
+
+    to: str = ""
+    keywords: list[str] = field(default_factory=list)
+
+
 @dataclass
 class Machines:
     """machines.toml: the operator's own hosts. Not in git (like .env)."""
@@ -187,6 +210,8 @@ class Machines:
     # [projects."<DT project name>"]: context for projects that come from elsewhere (CI,
     # upload-sbom); wins over the context derived from hosts, images, code and github
     projects: dict[str, AssetContext] = field(default_factory=dict)
+    news_feeds: dict[str, NewsFeed] = field(default_factory=dict)
+    news_teams: dict[str, NewsTeam] = field(default_factory=dict)
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
@@ -262,7 +287,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     if not p.is_file():
         return Machines()
     data: dict[str, Any] = tomllib.loads(p.read_text(encoding="utf-8"))
-    sections = {"groups", "hosts", "code", "cpe_map", "subscriptions", "github", "projects"}
+    sections = {"groups", "hosts", "code", "cpe_map", "subscriptions", "github", "projects", "news"}
     unknown = sorted(set(data) - sections)
     if unknown:
         raise SystemExit(f"{path}: unknown sections {unknown}")
@@ -369,6 +394,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         if not isinstance(pc, dict) or set(pc) - CONTEXT_KEYS:
             raise SystemExit(f"{where}: takes only {sorted(CONTEXT_KEYS)}")
         projects[str(name)] = _context(pc, where)
+    news_feeds, news_teams = _news(data.get("news") or {}, teams, path)
     return Machines(
         hosts=hosts,
         groups=groups,
@@ -377,7 +403,48 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         subscriptions=subscriptions,
         github=github,
         projects=projects,
+        news_feeds=news_feeds,
+        news_teams=news_teams,
     )
+
+
+def _news(
+    data: dict[str, Any], teams: dict[str, Team], path: str | Path
+) -> tuple[dict[str, NewsFeed], dict[str, NewsTeam]]:
+    bad = sorted(set(data) - {"feeds", "teams"})
+    if bad:
+        raise SystemExit(f"[news] in {path}: unknown keys {bad}")
+    feeds: dict[str, NewsFeed] = {}
+    for name, f in (data.get("feeds") or {}).items():
+        _check_name("news.feeds", name, path)
+        where = f"[news.feeds.{name}] in {path}"
+        bad = sorted(set(f) - {"url", "kind", "teams", "enabled"})
+        if bad:
+            raise SystemExit(f"{where}: unknown keys {bad}")
+        url = str(f.get("url", ""))
+        if not url.startswith(("https://", "http://")):
+            raise SystemExit(f"{where}: url must be http(s), got {url!r}")
+        kind = str(f.get("kind", "advisory"))
+        if kind not in NEWS_KINDS:
+            raise SystemExit(f"{where}: kind must be one of {NEWS_KINDS}, got {kind!r}")
+        fteams = [str(t) for t in f.get("teams") or []]
+        unknown = [t for t in fteams if t not in teams]
+        if unknown:
+            raise SystemExit(f"{where}: teams {unknown} are not in {sorted(teams)}")
+        feeds[name] = NewsFeed(name, url, kind, fteams, bool(f.get("enabled", True)))
+    nteams: dict[str, NewsTeam] = {}
+    for team, t in (data.get("teams") or {}).items():
+        where = f"[news.teams.{team}] in {path}"
+        if team not in teams:
+            raise SystemExit(f"{where}: team {team!r} is not one of {sorted(teams)}")
+        bad = sorted(set(t) - {"to", "keywords"})
+        if bad:
+            raise SystemExit(f"{where}: unknown keys {bad}")
+        to = str(t.get("to", ""))
+        if to and ("@" not in to or any(c in to for c in "\r\n<>")):
+            raise SystemExit(f"{where}: to must be an e-mail address, got {to!r}")
+        nteams[team] = NewsTeam(to, [str(k) for k in t.get("keywords") or []])
+    return feeds, nteams
 
 
 def add_subscriptions(inv: Inventory, machines: Machines) -> None:

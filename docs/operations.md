@@ -373,6 +373,40 @@ without recording it, and without `VULNFLOW_REPORT_TO` `./poc.sh report` prints 
 mailing. The daily report includes `check-updates`, so a separate nightly `check-updates` is
 no longer needed.
 
+## Newsletters
+
+A per-team OSINT newsletter (`vulnflow/news.py`): security news that concerns what each team
+runs, with links and why each item matched. No generated summaries.
+
+| Mode | When | Content |
+| --- | --- | --- |
+| `weekly` | Monday 07:15 | everything new that matches the team, plus its notified alerts, new KEV entries that hit it and accepted risks to review within 14 days |
+| `daily` | 07:00, only when there is something | only urgent items: the team's own systems, exploited (CISA KEV) or a public exploit |
+| `alert <id>` | by hand | everything known about one CVE, GHSA id or keyword, now, to the teams it concerns |
+
+```bash
+./poc.sh newsletter weekly --dry-run         # print it, mark nothing as sent
+./poc.sh newsletter alert CVE-2026-1001      # to the teams it concerns
+./poc.sh newsletter alert fortios --team network
+./poc.sh schedule install                    # the daily and weekly timers, with the reports
+```
+
+Feeds and addresses are in `machines.toml` (see `machines.example.toml`): `[news.feeds.<name>]`
+with `url`, `kind` (`advisory`, `cert`, `exploit` or `news`) and optionally `teams` (a vendor's
+PSIRT feed goes whole to the team that runs the product); `[news.teams.<team>]` with `to`
+and extra `keywords`. A team without `to` goes into one mail to `VULNFLOW_REPORT_TO`.
+
+An item matches a team when it names a CVE or GHSA id that is open in the team's
+Dependency-Track findings or was alerted to it, or one of its keywords as a whole word: the
+vendors and products it follows in OpenCVE, the names of the vulnerable components in its
+projects, and its own keywords. Items about the same CVE become one entry with all links.
+Order: the team's own systems first, then exploited or public exploit, then the rest.
+
+Feeds are downloaded whole and filtered on the server: nothing is ever searched for per
+keyword, product or CVE, so no feed host learns what a team runs. `alert <id>` only uses
+what is already there (the feeds, Dependency-Track, the cached KEV catalog). What was sent
+is recorded per mode in `data/news-seen.json` (90 days), so nothing is sent twice.
+
 ## Look up a CVE
 
 Ad-hoc look-up of any CVE with the same priority logic:
