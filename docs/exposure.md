@@ -246,8 +246,27 @@ project's context tags, by the matrix in
   one at most as `internal`; on a laptop (`kind-laptop`) a network bug that needs user
   interaction (`UI:R`: browser, mail, PDF) ranks as `internet`, so laptops can be
   `internal` and their client-side CVEs still rank high;
-- `critical` and `high` raise one step, `low` lowers one; KEV or an exploited sighting on a
-  `critical` asset is P1.
+- `critical` and `high` raise one step, but only a real threat (KEV or exploited, high EPSS,
+  CVSS high): a finding with nothing behind it stays where the matrix puts it. `low` lowers
+  one step. KEV or an exploited sighting on a `critical` asset is P1.
+- No CVSS score (many GO-, GHSA- and DEBIAN- advisories): Dependency-Track's severity stands
+  in, CRITICAL as 9.0 and HIGH as 7.5, and the reason says `severity HIGH (no CVSS score)`.
+
+A host project holds every OS package and every module built into the host's binaries,
+so one exposure for all of it is too coarse: on an internet-facing server, `acl`, `perl`
+or the Docker CLI's Go modules would rank like the web server. `[hosts.<h>.packages]`
+gives single packages their own context, by name or glob, overriding the host's field by
+field when their findings are ranked (the project's tags stay the host's):
+
+```toml
+[hosts.web01]
+exposure = "internal"                 # the OS as a whole
+criticality = "high"
+[hosts.web01.packages]
+"nginx"          = { exposure = "internet", input = "public" }
+"openssh-server" = { exposure = "internet" }
+"openssl"        = { exposure = "internet", input = "public" }
+```
 
 Findings don't carry the vector, so vulnflow reads it per vulnerability from
 Dependency-Track, only for projects with context, and caches it in `cvss-vectors.json` in

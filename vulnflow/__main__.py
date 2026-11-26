@@ -223,8 +223,15 @@ def _priorities(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
     if dt is None:  # unreachable: required=True exits first
         return 2
     errors: list[str] = []
+    machines = load_machines(a.machines, inv.teams)
     rows = rank_findings(
-        inv, dt, _kev_ids(data_dir), VectorCache(dt, data_dir / VECTOR_FILE), errors, a.team
+        inv,
+        dt,
+        _kev_ids(data_dir),
+        VectorCache(dt, data_dir / VECTOR_FILE),
+        errors,
+        a.team,
+        machines=machines,
     )
     rows = [r for r in rows if r.tier <= a.tier]
     if a.json:
@@ -574,7 +581,7 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
 
     def findings() -> tuple[list[tui.FindingRow], list[str]]:
         errors: list[str] = []
-        return tui.load_findings(inv, dt, kev, errors, vectors), errors
+        return tui.load_findings(inv, dt, kev, errors, vectors, machines), errors
 
     def hosts(width: int) -> list[str]:
         try:
@@ -670,7 +677,9 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         errors: list[str] = []
         kev = _kev_ids(Path(a.data_dir))
         vectors = VectorCache(dt, Path(a.data_dir) / VECTOR_FILE)
-        current = rp.collect_findings(inv, dt, errors, kev, vectors)
+        current = rp.collect_findings(
+            inv, dt, errors, kev, vectors, load_machines(a.machines, inv.teams)
+        )
         if errors:  # a partial list would report everything it missed as resolved
             sections.append(rp.error_section("Dependency-Track findings", "; ".join(errors)[:500]))
         else:

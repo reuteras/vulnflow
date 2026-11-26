@@ -11,10 +11,20 @@ Each open finding gets a tier from priority.assess with
   once and cached in the data directory (cvss-vectors.json, refreshed after 30 days).
 
 A project without context tags keeps the threat-only tier.
+
+Two refinements:
+
+- `[hosts.<h>.packages]` in machines.toml: a host project holds every OS package and every
+  module built into the host's binaries, so one exposure for all of them is too coarse.
+  A package entry (name, or glob) overrides the host's context for that package's
+  findings, field by field (nginx `internet`, the rest of the OS `internal`).
+- A finding without a CVSS v3 score (many GO-, GHSA- and DEBIAN- advisories) is ranked by
+  Dependency-Track's severity instead: CRITICAL as 9.0, HIGH as 7.5, labelled as such.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import time
 from collections.abc import Callable
@@ -23,13 +33,56 @@ from pathlib import Path
 from typing import Any
 
 from .clients import DependencyTrack, DTProject, project_label
-from .config import CRITICALITIES, EXPOSURES, INPUTS, AssetContext, Inventory, PriorityRules
+from .config import (
+    CRITICALITIES,
+    EXPOSURES,
+    INPUTS,
+    AssetContext,
+    Inventory,
+    Machines,
+    PriorityRules,
+)
 from .intel import Signals
 from .patches import open_findings
 from .priority import Verdict, assess
 
 VECTOR_FILE = "cvss-vectors.json"
 VECTOR_TTL = 30 * 86400
+# a stand-in score when a finding has no CVSS v3 score (only HIGH and up can change a tier)
+SEVERITY_SCORES = {"CRITICAL": 9.0, "HIGH": 7.5}
+
+
+def package_context(
+    machines: Machines | None, p: DTProject, component: str, base: AssetContext | None
+) -> tuple[AssetContext | None, str]:
+    """The context for a package in a host project: [hosts.<h>.packages] over the host's,
+    field by field. Returns (context, the matching pattern or "")."""
+    kind, _, host = p.name.partition(":")
+    if machines is None or kind != "host" or host not in machines.hosts:
+        return base, ""
+    pkgs = machines.hosts[host].packages
+    exact = [k for k in pkgs if not any(c in k for c in "*?[")]
+    globs = sorted((k for k in pkgs if k not in exact), key=len, reverse=True)
+    for pattern in [*exact, *globs]:
+        if pattern in exact and component != pattern:
+            continue
+        if pattern not in exact and not fnmatch.fnmatchcase(component, pattern):
+            continue
+        over = pkgs[pattern]
+        if not over:
+            continue  # an empty entry doesn't hide a broader one
+        b = base or AssetContext()
+        return (
+            AssetContext(
+                exposure=over.exposure or b.exposure,
+                input=over.input or b.input,
+                criticality=over.criticality or b.criticality,
+                eol=over.eol or b.eol,
+                certified=over.certified or b.certified,
+            ),
+            pattern,
+        )
+    return base, ""
 
 
 def context_from_tags(tags: list[str]) -> tuple[AssetContext | None, bool]:
@@ -98,19 +151,33 @@ def _num(v: Any) -> float | None:
 
 
 def rank_finding(
-    p: DTProject, f: dict[str, Any], rules: PriorityRules, kev: set[str], vectors: VectorCache | None
+    p: DTProject,
+    f: dict[str, Any],
+    rules: PriorityRules,
+    kev: set[str],
+    vectors: VectorCache | None,
+    machines: Machines | None = None,
 ) -> tuple[Verdict, float | None, float | None]:
     """(verdict, CVSS v3 score, EPSS) for one finding of project p."""
     v = f.get("vulnerability") or {}
     vid = str(v.get("vulnId", ""))
     cvss = _num(v.get("cvssV3BaseScore"))
     epss = _num(v.get("epssScore"))
+    label = ""
+    severity = str(v.get("severity") or "").upper()
+    if cvss is None and severity in SEVERITY_SCORES:
+        cvss, label = SEVERITY_SCORES[severity], f"severity {severity} (no CVSS score)"
     sig = Signals(
         cve=vid, kev=vid.upper() in kev, epss=epss, epss_percentile=_num(v.get("epssPercentile"))
     )
     ctx, laptop = context_from_tags(p.tags)
+    component = str((f.get("component") or {}).get("name", ""))
+    ctx, pattern = package_context(machines, p, component, ctx)
     vector = vectors.get(str(v.get("source", "")), vid) if vectors is not None and ctx else ""
-    return assess(cvss, sig, rules, ctx, vector, laptop), cvss, epss
+    verdict = assess(cvss, sig, rules, ctx, vector, laptop, label)
+    if pattern:
+        verdict.reasons.append(f"package {pattern!r} in machines.toml")
+    return verdict, (None if label else cvss), epss
 
 
 @dataclass
@@ -141,11 +208,12 @@ def rank_findings(
     vectors: VectorCache | None,
     errors: list[str],
     team: str | None = None,
+    machines: Machines | None = None,
 ) -> list[Ranked]:
     """Every unsuppressed finding of the teams' active projects, by tier then severity."""
     out = []
     for t, p, f in open_findings(inv, dt, team, errors):
-        verdict, cvss, epss = rank_finding(p, f, inv.rules, kev, vectors)
+        verdict, cvss, epss = rank_finding(p, f, inv.rules, kev, vectors, machines)
         c, v = f.get("component") or {}, f.get("vulnerability") or {}
         vid = str(v.get("vulnId", ""))
         out.append(

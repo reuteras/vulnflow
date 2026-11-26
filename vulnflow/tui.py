@@ -120,12 +120,13 @@ def load_findings(
     kev: set[str],
     errors: list[str],
     vectors: VectorCache | None = None,
+    machines: Machines | None = None,
 ) -> list[FindingRow]:
     rows = []
     for team, p, f in open_findings(inv, dt, None, errors):
         c, v = f.get("component") or {}, f.get("vulnerability") or {}
         vid = str(v.get("vulnId", ""))
-        verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors)
+        verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors, machines)
         rows.append(
             FindingRow(
                 team=team,

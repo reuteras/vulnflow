@@ -16,8 +16,9 @@ The threat (KEV and exploited sightings, EPSS, CVSS) gives a row; the asset cont
   is ranked in the restricted column, an Adjacent one at most as internal. On a laptop a
   network bug that needs user interaction (browser, mail, PDF; UI:R) counts as internet,
   because its users open what attackers send.
-- criticality `critical`/`high` raises one step and `low` lowers one; KEV or an exploited
-  sighting on a `critical` asset is P1 whatever the column.
+- criticality `critical`/`high` raises one step, but only a real threat (KEV or exploited,
+  high EPSS, CVSS high): a finding with nothing behind it stays where the matrix puts it.
+  `low` lowers one step. KEV or an exploited sighting on a `critical` asset is P1.
 """
 
 from __future__ import annotations
@@ -62,8 +63,12 @@ class Verdict:
         return TIER_NAMES[self.tier]
 
 
-def threat(cvss: float | None, sig: Signals, rules: PriorityRules) -> tuple[int, list[str]]:
-    """The matrix row (0 = KEV or exploited .. 3 = other) and why."""
+def threat(
+    cvss: float | None, sig: Signals, rules: PriorityRules, cvss_label: str = ""
+) -> tuple[int, list[str]]:
+    """The matrix row (0 = KEV or exploited .. 3 = other) and why. cvss_label names where a
+    stand-in score came from (e.g. "severity HIGH, no CVSS score") instead of "CVSS x"."""
+    name = cvss_label or f"CVSS {cvss}"
     reasons: list[str] = []
     if sig.kev:
         reasons.append("in CISA KEV" + (" (ransomware use)" if sig.kev_ransomware else ""))
@@ -81,9 +86,9 @@ def threat(cvss: float | None, sig: Signals, rules: PriorityRules) -> tuple[int,
         and epss is not None
         and epss >= rules.epss_floor
     ):
-        return 1, [f"CVSS {cvss} critical and EPSS {epss:.3f} >= {rules.epss_floor}"]
+        return 1, [f"{name} critical and EPSS {epss:.3f} >= {rules.epss_floor}"]
     if cvss is not None and cvss >= rules.cvss_high:
-        why = [f"CVSS {cvss} >= {rules.cvss_high}"]
+        why = [name if cvss_label else f"CVSS {cvss} >= {rules.cvss_high}"]
         if epss is None:
             why.append("no EPSS yet")
         return 2, why
@@ -92,7 +97,7 @@ def threat(cvss: float | None, sig: Signals, rules: PriorityRules) -> tuple[int,
     if cvss is None:
         why.append("no CVSS (likely unenriched in NVD - check CNA/vendor advisory)")
     else:
-        why.append(f"CVSS {cvss}")
+        why.append(name)
     if sig.sightings.get("seen"):
         why.append(f"{sig.sightings['seen']} 'seen' sighting(s)")
     return 3, why
@@ -140,12 +145,13 @@ def assess(
     context: AssetContext | None = None,
     vector: str = "",
     laptop: bool = False,
+    cvss_label: str = "",
 ) -> Verdict:
-    row, reasons = threat(cvss, sig, rules)
+    row, reasons = threat(cvss, sig, rules, cvss_label)
     col, where = column(context, vector, laptop)
     tier = MATRIX[row][col]
     crit = context.criticality if context else ""
-    if crit in ("critical", "high"):
+    if crit in ("critical", "high") and row <= 2:  # only lift a real threat
         tier = max(1, tier - 1)
         where.append(f"{crit} asset")
     elif crit == "low":

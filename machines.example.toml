@@ -63,6 +63,9 @@ path = "/srv/myapp"
 # "nginx" = { exposure = "internet", input = "public", criticality = "high" }
 # "ghcr.io/acme/admin-*" = { exposure = "restricted", input = "staff" }
 # "*" = { exposure = "internal" }  # the rest on this host (an exact name or longer glob wins)
+# [hosts.server1.packages]         # packages in the host project (OS packages, modules in
+# "nginx" = { exposure = "internet", input = "public" }   # its binaries); overrides the
+# "openssh-server" = { exposure = "internet" }            # host's context when ranking
 # [code.myapp] / [github.<name>] take the same keys.
 # [projects."someapp"]             # any other project, e.g. uploaded from CI
 # exposure = "external-auth"

@@ -140,6 +140,9 @@ class Machine:
     context: AssetContext = AssetContext()  # of the host project (host:<name>)
     # per image name (or glob) running on it: the container projects' context
     images: dict[str, AssetContext] = field(default_factory=dict)
+    # per package name (or glob) in the host project: overrides the host's context when
+    # ranking that package's findings (nginx and openssh face the internet, acl doesn't)
+    packages: dict[str, AssetContext] = field(default_factory=dict)
 
 
 @dataclass
@@ -228,6 +231,11 @@ def _machine(
         if not isinstance(ctx, dict) or set(ctx) - CONTEXT_KEYS:
             raise SystemExit(f"{where}: images.{image!r} takes only {sorted(CONTEXT_KEYS)}")
         images[str(image)] = _context(ctx, f"{where}, image {image!r}")
+    packages: dict[str, AssetContext] = {}
+    for pkg, ctx in (settings.get("packages") or {}).items():
+        if not isinstance(ctx, dict) or set(ctx) - CONTEXT_KEYS:
+            raise SystemExit(f"{where}: packages.{pkg!r} takes only {sorted(CONTEXT_KEYS)}")
+        packages[str(pkg)] = _context(ctx, f"{where}, package {pkg!r}")
     return Machine(
         name=name,
         team=team,
@@ -239,6 +247,7 @@ def _machine(
         containers_team=containers_team,
         context=_context(settings, where),
         images=images,
+        packages=packages,
     )
 
 
@@ -260,7 +269,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     group_settings: dict[str, dict[str, Any]] = {}
     for g, gs in (data.get("groups") or {}).items():
         _check_name("groups", g, path)
-        on_group = sorted(set(gs) & (CONTEXT_KEYS | {"images"}))
+        on_group = sorted(set(gs) & (CONTEXT_KEYS | {"images", "packages"}))
         if on_group:
             raise SystemExit(
                 f"[groups.{g}] in {path}: {on_group} can't be set on a group (one group can run "
@@ -284,7 +293,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     for h in [*member_of, *(x for x in overrides if x not in member_of)]:
         _check_name("hosts", h, path)
         o = overrides.get(h) or {}
-        bad = sorted(set(o) - _MACHINE_KEYS - CONTEXT_KEYS - {"group", "version", "images"})
+        bad = sorted(set(o) - _MACHINE_KEYS - CONTEXT_KEYS - {"group", "version", "images", "packages"})
         if bad:
             raise SystemExit(f"[hosts.{h}] in {path}: unknown keys {bad}")
         g = member_of.get(h) or str(o.get("group", ""))

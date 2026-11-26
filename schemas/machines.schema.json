@@ -256,6 +256,57 @@
                 }
               }
             }
+          },
+          "packages": {
+            "type": "object",
+            "description": "Asset context of packages in the host project (OS packages, modules in its binaries), by name or glob; overrides the host's context field by field when ranking their findings.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "exposure": {
+                  "type": "string",
+                  "enum": [
+                    "internet",
+                    "external-auth",
+                    "internal",
+                    "restricted",
+                    "hostile-device",
+                    ""
+                  ],
+                  "description": "Who can reach it (docs/exposure.md). Empty = unknown.\n\n- `internet`: reachable by anyone on the internet, before login\n- `external-auth`: reachable from outside, but only after login\n- `internal`: reachable from the internal network or user devices\n- `restricted`: segmented, admin-only, allow-listed (e.g. tailnet only)\n- `hostile-device`: runs on devices the organisation does not control"
+                },
+                "input": {
+                  "type": "string",
+                  "enum": [
+                    "public",
+                    "partner",
+                    "staff",
+                    ""
+                  ],
+                  "description": "Who controls the input it parses. Empty = unknown.\n\n- `public`: anyone can supply input\n- `partner`: known external parties\n- `staff`: employees only"
+                },
+                "criticality": {
+                  "type": "string",
+                  "enum": [
+                    "critical",
+                    "high",
+                    "normal",
+                    "low",
+                    ""
+                  ],
+                  "description": "How much it matters. Empty = unknown.\n\n- `critical`: harm to the public, customers or society\n- `high`: the organisation cannot do its core work\n- `normal`: everything else\n- `low`: test, sandbox, decommissioning"
+                },
+                "eol": {
+                  "type": "boolean",
+                  "description": "No more patches from upstream."
+                },
+                "certified": {
+                  "type": "boolean",
+                  "description": "Changes follow a certification cycle."
+                }
+              }
+            }
           }
         }
       }
