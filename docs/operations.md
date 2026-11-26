@@ -21,11 +21,16 @@ the server. The receiver then:
 
 1. looks the CVE up in CISA KEV, FIRST EPSS and CIRCL sightings, and ranks it P1 to P4
    ([Priority tiers](concepts.md#priority-tiers));
-2. appends every alert to `alerts.jsonl` in its data volume (for the SIEM and the reports);
-3. for P1 and P2: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`:
+2. decides whether the change is worth a message ([Which changes notify](concepts.md#which-changes-notify)):
+   the CVE is new to the project, was just added to KEV, became more serious, or is one
+   somebody follows in OpenCVE. A title, description or reference edit on an old CVE is
+   not;
+3. appends every change to `alerts.jsonl` in its data volume (for the SIEM and the
+   reports), with `notify` saying why it notified (empty: logged only);
+4. for P1 and P2 changes that notify: posts a message mentioning the team to chat (`VULNFLOW_CHAT_WEBHOOK`:
    your own Mattermost, Slack or Teams webhook, or the PoC's local Mattermost from
    `./poc.sh chat-up`, channel `alerts`), and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one;
-4. for P1 (`VULNFLOW_SOC_MIN_TIER`), whatever the team and also when no team owns the
+5. for P1 (`VULNFLOW_SOC_MIN_TIER`) changes that notify, whatever the team and also when no team owns the
    project: posts it to the SOC channel (`VULNFLOW_SOC_WEBHOOK`; the local Mattermost's
    `soc` channel), naming the team instead of mentioning it. The two deliveries are
    independent: one failing doesn't stop the other.

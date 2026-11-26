@@ -4,6 +4,15 @@ OpenCVE posts one JSON document per notification run, containing the organizatio
 project, notification name, period and a list of `changes` (each with `cve` and
 `events`). See docs.opencve.io/concepts/notifications/.
 
+Which changes notify (chat, SOC, OpenCVE write-back): the tier says how serious the CVE is,
+`notify` why this change matters. A change notifies when the CVE is new to the project
+(OpenCVE's `first_time` event), was just added to KEV, or became more serious (its tier
+went up with this change's CVSS/EPSS update); and, for a CVE someone follows (an open
+OpenCVE status: to_evaluate, pending_review, analysis_in_progress, remediation_in_progress),
+any change that isn't only `quiet_event_types` (title, description, references,
+weaknesses). Everything else (OpenCVE's titles come and go on old KEV entries) is logged
+with notify "" and stays out of chat.
+
 Configure the OpenCVE webhook notification with:
   URL:    http://<host>:8380/opencve
   Header: X-Vulnflow-Token: <VULNFLOW_WEBHOOK_TOKEN>
@@ -17,7 +26,7 @@ import logging
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +60,42 @@ class Alert:
     sightings: dict[str, int]
     description: str
     enrichment_errors: list[str]
+    title: str = ""  # KEV's name, OpenCVE's title, or the description's first sentence
+    products: list[str] = field(default_factory=list)  # the subscriptions it matched
+    # why this change notifies: new, kev, worse, followed; "" = log only
+    notify: str = ""
+    # a non-quiet change: notifies if the CVE turns out to be followed (Pipeline checks)
+    followable: bool = False
+
+
+FOLLOWED_STATUSES = ("to_evaluate", "pending_review", "analysis_in_progress", "remediation_in_progress")
+NOTIFY_LABELS = {"new": "new", "kev": "added to KEV", "worse": "more serious", "followed": "followed"}
+
+
+def _title(sig_name: str, events: list[dict[str, Any]], description: str) -> str:
+    if sig_name:
+        return sig_name
+    for e in events:
+        d = e.get("details") if e.get("type") == "title" else None
+        if isinstance(d, dict) and d.get("new"):
+            return str(d["new"])
+    first = " ".join(description.split()).split(". ")[0]
+    return first if len(first) <= 100 else first[:97].rstrip() + "..."
+
+
+def _metric_old(events: list[dict[str, Any]], name: str, current: float | None) -> float | None:
+    """The value of a metric before this change: the `old` of an update, None if the change
+    added it, else unchanged."""
+    for e in events:
+        d = e.get("details") if e.get("type") == "metrics" else None
+        if not isinstance(d, dict):
+            continue
+        if name in (d.get("added") or {}):
+            return None
+        upd = (d.get("updated") or {}).get(name)
+        if isinstance(upd, dict):
+            return _cvss((upd.get("old") or {}).get("score"))
+    return current
 
 
 def _cvss(v: Any) -> float | None:
@@ -91,6 +136,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
     ignore = set(inv.rules.ignore_event_types)
 
     wanted: list[tuple[dict, list[str], str | None]] = []
+    events_by_cve: dict[str, list[dict[str, Any]]] = {}
     for ch in payload.get("changes") or []:
         cve = ch.get("cve") or {}
         events = [e for e in ch.get("events") or [] if isinstance(e, dict)]
@@ -100,6 +146,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
             continue  # only ignored event types (e.g. reference churn)
         if cve.get("cve_id"):
             wanted.append((cve, relevant or types, kev_added(events)))
+            events_by_cve[str(cve["cve_id"]).upper()] = events
 
     signals = enricher.enrich(c["cve_id"] for c, _, _ in wanted)
     now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -113,6 +160,17 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
             sig.kev_date_added = sig.kev_date_added or kev_date[:10]
         cvss = _cvss(cve.get("cvss31"))
         v = assess(cvss, sig, inv.rules)
+        events = events_by_cve.get(cid, [])
+        if "first_time" in types:
+            notify = "new"
+        elif kev_date is not None:
+            notify = "kev"
+        else:
+            before = replace(sig, epss=_metric_old(events, "epss", sig.epss))
+            old = assess(_metric_old(events, "cvssV3_1", cvss), before, inv.rules)
+            notify = "worse" if v.tier < old.tier else ""
+        quiet = set(inv.rules.quiet_event_types)
+        subs = (cve.get("subscriptions") or {}).get("human") or []
         alerts.append(
             Alert(
                 received_at=now,
@@ -131,51 +189,55 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
                 sightings=sig.sightings,
                 description=(cve.get("description") or "")[:400],
                 enrichment_errors=sig.errors,
+                title=_title(sig.kev_name, events, str(cve.get("description") or "")),
+                products=[str(x) for x in subs],
+                notify=notify,
+                followable=any(t not in quiet for t in types),
             )
         )
     alerts.sort(key=lambda a: (a.tier, -(a.epss or 0), -(a.cvss31 or 0)))
     return alerts
 
 
+def alert_line(a: Alert, opencve_url: str = "", team: bool = False) -> str:
+    """One chat line: what it is (title, products), why now, the scores and the reasons."""
+    epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
+    cvss = a.cvss31 if a.cvss31 is not None else "n/a"
+    link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
+    what = a.title + (f" ({', '.join(a.products)})" if a.products else "")
+    why = NOTIFY_LABELS.get(a.notify, a.notify)
+    changed = ", ".join(a.event_types) or "change"
+    return (
+        f"- [{a.tier_name}] {a.cve}: {what}\n"
+        f"  {why} ({changed}){f', team {a.team}' if team else ''}, CVSS {cvss}, EPSS {epss}: "
+        f"{'; '.join(a.reasons)}{link}"
+    )
+
+
 def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> str | None:
-    hot = [a for a in alerts if a.tier <= inv.rules.chat_min_tier]
+    hot = [a for a in alerts if a.tier <= inv.rules.chat_min_tier and a.notify]
     if not hot:
         return None
     team = inv.teams.get(hot[0].team)
     head = (
         f"{team.chat_mention + ' ' if team and team.chat_mention else ''}"
-        f"{len(hot)} prioritised CVE change(s) for project '{hot[0].project}'"
+        f"{len(hot)} CVE(s) to look at in project '{hot[0].project}'"
     )
-    lines = [head]
-    for a in hot:
-        epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
-        link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
-        lines.append(
-            f"- [{a.tier_name}] {a.cve} CVSS {a.cvss31 if a.cvss31 is not None else 'n/a'}"
-            f" EPSS {epss} ({', '.join(a.event_types) or 'change'}): "
-            f"{'; '.join(a.reasons)}{link}"
-        )
+    lines = [head, *(alert_line(a, opencve_url) for a in hot)]
     rest = len(alerts) - len(hot)
     if rest:
-        lines.append(f"(+{rest} lower-tier change(s) in the log)")
+        lines.append(f"(+{rest} other change(s) in the log)")
     return "\n".join(lines)
 
 
 def format_soc(alerts: list[Alert], min_tier: int, opencve_url: str = "") -> str | None:
     """The SOC channel's message: every alert at or above min_tier, whatever the team
     (unrouted included), with the team named in each line instead of mentioned."""
-    hot = [a for a in alerts if a.tier <= min_tier]
+    hot = [a for a in alerts if a.tier <= min_tier and a.notify]
     if not hot:
         return None
-    lines = [f"SOC: {len(hot)} prioritised CVE change(s) from OpenCVE project '{hot[0].project}'"]
-    for a in hot:
-        epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
-        link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
-        lines.append(
-            f"- [{a.tier_name}] {a.cve} team {a.team} CVSS "
-            f"{a.cvss31 if a.cvss31 is not None else 'n/a'} EPSS {epss}: "
-            f"{'; '.join(a.reasons)}{link}"
-        )
+    lines = [f"SOC: {len(hot)} CVE(s) to look at from OpenCVE project '{hot[0].project}'"]
+    lines += [alert_line(a, opencve_url, team=True) for a in hot]
     return "\n".join(lines)
 
 
@@ -216,6 +278,7 @@ class Pipeline:
 
     def handle(self, payload: dict) -> list[Alert]:
         alerts = process_payload(payload, self.inv, self.enricher)
+        self._followed(alerts)
         with self.log_path.open("a", encoding="utf-8") as f:
             for a in alerts:
                 f.write(json.dumps(asdict(a), ensure_ascii=False) + "\n")
@@ -241,11 +304,28 @@ class Pipeline:
         )
         return alerts
 
+    def _followed(self, alerts: list[Alert]) -> None:
+        """A non-quiet update to a CVE someone follows in OpenCVE (an open status) notifies.
+        Asked only for changes that could reach chat and don't notify anyway."""
+        if self.opencve is None:
+            return
+        limit = max(self.inv.rules.chat_min_tier, self.soc_min_tier if self._soc_send else 0)
+        for a in alerts:
+            if a.notify or not a.followable or a.tier > limit or a.team == "unrouted":
+                continue
+            try:
+                tracker = self.opencve.get_tracker(a.project, a.cve) or {}
+            except Exception as e:
+                log.warning("OpenCVE status lookup failed for %s: %s", a.cve, e)
+                continue
+            if tracker.get("status") in FOLLOWED_STATUSES:
+                a.notify = "followed"
+
     def _triage(self, alerts: list[Alert]) -> None:
         if self.opencve is None:
             return
         for a in alerts:
-            if a.tier > self.triage_max_tier or a.team == "unrouted":
+            if a.tier > self.triage_max_tier or a.team == "unrouted" or not a.notify:
                 continue
             try:
                 tracker = self.opencve.get_tracker(a.project, a.cve) or {}

@@ -29,7 +29,12 @@ INV = ROOT / "inventory" / "inventory.toml"
 
 KEV_DOC = {
     "vulnerabilities": [
-        {"cveID": "CVE-2024-3400", "dateAdded": "2024-04-12", "knownRansomwareCampaignUse": "Unknown"},
+        {
+            "cveID": "CVE-2024-3400",
+            "dateAdded": "2024-04-12",
+            "knownRansomwareCampaignUse": "Unknown",
+            "vulnerabilityName": "Palo Alto Networks PAN-OS Command Injection Vulnerability",
+        },
         {"cveID": "CVE-2023-4966", "dateAdded": "2023-10-18", "knownRansomwareCampaignUse": "Known"},
     ]
 }
@@ -194,11 +199,11 @@ PAYLOAD = {
     "changes": [
         {
             "cve": {"cve_id": "CVE-2024-3400", "description": "PAN-OS cmd injection", "cvss31": 10.0},
-            "events": [{"type": "metrics", "details": {}}],
+            "events": [{"type": "first_time", "details": ["paloaltonetworks"]}],
         },
         {
             "cve": {"cve_id": "CVE-2026-0001", "description": "minor", "cvss31": 4.3},
-            "events": [{"type": "new_cve", "details": {}}],
+            "events": [{"type": "first_time", "details": ["debian"]}],
         },
         {
             "cve": {"cve_id": "CVE-2026-0002", "description": "refs only", "cvss31": 9.1},
@@ -206,7 +211,7 @@ PAYLOAD = {
         },
         {
             "cve": {"cve_id": "CVE-2026-0003", "description": "no score yet", "cvss31": None},
-            "events": [{"type": "new_cve", "details": {}}],
+            "events": [{"type": "first_time", "details": ["debian"]}],
         },
     ],
 }
@@ -256,7 +261,7 @@ def test_format_chat_only_hot_tiers(inv, tmp_path):
     msg = format_chat(process_payload(PAYLOAD, inv, e), inv, "http://opencve.local")
     assert msg is not None and msg.startswith("@sysadm")
     assert "CVE-2024-3400" in msg and "http://opencve.local/cve/CVE-2024-3400" in msg
-    assert "CVE-2026-0001" not in msg and "lower-tier" in msg
+    assert "CVE-2026-0001" not in msg and "other change(s) in the log" in msg
 
 
 def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
@@ -266,7 +271,7 @@ def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
     alerts = process_payload(PAYLOAD, inv, e)
     assert {a.cve: a.tier for a in alerts}["CVE-2024-3400"] == 1
     msg = format_soc(alerts, 1, "http://opencve.local")
-    assert msg is not None and msg.startswith("SOC: 1 prioritised")
+    assert msg is not None and msg.startswith("SOC: 1 CVE(s) to look at")
     assert "@sysadm" not in msg and "team sysadm" in msg
     assert "http://opencve.local/cve/CVE-2024-3400" in msg and "CVE-2026-0001" not in msg
     assert "CVE-2026-0001" in (format_soc(alerts, 2) or "")  # P2 only with min tier 2
@@ -406,6 +411,107 @@ def test_kev_watch_cli_posts_to_both_webhooks(inv, tmp_path, monkeypatch, capsys
     assert "new   CVE-2026-0011 Citrix NetScaler -> network follows" in capsys.readouterr().out
     assert [u.rsplit("/", 1)[1] for u, _ in posted] == ["team", "soc"]
     assert posted[0][1].startswith("@network New in CISA KEV (1):")
+
+
+def test_only_new_kev_worse_or_followed_changes_notify(inv, tmp_path):
+    """An old KEV CVE whose OpenCVE title comes and goes (two alerts on 2026-11-26 for
+    CVE-2026-65400 and -86950, both in KEV since the summer) stays out of chat."""
+    from vulnflow.receiver import format_chat
+
+    def change(cid: str, *events: dict[str, Any], **cve: Any) -> dict[str, Any]:
+        return {"cve": {"cve_id": cid, **cve}, "events": list(events)}
+
+    title_gone = {"type": "title", "details": {"new": None, "old": "PAN-OS command injection"}}
+    epss_up = {
+        "type": "metrics",
+        "details": {
+            "added": {},
+            "removed": {},
+            "updated": {"epss": {"old": {"score": 0.02}, "new": {"score": 0.4}}},
+        },
+    }
+    cpes = {"type": "cpes", "details": {"added": ["cpe:2.3:o:debian:debian_linux:13"], "removed": []}}
+    subs = {"raw": ["paloaltonetworks"], "human": ["Paloaltonetworks"]}
+    payload = {
+        "project": "sysadm",
+        "changes": [
+            change("CVE-2024-3400", title_gone, cvss31=10.0, description="x", subscriptions=subs),
+            change("CVE-2026-0001", epss_up, cvss31=4.3, description="Debian thing. More text."),
+            change("CVE-2026-0003", cpes, cvss31=None, description="Followed one"),
+            change("CVE-2026-0004", cpes, cvss31=None, description="Nobody follows this"),
+        ],
+    }
+    e, _ = make_enricher(
+        tmp_path, epss={"CVE-2026-0001": 0.4, "CVE-2026-0003": 0.5, "CVE-2026-0004": 0.5}
+    )
+    trackers = {
+        "CVE-2026-0003": {"status": "analysis_in_progress"},
+        "CVE-2026-0004": {"status": "resolved"},
+    }
+    asked: list[str] = []
+
+    def get_cve(m, url, h, b):
+        cid = url.rsplit("/", 1)[1]
+        asked.append(cid)
+        return Response(200, json.dumps({"cve_id": cid, "tracker": trackers.get(cid)}).encode(), {})
+
+    t = FakeTransport({"GET /projects/sysadm/cves/": get_cve, "PATCH /projects/sysadm/cves/": {}})
+    sent: list[str] = []
+    pipe = Pipeline(
+        inv,
+        e,
+        tmp_path / "a.jsonl",
+        chat_sender=sent.append,
+        opencve=OpenCVE("http://oc", "org", "t", transport=t),
+        triage_max_tier=2,
+    )
+    alerts = {a.cve: a for a in pipe.handle(payload)}
+    # the title churn on the KEV entry: P1, logged, not notified, OpenCVE not asked
+    assert alerts["CVE-2024-3400"].tier == 1 and alerts["CVE-2024-3400"].notify == ""
+    assert "CVE-2024-3400" not in asked
+    assert alerts["CVE-2024-3400"].title == "Palo Alto Networks PAN-OS Command Injection Vulnerability"
+    assert alerts["CVE-2024-3400"].products == ["Paloaltonetworks"]
+    # EPSS 0.02 -> 0.4 moved it from P4 to P2: more serious
+    assert (alerts["CVE-2026-0001"].tier, alerts["CVE-2026-0001"].notify) == (2, "worse")
+    assert alerts["CVE-2026-0001"].title == "Debian thing"
+    # a CPE change: notifies only for the CVE someone is analysing
+    assert alerts["CVE-2026-0003"].notify == "followed" and alerts["CVE-2026-0004"].notify == ""
+    (msg,) = sent
+    assert "CVE-2024-3400" not in msg and "CVE-2026-0004" not in msg
+    assert "- [P2 Attend] CVE-2026-0001: Debian thing\n  more serious (metrics), CVSS 4.3" in msg
+    assert "- [P2 Attend] CVE-2026-0003: Followed one\n  followed (cpes)" in msg
+    assert msg.endswith("(+2 other change(s) in the log)")
+    # the write-back only marks what notified (0003 has a status already: left alone)
+    patched = [c[1].rsplit("/", 1)[1] for c in t.calls if c[0] == "PATCH"]
+    assert patched == ["CVE-2026-0001"]
+    # every change is in the log, with why it notified (or "")
+    logged = {
+        json.loads(x)["cve"]: json.loads(x)["notify"]
+        for x in (tmp_path / "a.jsonl").read_text().splitlines()
+    }
+    assert logged == {
+        "CVE-2024-3400": "",
+        "CVE-2026-0001": "worse",
+        "CVE-2026-0003": "followed",
+        "CVE-2026-0004": "",
+    }
+    # the daily report leaves the logged-only ones out (and keeps old lines without the key)
+    from vulnflow.report import alerts_section
+
+    lines = (tmp_path / "a.jsonl").read_text().splitlines()
+    old = json.dumps(
+        {
+            "received_at": "2026-11-20T00:00:00",
+            "team": "dev",
+            "cve": "CVE-1",
+            "tier": 1,
+            "tier_name": "P1 Act",
+        }
+    )
+    section, _ = alerts_section([*lines, old], "")
+    text = section.text()
+    assert "CVE-2026-0001" in text and "CVE-1" in text and "CVE-2024-3400" not in text
+    assert format_chat([alerts["CVE-2024-3400"]], inv) is None
 
 
 def test_http_receiver_auth_and_pipeline(inv, tmp_path):
@@ -628,7 +734,7 @@ def test_triage_writeback_never_overwrites_human_status(inv, tmp_path):
     payload = {
         "project": "sysadm",
         "changes": [
-            {"cve": {"cve_id": c, "cvss31": 9.8}, "events": [{"type": "new_cve"}]}
+            {"cve": {"cve_id": c, "cvss31": 9.8}, "events": [{"type": "first_time"}]}
             for c in ("CVE-2024-3400", "CVE-2023-4966")
         ],
     }

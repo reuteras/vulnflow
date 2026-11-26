@@ -190,6 +190,8 @@ def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple
         newest = max(newest, at)
         if (since and at <= since) or int(a.get("tier", 9)) > max_tier:
             continue
+        if "notify" in a and not a["notify"]:
+            continue  # logged only (e.g. a title edit on an old KEV entry); older lines have no key
         k = (str(a.get("team", "")), str(a.get("cve", "")))
         if k not in best or int(a["tier"]) < int(best[k]["tier"]):
             best[k] = a

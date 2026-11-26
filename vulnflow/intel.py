@@ -31,6 +31,7 @@ class Signals:
     kev: bool = False
     kev_ransomware: bool = False
     kev_date_added: str = ""
+    kev_name: str = ""  # KEV's vulnerabilityName, e.g. "Apple macOS Improper Authentication ..."
     epss: float | None = None
     epss_percentile: float | None = None
     sightings: dict[str, int] = field(default_factory=dict)  # type -> count
@@ -104,6 +105,7 @@ class Enricher:
                     if c in idx:
                         out[c].kev = True
                         out[c].kev_date_added = idx[c].get("dateAdded", "")
+                        out[c].kev_name = str(idx[c].get("vulnerabilityName", ""))
                         out[c].kev_ransomware = (
                             str(idx[c].get("knownRansomwareCampaignUse", "")).lower() == "known"
                         )

@@ -47,6 +47,32 @@ The write-back to OpenCVE (`VULNFLOW_OPENCVE_TRIAGE_MAX_TIER`) **only touches CV
 has triaged yet**. It never overwrites a status a person set (e.g. `risk_accepted`).
 Everything lands in `data/alerts.jsonl`, which you can ship to the SIEM.
 
+### Which changes notify
+
+The tier says how serious the CVE is; it doesn't say whether this change matters. OpenCVE
+sends a webhook for every change to a CVE in a team's project, including the titles it
+generates and drops again on old entries: on 2026-11-26 two macOS CVEs in KEV since the
+summer each came in as P1 because a title was removed. So chat, the SOC channel, the
+OpenCVE write-back and the daily report only take a change when
+
+| `notify` | When |
+| --- | --- |
+| `new` | the CVE entered the project (OpenCVE's `first_time` event) |
+| `kev` | the change added it to CISA KEV |
+| `worse` | the change raised its tier: the CVSS or EPSS update in it moved the CVE up |
+| `followed` | somebody follows it (an open OpenCVE status: `to_evaluate`, `pending_review`, `analysis_in_progress`, `remediation_in_progress`) and the change is more than `quiet_event_types` |
+
+`quiet_event_types` in `[priority]` (default `title`, `description`, `references`,
+`weaknesses`) never notify on their own. Each chat line names the CVE (KEV's vulnerability
+name, OpenCVE's title, or the description's first sentence), the products it matched and
+why it is there:
+
+```text
+@users 1 CVE(s) to look at in project 'users'
+- [P1 Act] CVE-2026-0042: Apple macOS Improper Authentication Vulnerability (Apple Macos)
+  new (first_time), CVSS 9.8, EPSS 0.017: in CISA KEV; 16 'exploited' sighting(s) (CIRCL) https://…/cve/CVE-2026-0042
+```
+
 ## Where status and comments live
 
 Rule of thumb: **"is this a vulnerability here?" is answered in Dependency-Track; "what do
