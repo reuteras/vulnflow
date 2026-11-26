@@ -831,18 +831,19 @@ cmd_check_updates() {
   vulnflow check-updates
 }
 
-# The receiver's alert log lives in its volume: copy it to a temp file and print its name.
-# A stopped receiver leaves no file (report and tui show that as an error); no alerts yet
-# is an empty file.
-fetch_alerts() {
-  local f
+# The receiver's alert log and kev-watch's log live in the glue volume: copy one to a temp
+# file and print its name. A stopped receiver leaves no file (report and tui show that as
+# an error); nothing logged yet is an empty file.
+fetch_data_file() {
+  local f name="$1"
   f="$(mktemp)"
-  if ! glue_compose exec -T receiver sh -c 'cat /app/data/alerts.jsonl 2>/dev/null || true' \
+  if ! glue_compose exec -T receiver sh -c "cat /app/data/$name 2>/dev/null || true" \
     >"$f" 2>/dev/null; then
     rm -f "$f"
   fi
   echo "$f"
 }
+fetch_alerts() { fetch_data_file alerts.jsonl; }
 
 # Terminal UI (vulnflow/tui.py) with the receiver's alert log.
 cmd_tui() {
@@ -862,7 +863,7 @@ find_sendmail() { PATH="$PATH:/usr/sbin:/sbin" command -v sendmail || true; }
 # anyway, e.g. to test the mail); weekly: always. VULNFLOW_REPORT_TO empty: printed instead
 # (the journal, under the timer).
 cmd_report() {
-  local kind="${1:-}" alerts out rc=0 quiet="" sendmail mail=()
+  local kind="${1:-}" alerts kevlog out rc=0 quiet="" sendmail mail=()
   [[ "$kind" == daily || "$kind" == weekly ]] || die "usage: ./poc.sh report daily|weekly [--always]"
   load_env
   [[ "$kind" == daily && "${2:-}" != --always ]] && quiet=1
@@ -873,8 +874,9 @@ cmd_report() {
   # A whole message (Markdown text part + HTML part) when mailing, Markdown when printing.
   [[ -n "${VULNFLOW_REPORT_TO:-}" ]] && mail=(--mime --to "$VULNFLOW_REPORT_TO")
   alerts="$(fetch_alerts)"
-  out="$(vulnflow report "$kind" --alerts "$alerts" ${quiet:+--quiet} ${mail[@]+"${mail[@]}"})" || rc=$?
-  rm -f "$alerts"
+  kevlog="$(fetch_data_file kev-new.jsonl)"
+  out="$(vulnflow report "$kind" --alerts "$alerts" --kev-log "$kevlog" ${quiet:+--quiet} ${mail[@]+"${mail[@]}"})" || rc=$?
+  rm -f "$alerts" "$kevlog"
   [[ -n "$out" ]] || return "$rc"
   if [[ -z "${VULNFLOW_REPORT_TO:-}" ]]; then
     printf '%s\n' "$out"

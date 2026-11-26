@@ -50,6 +50,7 @@ from .clients import DependencyTrack
 from .config import Inventory, Machines
 from .machines import host_scans, project_name
 from .patches import open_findings
+from .receiver import NOTIFY_LABELS
 from .upstreams import Status
 
 KINDS = ("daily", "weekly")
@@ -172,6 +173,59 @@ def updates_section(statuses: list[Status], *, everything: bool) -> Section:
 # ---- alerts ----------------------------------------------------------------------------
 
 
+def _alert_what(a: dict[str, Any]) -> str:
+    """The chat line's description: title (or the description's first sentence for log
+    lines from before titles were recorded) and the products it matched."""
+    title = " ".join(str(a.get("title") or "").split())
+    if not title:
+        first = " ".join(str(a.get("description") or "").split()).split(". ")[0]
+        title = first if len(first) <= 100 else first[:97].rstrip() + "..."
+    products = [str(p) for p in a.get("products") or []]
+    return title + (f" ({', '.join(products)})" if products else "")
+
+
+def kev_section(lines: Iterable[str], since: str) -> tuple[Section, str]:
+    """New CISA KEV entries kev-watch posted after `since` (its kev-new.jsonl), the same
+    entries and matches as the chat messages. Notable when one hits something of ours."""
+    s = Section("New in CISA KEV")
+    newest = since
+    rows = []
+    matched = False
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        at = str(e.get("seen_at", ""))
+        newest = max(newest, at)
+        if since and at <= since:
+            continue
+        findings = e.get("findings") or {}
+        follows = [str(t) for t in e.get("follows") or []]
+        where = [f"findings in {t}" for t in sorted(findings)] + [f"{t} follows" for t in follows]
+        matched = matched or bool(where)
+        name = f"{e.get('vendor', '')} {e.get('product', '')}: {e.get('name', '')}"
+        rows.append(
+            [
+                str(e.get("date_added", ""))[:10],
+                code(str(e.get("cve", ""))),
+                name + (" **(ransomware use)**" if e.get("ransomware") else ""),
+                ", ".join(where) or "nothing of ours",
+            ]
+        )
+    rows.sort(key=lambda r: r[0], reverse=True)  # newest first,
+    rows.sort(key=lambda r: r[3] == "nothing of ours")  # those that hit something on top
+    s.notable = matched
+    if rows:
+        _table(s, ["Added", "CVE", "Vulnerability", "Hits"], rows)
+    else:
+        s.blocks.append(Para("None."))
+    return s, newest
+
+
 def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple[Section, str]:
     """P1..P<max_tier> alerts received after `since` (ISO 8601; empty = all), one row per
     team and CVE with the highest tier. Returns the section and the newest received_at."""
@@ -202,6 +256,8 @@ def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple
             [
                 f"**{a.get('tier_name', '')}**",
                 code(cve),
+                _alert_what(a),
+                NOTIFY_LABELS.get(str(a.get("notify", "")), str(a.get("notify") or "")),
                 team,
                 str(cvss) if cvss is not None else "n/a",
                 "**KEV**" if a.get("kev") else "",
@@ -210,7 +266,7 @@ def alerts_section(lines: Iterable[str], since: str, max_tier: int = 2) -> tuple
         )
     s.notable = bool(rows)
     if rows:
-        _table(s, ["Tier", "CVE", "Team", "CVSS", "KEV", "EPSS"], rows)
+        _table(s, ["Tier", "CVE", "What", "Why", "Team", "CVSS", "KEV", "EPSS"], rows)
     else:
         s.blocks.append(Para("None."))
     return s, newest

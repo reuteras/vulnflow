@@ -335,7 +335,7 @@ show the one they can.
 
 | Report | When | Sent | Contents |
 | --- | --- | --- | --- |
-| daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
+| daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new CISA KEV entries that hit a finding or a followed vendor, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
 | weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, every upstream version |
 
 Set the recipient and install the timers once, as the user that runs `./poc.sh`:
@@ -346,6 +346,12 @@ python3 -m vulnflow env-set <<<'VULNFLOW_REPORT_TO=you@example.org'
 ./poc.sh report weekly       # send one now
 ./poc.sh report daily --always   # a daily even when there is nothing to act on
 ```
+
+The alerts and the new KEV entries carry the same information as the chat messages: the
+CVE's title, the products it matched and why it notified (new, added to KEV, more serious,
+followed), and for a KEV entry the findings and teams it hits. A KEV entry that hits nothing
+of ours is listed but doesn't make a quiet daily go out. The mail has no links, so the
+OpenCVE link from chat is not there; the CVE ID is.
 
 "New" is since the last report of the same kind, so the weekly covers the whole week. The
 first run of each kind records a baseline and lists no changes. A finding is the same finding
