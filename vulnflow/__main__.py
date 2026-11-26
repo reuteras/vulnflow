@@ -472,6 +472,7 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
                 updates=updates,
                 details=lambda r: tui.finding_details(r, dt),
                 write=write,
+                opencve_url=env("OPENCVE_URL"),
             )
         )
     )
