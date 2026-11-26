@@ -99,6 +99,11 @@ Dependency-Track:
   containers at Tailscale's resolver (`--dns 100.100.100.100` in the runner config's
   `container.options`) or run them on the host network (`container.network: host`).
 
+A link checker in the repository's own CI (MegaLinter's lychee) reads the syft download URL
+in the workflow as a link and gets a 404, because `${SYFT_VERSION}` is only filled in when
+the job runs. Add `https://github.com/anchore/syft/releases/download/` to the repository's
+`.lycheeignore`.
+
 The daily run matters: `prune` deactivates the newest version of a `kind-*` project after
 7 days without an upload, so a repository that only uploaded on releases would drop out of
 the lists. Each commit makes a new version; the old ones are retired two days after a
