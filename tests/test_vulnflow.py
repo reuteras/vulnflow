@@ -373,6 +373,41 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     assert not team and not asked
 
 
+def test_kev_watch_matches_machines_toml_subscriptions(tmp_path, monkeypatch, capsys):
+    """dt2dojo and kev-watch merge [subscriptions.*] from machines.toml, like sync does."""
+    from vulnflow.__main__ import main
+
+    catalog = {"vulnerabilities": [_kev_entry("CVE-2020-0001", "Microsoft", "Windows", "2020-01-01")]}
+    t = FakeTransport(
+        {
+            "GET known_exploited_vulnerabilities.json": lambda m, u, h, b: Response(
+                200, json.dumps(catalog).encode(), {}
+            )
+        }
+    )
+    monkeypatch.setattr("vulnflow.net.urllib_transport", t)
+    for k, v in {
+        "VULNFLOW_CHAT_WEBHOOK": "",
+        "VULNFLOW_SOC_WEBHOOK": "",
+        "VULNFLOW_ENRICH_KEV": "1",
+        "DT_API_KEY": "",
+    }.items():
+        monkeypatch.setenv(k, v)
+    mf = tmp_path / "machines.toml"
+    mf.write_text('[subscriptions.dev]\nvendors = ["veeam"]\n')
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    args = ["--env-file", str(env_file), "--inventory", str(INV), "--data-dir", str(tmp_path)]
+    args += ["--machines", str(mf), "kev-watch", "--dry-run"]
+    (tmp_path / "kev-seen.json").write_text(json.dumps({"seen": []}))
+    catalog["vulnerabilities"].append(
+        _kev_entry("CVE-2026-0020", "Veeam", "Backup & Replication", "2026-11-26")
+    )
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "new   CVE-2026-0020 Veeam Backup & Replication -> dev follows" in out
+
+
 def test_kev_watch_cli_posts_to_both_webhooks(inv, tmp_path, monkeypatch, capsys):
     from vulnflow.__main__ import main
 
