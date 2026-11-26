@@ -374,8 +374,9 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 - `~/.cargo/bin` only yields components for binaries built with `cargo auditable`; for others
   syft finds nothing.
 - OSV has to cover the ecosystems you use: `DT_OSV_ECOSYSTEMS` in `.env` (default
-  `Debian,PyPI`; npm is in DT's own default list, `crates.io` and `Ubuntu` are OSV names you
-  can add) and rerun `./poc.sh dt-bootstrap`.
+  `Debian,PyPI,crates.io`; npm is in DT's own default list, `Ubuntu` is an OSV name you can
+  add) and rerun `./poc.sh dt-bootstrap`. Without `crates.io`, Rust projects (from CI) show
+  0 findings because nothing matches their crates: they have no CPEs for NVD.
 - Findings for a fresh upload take a while; the Dependency-Track UI shows the analysis queue.
 - Dependency-Track's API server is capped at 2 GB in `stacks/dependency-track/docker-compose.yml`
   (its docs suggest more for a large portfolio); with this few projects that should do, but
