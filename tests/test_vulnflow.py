@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from vulnflow.clients import DefectDojo, DependencyTrack, OpenCVE
-from vulnflow.config import PriorityRules, load_inventory, load_machines
+from vulnflow.config import PriorityRules, add_subscriptions, load_inventory, load_machines
 from vulnflow.intel import Enricher, Signals
 from vulnflow.jobs import dt_to_dojo, sync_inventory
 from vulnflow.net import Response
@@ -3967,6 +3967,317 @@ def test_ranking_reads_machines_toml_before_the_tags(inv, tmp_path):
     assert v.tier == 3 and v.reasons[-1] == "internal"  # machines.toml wins
     other = DTProject("o", "somethingelse", "1", True, ["team-dev", "exposure-internet"])
     assert rank_finding(other, f, inv.rules, set(), None, m)[0].reasons[-1] == "internet"  # fallback
+
+
+def _rows(block: Any) -> list[list[str]]:
+    return block.rows
+
+
+def _text(block: Any) -> str:
+    return block.text
+
+
+RSS2 = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>PSIRT</title>
+<item><title>FortiOS heap overflow (CVE-2026-1001)</title><link>https://psirt.example/1</link>
+<guid>fg-1</guid>
+<description>&lt;p&gt;A &lt;b&gt;critical&lt;/b&gt; bug in FortiOS.&lt;/p&gt;</description>
+<pubDate>Mon, 23 Nov 2026 10:00:00 +0000</pubDate></item>
+<item><title>Unrelated gadget news</title><link>https://psirt.example/2</link></item>
+</channel></rss>"""
+ATOM_FEED = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>CERT</title>
+<entry><id>urn:cert:7</id><title>OpenSSL advisory</title>
+<link rel="alternate" href="https://cert.example/7"/>
+<summary>Fixes CVE-2026-2002 and GHSA-xxxx-yyyy-zzzz is not one;
+see GHSA-2222-3333-4444.</summary>
+<updated>2026-11-24T08:00:00Z</updated></entry></feed>"""
+RSS1_FEED = b"""<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<item rdf:about="https://exploit.example/9"><title>PoC for CVE-2026-1001</title>
+<link>https://exploit.example/9</link><description>exploit code</description>
+<dc:date>2026-11-25T09:00:00Z</dc:date></item>
+</rdf:RDF>"""
+JSON_FEED = json.dumps(
+    {
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [
+            {
+                "id": "n1",
+                "url": "https://news.example/a",
+                "title": "Attackers exploit FortiOS",
+                "content_text": "Mass exploitation of CVE-2026-1001",
+                "date_published": "2026-11-25T12:00:00Z",
+            },
+            {"id": "n2", "url": "https://news.example/b", "title": "Paperless-ngx 3.6 released"},
+        ],
+    }
+).encode()
+NEWS_TOML = """
+[news.feeds.fortinet]
+url = "https://psirt.example/rss"
+teams = ["network"]
+[news.feeds.cert]
+url = "https://cert.example/atom"
+kind = "cert"
+[news.feeds.exploits]
+url = "https://exploit.example/rdf"
+kind = "exploit"
+[news.feeds.news]
+url = "https://news.example/feed.json"
+kind = "news"
+[news.feeds.off]
+url = "https://off.example/rss"
+enabled = false
+[news.teams.network]
+to = "net@example.org"
+keywords = ["paperless-ngx"]
+"""
+
+
+def _news_routes() -> dict[str, object]:
+    return {
+        "GET psirt.example/rss": lambda m, u, h, b: Response(200, RSS2, {}),
+        "GET cert.example/atom": lambda m, u, h, b: Response(200, ATOM_FEED, {}),
+        "GET exploit.example/rdf": lambda m, u, h, b: Response(200, RSS1_FEED, {}),
+        "GET news.example/feed.json": lambda m, u, h, b: Response(200, JSON_FEED, {}),
+    }
+
+
+def test_news_parses_feeds_and_only_downloads_them_whole(inv, tmp_path):
+    from vulnflow import news
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(NEWS_TOML)
+    m = load_machines(mf, inv.teams)
+    t = FakeTransport(_news_routes())
+    items, errors = news.fetch_feeds(m.news_feeds.values(), transport=t)
+    assert not errors
+    # one GET per enabled feed, nothing else (no per-keyword or per-CVE queries)
+    assert sorted(c[1] for c in t.calls) == sorted(f.url for f in m.news_feeds.values() if f.enabled)
+    by = {i.key: i for i in items}
+    rss = by["fortinet:fg-1"]
+    assert rss.title == "FortiOS heap overflow (CVE-2026-1001)" and rss.ids == {"CVE-2026-1001"}
+    assert rss.summary == "A critical bug in FortiOS." and rss.published == "2026-11-23T10:00:00+00:00"
+    atom = by["cert:urn:cert:7"]
+    assert atom.link == "https://cert.example/7" and atom.ids == {"CVE-2026-2002", "GHSA-2222-3333-4444"}
+    assert by["exploits:https://exploit.example/9"].kind == "exploit"
+    assert by["news:n1"].published == "2026-11-25T12:00:00+00:00"
+    assert "news:n2" in by and "fortinet:https://psirt.example/2" in by
+    # a broken feed is reported, the others still count
+    bad = FakeTransport(
+        {"GET psirt.example/rss": lambda m_, u, h, b: Response(200, b"<rss><channel>", {})}
+    )
+    items2, errors2 = news.fetch_feeds([m.news_feeds["fortinet"]], transport=bad)
+    assert not items2 and errors2[0].startswith("feed fortinet:")
+
+
+def test_news_matching_ranking_and_merge(inv, tmp_path):
+    from vulnflow import news
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(NEWS_TOML + '[subscriptions.sysadm.products]\nopenssl = ["openssl"]\n')
+    m = load_machines(mf, inv.teams)
+    add_subscriptions(inv, m)
+    items, _ = news.fetch_feeds(m.news_feeds.values(), transport=FakeTransport(_news_routes()))
+    findings = [
+        ("network", "host:fw1@1", "fortios", "CVE-2026-1001"),
+        ("dev", "code:app@2", "paperless-ngx", "CVE-2026-9"),
+    ]
+    alerts = [
+        {"team": "sysadm", "cve": "CVE-2026-2002", "notify": "new"},
+        {"team": "dev", "cve": "CVE-2026-1", "notify": ""},
+    ]
+    prof = news.build_profiles(inv, m, findings, alerts)
+    net = prof["network"]
+    assert net.keywords["fortios"] == "fortinet fortios (subscription)"
+    assert net.keywords["paperless-ngx"] == "keyword 'paperless-ngx'"
+    assert "gateway" not in net.keywords and "fortinet" in net.keywords  # STOP word, vendor
+    assert net.open_ids == {"CVE-2026-1001": {"host:fw1@1"}}
+    assert prof["sysadm"].alert_ids == {"CVE-2026-2002"} and not prof["dev"].alert_ids  # log-only
+    assert "paperless-ngx" in prof["dev"].own_keywords
+
+    ms = news.team_matches(items, net, m.news_feeds, {"CVE-2026-1001"})
+    # the PSIRT item, the PoC and the news item share CVE-2026-1001: one entry, three links
+    first = ms[0]
+    assert first.own and first.exploited
+    assert sorted(src for src, _ in first.links) == ["exploits", "fortinet", "news"]
+    assert "CVE-2026-1001 open on 1 of your project" in first.why[0]
+    assert "in CISA KEV: CVE-2026-1001" in first.why and "public exploit or PoC" in first.why
+    titles = [x.item.title for x in ms]
+    assert "Unrelated gadget news" in titles  # the network team's own feed: whole
+    assert "Paperless-ngx 3.6 released" in titles  # its extra keyword
+    assert "OpenSSL advisory" not in titles  # neither its CVE nor its keyword
+    # ranking: own systems first, then exploited, then newest
+    assert [x.urgent for x in ms] == sorted((x.urgent for x in ms), reverse=True)
+    sysadm = [x.item.title for x in news.team_matches(items, prof["sysadm"], m.news_feeds, set())]
+    assert sysadm == ["OpenSSL advisory"]  # alerted CVE and its openssl subscription
+    assert "Unrelated gadget news" not in sysadm  # the network team's feed only goes there
+
+
+def test_news_weekly_daily_seen_and_alert(inv, tmp_path):
+    from datetime import UTC, datetime
+
+    from vulnflow import news
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(NEWS_TOML)
+    m = load_machines(mf, inv.teams)
+    items, _ = news.fetch_feeds(m.news_feeds.values(), transport=FakeTransport(_news_routes()))
+    findings = [("network", "host:fw1@1", "fortios", "CVE-2026-1001")]
+    alerts = [
+        {
+            "team": "network",
+            "cve": "CVE-2026-1001",
+            "notify": "kev",
+            "tier": 1,
+            "tier_name": "P1 Act",
+            "received_at": "2026-11-25T10:00:00+00:00",
+            "title": "FortiOS heap overflow",
+        }
+    ]
+    kev_log = [
+        {
+            "seen_at": "2026-11-25T11:00:00+00:00",
+            "cve": "CVE-2026-1001",
+            "vendor": "Fortinet",
+            "product": "FortiOS",
+            "name": "FortiOS Heap Overflow",
+            "findings": {"network": ["x"]},
+            "follows": [],
+        }
+    ]
+    ledger = [
+        {
+            "op": "ignore",
+            "team": "network",
+            "project_uuid": "p",
+            "component_uuid": "c",
+            "vuln_uuid": "v",
+            "vuln_id": "CVE-2025-5",
+            "component": "fortios",
+            "project": "host:fw1",
+            "comment": "accepted; review by 2026-12-01; reviewed 2026-09-01 via vulnflow",
+        }
+    ]
+    prof = news.build_profiles(inv, m, findings, alerts)
+    now = datetime(2026, 11, 26, 7, tzinfo=UTC)
+    kev = {"CVE-2026-1001"}
+    weekly = news.newsletter(
+        "weekly",
+        inv,
+        m,
+        prof,
+        items,
+        kev,
+        {},
+        alerts=alerts,
+        kev_log=kev_log,
+        ledger=ledger,
+        teams=["network"],
+        now=now,
+    )
+    (letter,) = weekly
+    vf, newsec = letter.sections
+    text = "\n".join(str(b) for b in vf.blocks)
+    assert "P1 Act" in text and "FortiOS Heap Overflow" in text and "2026-12-01" in text
+    assert newsec.title == "News for your team" and len(_rows(newsec.blocks[0])) == 3
+    # daily: only urgent; after it was sent, the same items aren't sent again
+    daily = news.newsletter("daily", inv, m, prof, items, kev, {}, teams=["network"], now=now)
+    (d,) = daily
+    assert (
+        len(_rows(d.sections[0].blocks[0])) == 1
+        and "**your systems**" in _rows(d.sections[0].blocks[0])[0][0]
+    )
+    seen = {"daily": {k: now.isoformat() for k in d.sent_keys}}
+    assert news.newsletter("daily", inv, m, prof, items, kev, seen, teams=["network"], now=now) == []
+    # alert by CVE: the team with the finding; and KEV followers for the vendor
+    kev_index = {
+        "CVE-2026-1001": {
+            "cveID": "CVE-2026-1001",
+            "dateAdded": "2026-11-25",
+            "vendorProject": "Fortinet",
+            "product": "FortiOS",
+            "vulnerabilityName": "FortiOS Heap Overflow",
+        }
+    }
+    letters = news.alert(
+        "cve-2026-1001",
+        inv,
+        m,
+        prof,
+        items,
+        kev_index,
+        findings,
+        followers=lambda v: ["network"] if v == "Fortinet" else [],
+    )
+    assert [x.team for x in letters] == ["network"]
+    intro = letters[0].sections[0].blocks
+    assert "fortios in host:fw1@1" in _text(intro[0]) and "**In CISA KEV** since 2026-11-25" in _text(
+        intro[1]
+    )
+    assert len(_rows(letters[0].sections[1].blocks[0])) == 1  # the three feed items merged
+    # alert by keyword, and --team for a team that isn't concerned
+    kw = news.alert("paperless-ngx", inv, m, prof, items, {}, findings)
+    assert [x.team for x in kw] == ["network"]
+    forced = news.alert("CVE-2026-1001", inv, m, prof, items, {}, findings, teams=["dev"])
+    assert "not found in your data" in _text(forced[0].sections[0].blocks[0])
+
+
+def test_news_config_errors(inv, tmp_path):
+    mf = tmp_path / "m.toml"
+    for bad, msg in (
+        ('[news.feeds.x]\nurl = "ftp://x"\n', "url must be http"),
+        ('[news.feeds.x]\nurl = "https://x"\nkind = "blog"\n', "kind must be one of"),
+        ('[news.feeds.x]\nurl = "https://x"\nteams = ["nope"]\n', "teams"),
+        ('[news.teams.dev]\nto = "dev"\n', "e-mail address"),
+        ('[news.teams.nope]\nto = "a@b"\n', "team 'nope'"),
+        ("[news.other]\nx = 1\n", "unknown keys"),
+    ):
+        mf.write_text(bad)
+        with pytest.raises(SystemExit, match=msg):
+            load_machines(mf, inv.teams)
+
+
+def test_newsletter_cli_mails_per_team_and_dry_run(inv, tmp_path, monkeypatch, capsys):
+    from email import message_from_bytes
+
+    from vulnflow.__main__ import main
+
+    mf = tmp_path / "m.toml"
+    mf.write_text(NEWS_TOML)
+    monkeypatch.setattr("vulnflow.net.urllib_transport", FakeTransport(_news_routes()))
+    for k, v in {
+        "DT_API_KEY": "",
+        "VULNFLOW_ENRICH_KEV": "0",
+        "VULNFLOW_REPORT_TO": "all@example.org",
+    }.items():
+        monkeypatch.setenv(k, v)
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    base = [
+        "--env-file",
+        str(env_file),
+        "--inventory",
+        str(INV),
+        "--data-dir",
+        str(tmp_path),
+        "--machines",
+        str(mf),
+    ]
+    # dry run prints and records nothing
+    assert main([*base, "newsletter", "weekly", "--dry-run"]) == 0
+    assert "vulnflow weekly newsletter for Network" in capsys.readouterr().out
+    assert not (tmp_path / "news-seen.json").exists()
+    mails = tmp_path / "mail"
+    assert main([*base, "newsletter", "weekly", "--mail-dir", str(mails)]) == 0
+    got = {}
+    for f in sorted(mails.glob("*.eml")):
+        msg = message_from_bytes(f.read_bytes())
+        got[msg["To"]] = msg["Subject"]
+    assert got["net@example.org"].startswith("vulnflow weekly newsletter for Network (")
+    # the other teams (no address) share one mail to VULNFLOW_REPORT_TO, if they have news
+    assert set(got) <= {"net@example.org", "all@example.org"}
+    assert (tmp_path / "news-seen.json").exists()
+    assert main([*base, "newsletter", "alert"]) == 2  # alert needs an id
 
 
 def test_set_tags_304_is_checked_by_reading_back():

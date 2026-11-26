@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE, project_label
@@ -226,6 +226,131 @@ def _ranker(inv: Inventory, dt: DependencyTrack, data_dir: Path, machines: Machi
         except Exception as e:
             logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
     return Ranker(inv.rules, kev, VectorCache(dt, data_dir / VECTOR_FILE), machines)
+
+
+def _read_lines(path: Path | None) -> list[str]:
+    if path is None:
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def _newsletter(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
+    """`newsletter weekly|daily|alert <id>` (news.py)."""
+    import socket
+
+    from . import news
+    from . import report as rp
+    from .intel import KevCache
+    from .kevwatch import followers
+    from .patches import open_findings
+
+    if a.mode == "alert" and not a.ident:
+        print("  error newsletter alert needs an id: a CVE, a GHSA id or a keyword", file=sys.stderr)
+        return 2
+    unknown = [t for t in a.team if t not in inv.teams]
+    if unknown:
+        print(f"  error unknown team(s) {unknown}; choose from {sorted(inv.teams)}", file=sys.stderr)
+        return 2
+    machines = load_machines(a.machines, inv.teams)
+    add_subscriptions(inv, machines)
+    errors: list[str] = []
+    items, feed_errors = news.fetch_feeds(machines.news_feeds.values())
+    errors += feed_errors
+    findings: list[tuple[str, str, str, str]] = []
+    dt = _dtrack() if env("DT_API_KEY") else None
+    if dt is not None:
+        for team, p, f in open_findings(inv, dt, None, errors):
+            c, v = f.get("component") or {}, f.get("vulnerability") or {}
+            findings.append(
+                (
+                    team,
+                    project_label(p.name, p.version),
+                    str(c.get("name", "")),
+                    str(v.get("vulnId", "")),
+                )
+            )
+    kev_index: dict[str, dict] = {}
+    if env_flag("VULNFLOW_ENRICH_KEV"):
+        try:
+            kev_index = KevCache(data_dir).index()
+        except Exception as e:
+            errors.append(f"KEV catalog: {e}")
+    alerts = news.jsonl(_read_lines(a.alerts))
+    profiles = news.build_profiles(inv, machines, findings, alerts)
+    now = datetime.now(UTC)
+    if a.mode == "alert":
+        letters = news.alert(
+            a.ident,
+            inv,
+            machines,
+            profiles,
+            items,
+            kev_index,
+            findings,
+            teams=a.team or None,
+            followers=lambda vendor: followers(inv, vendor),
+        )
+        heading = f"vulnflow alert: {a.ident}"
+    else:
+        seen_path = data_dir / news.STATE_FILE
+        seen = news.load_seen(seen_path)
+        letters = news.newsletter(
+            a.mode,
+            inv,
+            machines,
+            profiles,
+            items,
+            set(kev_index),
+            seen,
+            alerts=alerts,
+            kev_log=news.jsonl(_read_lines(a.kev_log)),
+            ledger=news.jsonl(_read_lines(data_dir / "ignored.jsonl")),
+            teams=a.team or None,
+            now=now,
+        )
+        heading = f"vulnflow {a.mode} newsletter"
+        if not a.dry_run:
+            mode_seen = seen.setdefault(a.mode, {})
+            for letter in letters:
+                for k in letter.sent_keys:
+                    mode_seen.setdefault(k, now.isoformat(timespec="seconds"))
+            news.save_seen(seen_path, seen, now)
+    # one message per team with its own address; the others together to VULNFLOW_REPORT_TO
+    fallback = env("VULNFLOW_REPORT_TO")
+    groups: dict[str, list[tuple[str, list[rp.Section]]]] = {}
+    for letter in letters:
+        to = machines.news_teams[letter.team].to if letter.team in machines.news_teams else ""
+        groups.setdefault(to or fallback, []).append((letter.team, letter.sections))
+    host = socket.gethostname().split(".")[0]
+    for n, (to, parts) in enumerate(sorted(groups.items())):
+        names = ", ".join(inv.teams[t].display_name for t, _ in parts)
+        sections = [
+            rp.Section(
+                f"{inv.teams[t].display_name}: {s.title}" if len(parts) > 1 else s.title,
+                s.blocks,
+                s.notable,
+            )
+            for t, ss in parts
+            for s in ss
+        ]
+        title = f"{heading} for {names}"
+        if a.mail_dir is not None and to:
+            a.mail_dir.mkdir(parents=True, exist_ok=True)
+            eml = rp.mime_message(
+                a.mode, sections, to, host, now, heading=title, subject_line=f"{title} ({host})"
+            )
+            (a.mail_dir / f"{n:02d}.eml").write_text(eml.as_string(), encoding="utf-8")
+            print(f"  mail  {title} -> {to}", file=sys.stderr)
+        else:
+            print(rp.render_markdown(a.mode, sections, now, heading=title))
+    if not letters:
+        print(f"  ok    newsletter {a.mode}: nothing to send", file=sys.stderr)
+    for msg in errors:
+        print(f"  error newsletter: {msg}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 def _priorities(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
@@ -757,6 +882,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
     )
+    nl = sub.add_parser(
+        "newsletter",
+        help="per-team OSINT newsletter from [news.*] feeds and vulnflow's data: weekly, daily "
+        "(urgent only) or alert <CVE|GHSA|keyword> (now, to the teams it concerns)",
+    )
+    nl.add_argument("mode", choices=("weekly", "daily", "alert"))
+    nl.add_argument("ident", nargs="?", default="", help="alert: a CVE, GHSA id or keyword")
+    nl.add_argument("--team", action="append", default=[], help="only (alert: also) this team")
+    nl.add_argument("--dry-run", action="store_true", help="print; mark nothing as sent")
+    nl.add_argument("--alerts", type=Path, default=None, metavar="FILE", help="alerts.jsonl")
+    nl.add_argument("--kev-log", type=Path, default=None, metavar="FILE", help="kev-new.jsonl")
+    nl.add_argument(
+        "--mail-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="write one .eml per recipient here (poc.sh sends them); else print Markdown",
+    )
     pz = sub.add_parser(
         "priorities",
         help="open Dependency-Track findings ranked P1-P4 by threat and asset context "
@@ -1186,6 +1329,9 @@ def main(argv: list[str] | None = None) -> int:
             if not a.loop:
                 return 1 if rep.errors or kev_rc or gh_rc else 0
             time.sleep(a.loop)
+
+    if a.cmd == "newsletter":
+        return _newsletter(a, inv, data_dir)
 
     if a.cmd == "priorities":
         return _priorities(a, inv, data_dir)

@@ -24,6 +24,11 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
 - Email reports: `vulnflow report daily|weekly` (`vulnflow/report.py`) builds the digest;
   `./poc.sh report` mails it with the host's `sendmail` (no SMTP code or credentials in
   vulnflow) and `./poc.sh schedule` installs the systemd units in `deploy/timers/`.
+- Newsletters: `vulnflow newsletter weekly|daily|alert <id>` (`vulnflow/news.py`): feeds from
+  `[news.*]` in `machines.toml`, matched per team. Feeds are always downloaded whole and
+  filtered locally; never add a request that carries a team's keywords, products or CVEs
+  (it would show their stack). Feed XML goes through `xml.etree` (expat's limits); keep it
+  stdlib-only and without generated summaries.
 - `prune` (`vulnflow/prune.py`, run by every `dt2dojo` round) carries analyses to new project
   versions and deactivates stale ones with its own team `vulnflow-maintenance`
   (`DT_MAINTENANCE_API_KEY`). The glue team `vulnflow` stays read-only: don't give it

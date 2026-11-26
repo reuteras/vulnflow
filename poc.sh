@@ -29,7 +29,9 @@
 #                     version pinned in the repo, or at V (--now: V is not the reviewed pin)
 #   tui               terminal UI: findings (filter, details, mark), alerts, hosts, updates
 #   report K [--always]  K = daily|weekly digest, mailed to VULNFLOW_REPORT_TO with sendmail
-#   schedule A        A = install|remove|status: systemd timers for the daily/weekly reports
+#   newsletter M      M = weekly|daily|alert <id>: per-team OSINT newsletter ([news.*] in
+#                     machines.toml), mailed with sendmail
+#   schedule A        A = install|remove|status: systemd timers for the reports and newsletters
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -900,8 +902,10 @@ cmd_report() {
 
 # systemd timers for the reports (deploy/timers/; @ROOT@ and @USER@ filled in on install).
 # The service runs as the user calling this, who needs docker access like for ./poc.sh.
-REPORT_UNITS=(vulnflow-report@.service vulnflow-report-daily.timer vulnflow-report-weekly.timer)
-REPORT_TIMERS=(vulnflow-report-daily.timer vulnflow-report-weekly.timer)
+REPORT_UNITS=(vulnflow-report@.service vulnflow-report-daily.timer vulnflow-report-weekly.timer
+  vulnflow-newsletter@.service vulnflow-newsletter-daily.timer vulnflow-newsletter-weekly.timer)
+REPORT_TIMERS=(vulnflow-report-daily.timer vulnflow-report-weekly.timer
+  vulnflow-newsletter-daily.timer vulnflow-newsletter-weekly.timer)
 cmd_schedule() {
   local u
   command -v systemctl >/dev/null || die "systemctl not found: the timers need systemd"
@@ -926,9 +930,33 @@ cmd_schedule() {
       sudo systemctl daemon-reload
       log "Report timers removed"
       ;;
-    status) systemctl list-timers --all 'vulnflow-report-*' ;;
+    status) systemctl list-timers --all 'vulnflow-report-*' 'vulnflow-newsletter-*' ;;
     *) die "usage: ./poc.sh schedule install|remove|status" ;;
   esac
+}
+
+# Per-team OSINT newsletter (vulnflow/news.py): weekly, daily (urgent only) or alert <id>
+# (now, to the teams it concerns; never scheduled). Feeds and team addresses are in
+# machines.toml [news.*]; a team without an address goes into one mail to
+# VULNFLOW_REPORT_TO. Each message is handed to the host's sendmail.
+cmd_newsletter() {
+  local mode="${1:-}" alerts kevlog dir rc=0 sendmail f args=()
+  [[ "$mode" == weekly || "$mode" == daily || "$mode" == alert ]] ||
+    die "usage: ./poc.sh newsletter weekly|daily|alert <CVE|GHSA|keyword> [--dry-run] [--team T]"
+  shift
+  load_env
+  alerts="$(fetch_alerts)"
+  kevlog="$(fetch_data_file kev-new.jsonl)"
+  sendmail="$(find_sendmail)"
+  dir="$(mktemp -d)"
+  [[ -n "$sendmail" ]] && args=(--mail-dir "$dir")
+  vulnflow newsletter "$mode" "$@" --alerts "$alerts" --kev-log "$kevlog" ${args[@]+"${args[@]}"} || rc=$?
+  for f in "$dir"/*.eml; do
+    [[ -e "$f" ]] || continue
+    "$sendmail" -t -oi <"$f" || rc=$?
+  done
+  rm -rf "$alerts" "$kevlog" "$dir"
+  return "$rc"
 }
 
 # Upgrade one stack: database dump first, then the same steps as setup, which are safe to
@@ -1044,6 +1072,10 @@ case "${1:-}" in
   report) cmd_report "${2:-}" "${3:-}" ;;
   tui) cmd_tui ;;
   schedule) cmd_schedule "${2:-}" ;;
+  newsletter)
+    shift
+    cmd_newsletter "$@"
+    ;;
   upgrade)
     shift
     cmd_upgrade "$@"
@@ -1052,7 +1084,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,32p' "$0"
+    sed -n '2,34p' "$0"
     exit 1
     ;;
 esac

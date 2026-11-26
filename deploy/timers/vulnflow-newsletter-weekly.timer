@@ -1,0 +1,13 @@
+# Weekly newsletter: everything new that matches each team, plus its alerts, KEV hits and
+# reviews due. `./poc.sh schedule install`.
+[Unit]
+Description=vulnflow weekly newsletter
+
+[Timer]
+OnCalendar=Mon *-*-* 07:15:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=vulnflow-newsletter@weekly.service
+
+[Install]
+WantedBy=timers.target

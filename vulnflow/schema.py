@@ -21,6 +21,7 @@ from .config import (
     EXPOSURES,
     INPUTS,
     MACHINE_KINDS,
+    NEWS_KINDS,
     SCANS,
     Inventory,
 )
@@ -187,6 +188,56 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {"type": "string", "pattern": _CPE_PART_RE.pattern},
+                            },
+                        },
+                    },
+                },
+            },
+            "news": {
+                "type": "object",
+                "description": "Per-team OSINT newsletter (`vulnflow newsletter`): feeds and "
+                "where each team's newsletter goes.",
+                "additionalProperties": False,
+                "properties": {
+                    "feeds": {
+                        **name,
+                        "description": "RSS, Atom or JSON Feed URLs, downloaded whole and "
+                        "filtered locally (never searched per keyword).",
+                        "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["url"],
+                            "properties": {
+                                "url": _s("The feed URL (http or https).", pattern="^https?://"),
+                                "kind": {
+                                    "type": "string",
+                                    "enum": list(NEWS_KINDS),
+                                    "description": "advisory, cert, exploit (items count as a "
+                                    "public exploit) or news.",
+                                },
+                                "teams": {
+                                    "type": "array",
+                                    "items": {"type": "string", "enum": teams},
+                                    "description": "Send every item to these teams; empty: "
+                                    "match each item against every team.",
+                                },
+                                "enabled": {"type": "boolean"},
+                            },
+                        },
+                    },
+                    "teams": {
+                        "type": "object",
+                        "propertyNames": {"enum": teams},
+                        "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "to": _s("E-mail address for this team's newsletter."),
+                                "keywords": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Extra words to match in feed items.",
+                                },
                             },
                         },
                     },

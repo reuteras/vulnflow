@@ -1,0 +1,14 @@
+# vulnflow per-team OSINT newsletter (instance = daily or weekly), mailed with the host's
+# sendmail. Installed by `./poc.sh schedule install`, which fills in @ROOT@ and @USER@;
+# started by vulnflow-newsletter-daily.timer and vulnflow-newsletter-weekly.timer.
+[Unit]
+Description=vulnflow %i newsletter
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@ROOT@
+ExecStart=@ROOT@/poc.sh newsletter %i
+# No NoNewPrivileges: postfix's sendmail hands the mail to postdrop, which is setgid.

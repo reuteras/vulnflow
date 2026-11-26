@@ -443,9 +443,11 @@ def _md_cell(s: str) -> str:
     return s.replace("|", "\\|") or " "
 
 
-def render_markdown(kind: str, sections: list[Section], now: datetime | None = None) -> str:
+def render_markdown(
+    kind: str, sections: list[Section], now: datetime | None = None, heading: str = ""
+) -> str:
     now = now or datetime.now(UTC)
-    out = [f"# {_title(kind, now)}", ""]
+    out = [f"# {heading or _title(kind, now)}", ""]
     for s in sections:
         out += [f"## {s.title}{' (ERROR)' if s.error else ''}", ""]
         for b in s.blocks:
@@ -474,16 +476,19 @@ def _inline(s: str) -> str:
     return _BOLD.sub(r"<strong>\1</strong>", t)
 
 
-def render_html(kind: str, sections: list[Section], now: datetime | None = None) -> str:
+def render_html(
+    kind: str, sections: list[Section], now: datetime | None = None, heading: str = ""
+) -> str:
     """The same report as HTML for mail clients: inline styles only (many clients drop
     <style>), no images, no links out."""
     now = now or datetime.now(UTC)
+    title = heading or _title(kind, now)
     out = [
         '<!doctype html><html><head><meta charset="utf-8">',
-        f"<title>{html.escape(_title(kind, now))}</title></head>",
+        f"<title>{html.escape(title)}</title></head>",
         '<body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;'
         'font-size:14px;line-height:1.4;color:#222">',
-        f'<h1 style="font-size:20px">{html.escape(_title(kind, now))}</h1>',
+        f'<h1 style="font-size:20px">{html.escape(title)}</h1>',
     ]
     for s in sections:
         color = "#b00020" if s.error else "#222"
@@ -518,14 +523,20 @@ def subject(kind: str, host: str, sections: list[Section]) -> str:
 
 
 def mime_message(
-    kind: str, sections: list[Section], to: str, host: str, now: datetime | None = None
+    kind: str,
+    sections: list[Section],
+    to: str,
+    host: str,
+    now: datetime | None = None,
+    heading: str = "",
+    subject_line: str = "",
 ) -> EmailMessage:
     now = now or datetime.now(UTC)
     msg = EmailMessage()
     msg["To"] = to
-    msg["Subject"] = subject(kind, host, sections)
+    msg["Subject"] = subject_line or subject(kind, host, sections)
     msg["Date"] = formatdate(now.timestamp(), localtime=True)
     msg["Message-ID"] = make_msgid("vulnflow")
-    msg.set_content(render_markdown(kind, sections, now))
-    msg.add_alternative(render_html(kind, sections, now), subtype="html")
+    msg.set_content(render_markdown(kind, sections, now, heading))
+    msg.add_alternative(render_html(kind, sections, now, heading), subtype="html")
     return msg
