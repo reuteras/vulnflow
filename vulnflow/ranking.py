@@ -2,9 +2,9 @@
 
 Each open finding gets a tier from priority.assess with
 
-- the threat: KEV (the cached CISA catalog), EPSS and CVSS v3 score as Dependency-Track
-  reports them on the finding (DT keeps its own EPSS copy; no CIRCL lookups here: one
-  request per CVE for thousands of findings);
+- the threat: KEV (the cached CISA catalog, plus VulnCheck KEV with a token), EPSS and
+  CVSS v3 score as Dependency-Track reports them on the finding (DT keeps its own EPSS
+  copy; no CIRCL lookups here: one request per CVE for thousands of findings);
 - the asset context from machines.toml (as `context` reads it), or from the project's tags
   (exposure-*, input-*, crit-*) when machines.toml isn't given or has nothing for the
   project, and `kind-laptop` for the laptop rule;
@@ -28,7 +28,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,7 @@ from .config import (
     PriorityRules,
 )
 from .duplicates import vulnerability_ids
-from .intel import Signals
+from .intel import Signals, kev_source
 from .patches import open_findings
 from .priority import Verdict, assess
 
@@ -156,11 +156,12 @@ def rank_finding(
     p: DTProject,
     f: dict[str, Any],
     rules: PriorityRules,
-    kev: set[str],
+    kev: Collection[str],
     vectors: VectorCache | None,
     machines: Machines | None = None,
 ) -> tuple[Verdict, float | None, float | None]:
-    """(verdict, CVSS v3 score, EPSS) for one finding of project p."""
+    """(verdict, CVSS v3 score, EPSS) for one finding of project p. `kev` is the KEV index
+    (CVE id -> entry; the reason then names its catalog) or a set of ids."""
     v = f.get("vulnerability") or {}
     vid = str(v.get("vulnId", ""))
     cvss = _num(v.get("cvssV3BaseScore"))
@@ -170,7 +171,11 @@ def rank_finding(
     if cvss is None and severity in SEVERITY_SCORES:
         cvss, label = SEVERITY_SCORES[severity], f"severity {severity} (no CVSS score)"
     sig = Signals(
-        cve=vid, kev=vid.upper() in kev, epss=epss, epss_percentile=_num(v.get("epssPercentile"))
+        cve=vid,
+        kev=vid.upper() in kev,
+        kev_source=kev_source(kev, vid),
+        epss=epss,
+        epss_percentile=_num(v.get("epssPercentile")),
     )
     ctx, laptop = context_from_tags(p.tags)
     if machines is not None:
@@ -232,11 +237,11 @@ def to_ranked(
     verdict: Verdict,
     cvss: float | None,
     epss: float | None,
-    kev: dict[str, Any] | set[str],
+    kev: Collection[str],
 ) -> Ranked:
     c, v = f.get("component") or {}, f.get("vulnerability") or {}
     vid = str(v.get("vulnId", ""))
-    entry = kev.get(vid.upper()) if isinstance(kev, dict) else None
+    entry = kev.get(vid.upper()) if isinstance(kev, Mapping) else None
     return Ranked(
         team=team,
         project=p.name,
@@ -262,7 +267,7 @@ def to_ranked(
 def rank_findings(
     inv: Inventory,
     dt: DependencyTrack,
-    kev: set[str],
+    kev: Collection[str],
     vectors: VectorCache | None,
     errors: list[str],
     team: str | None = None,
@@ -296,7 +301,7 @@ class Ranker:
     record: list[Ranked] | None = None
 
     def rank(self, p: DTProject, f: dict[str, Any], team: str = "") -> Verdict:
-        verdict, cvss, epss = rank_finding(p, f, self.rules, set(self.kev), self.vectors, self.machines)
+        verdict, cvss, epss = rank_finding(p, f, self.rules, self.kev, self.vectors, self.machines)
         suppressed = (f.get("analysis") or {}).get("isSuppressed")
         if self.record is not None and team and not suppressed:
             self.record.append(to_ranked(team, p, f, verdict, cvss, epss, self.kev))

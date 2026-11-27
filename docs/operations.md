@@ -51,17 +51,17 @@ project under the team's product type, and closes the ones that are gone.
 
 **New in KEV: the catalog itself.** OpenCVE only reports a KEV addition for a product a team
 follows, and only when its knowledge base records it (up to a day and a half later). So
-every `dt2dojo` round (every 30 minutes) also runs `kev-watch`: it compares CISA's catalog
-with the entries it has seen (`kev-seen.json` in the data directory) and, for each new one,
+every `dt2dojo` round (every 30 minutes) also runs `kev-watch`: it compares the KEV catalog
+(CISA's, plus VulnCheck KEV when `VULNCHECK_API_TOKEN` is set, see below) with the entries it has seen (`kev-seen.json` in the data directory) and, for each new one,
 looks for open Dependency-Track findings with that CVE and for teams whose OpenCVE
 subscriptions name the vendor. Entries that hit something go to chat
 (`VULNFLOW_CHAT_WEBHOOK`), mentioning those teams:
 
 ```text
-@dev @network New in CISA KEV (2):
-- CVE-2026-0010 OpenSSL OpenSSL: OpenSSL bug (added 2026-11-25)
+@dev @network New in KEV (2):
+- CVE-2026-0010 OpenSSL OpenSSL: OpenSSL bug (CISA KEV, added 2026-11-25)
   open finding, team dev: code:web@2: openssl 3.0.1; container:app@1.0: openssl 3.0.1
-- CVE-2026-0011 Citrix NetScaler: NetScaler bug (added 2026-11-25, ransomware use)
+- CVE-2026-0011 Citrix NetScaler: NetScaler bug (VulnCheck KEV, added 2026-11-25, ransomware use)
   vendor followed by: network
 ```
 
@@ -71,6 +71,20 @@ counts as seen once its messages were delivered, so a chat outage is retried.
 `python3 -m vulnflow kev-watch --dry-run` shows what is new without posting;
 `dt2dojo --no-kev-watch` turns it off. The vendor match is by name only (KEV's "Palo Alto
 Networks" against NVD's `paloaltonetworks`), not by product or version.
+
+**VulnCheck KEV (optional).** With a free community token from VulnCheck in `.env` as
+`VULNCHECK_API_TOKEN`, vulnflow adds VulnCheck's Known Exploited Vulnerabilities catalog to
+CISA's: in November 2026 it listed 6164 CVEs against CISA's roughly 1800, often because of
+an exploitation report or a public exploit before CISA lists them. Its CVEs count exactly
+like CISA's: the KEV row of the tier matrix (P1/P2, so also paging), `known_exploited` in
+DefectDojo, the reports and newsletters, and `[triage.*]` rules skip them unless
+`allow_kev`. Expect more P1/P2 findings once it is on. Every place that names the catalog
+says "CISA KEV" or "VulnCheck KEV" (CISA when both list it), as VulnCheck's licence asks
+for attribution. The whole index is downloaded every 6 hours into
+`data/vulncheck-kev.json` (5 requests); if VulnCheck is down the last copy is used, and
+without one CISA's catalog alone. The first `kev-watch` run with a token only records
+VulnCheck's entries, as the very first run does for CISA's, so chat doesn't get thousands of
+messages. A CVE is posted once, whichever catalog lists it first.
 
 When OpenCVE does report the addition (its event `metrics` with `added.kev`), the receiver
 counts the CVE as KEV even if its own copy of the catalog, cached for 6 hours, doesn't have

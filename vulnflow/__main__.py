@@ -26,7 +26,7 @@ from .config import (
     load_inventory,
     load_machines,
 )
-from .intel import Enricher
+from .intel import Enricher, KevCache, VulnCheckKev
 from .jobs import dt_to_dojo, sync_inventory
 from .priority import assess
 from .ranking import Ranked, Ranker
@@ -39,7 +39,15 @@ def _enricher(data_dir: Path) -> Enricher:
         use_epss=env_flag("VULNFLOW_ENRICH_EPSS"),
         use_circl=env_flag("VULNFLOW_ENRICH_CIRCL"),
         circl_url=env("CIRCL_URL", "https://vulnerability.circl.lu"),
+        vulncheck_token=env("VULNCHECK_API_TOKEN"),
     )
+
+
+def _kev_cache(data_dir: Path, ttl_seconds: int = 6 * 3600) -> KevCache:
+    """CISA KEV, plus VulnCheck KEV when VULNCHECK_API_TOKEN is set (intel.py)."""
+    token = env("VULNCHECK_API_TOKEN")
+    vulncheck = VulnCheckKev(data_dir, token) if token.strip() else None
+    return KevCache(data_dir, ttl_seconds=ttl_seconds, vulncheck=vulncheck)
 
 
 def _opencve() -> OpenCVE | None:
@@ -126,8 +134,7 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
 
 
 def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_run: bool) -> int:
-    """`kev-watch` (and every dt2dojo round): new CISA KEV entries -> chat, see kevwatch.py."""
-    from .intel import KevCache
+    """`kev-watch` (and every dt2dojo round): new KEV entries -> chat, see kevwatch.py."""
     from .kevwatch import STATE_FILE, Finding, watch
     from .patches import open_findings
     from .receiver import chat_sender
@@ -136,7 +143,7 @@ def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_r
         print("  skip  kev-watch (VULNFLOW_ENRICH_KEV=0)")
         return 0
     try:
-        index = KevCache(data_dir, ttl_seconds=3600).index()
+        index = _kev_cache(data_dir, ttl_seconds=3600).index()
     except Exception as e:
         print(f"  error kev-watch: KEV catalog unavailable: {e}", file=sys.stderr)
         return 1
@@ -166,11 +173,14 @@ def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_r
         dry_run=dry_run,
     )
     if res.baseline:
-        print(f"  ok    kev-watch: first run, {res.baseline} KEV entries recorded, nothing posted")
+        print(
+            f"  ok    kev-watch: first run, {res.baseline} KEV entries recorded, nothing "
+            f"posted ({', '.join(res.baseline_sources)})"
+        )
     for h in res.new:
-        print(f"  new   {h.cve} {h.vendor} {h.product} -> {h.where()}")
+        print(f"  new   {h.cve} {h.vendor} {h.product} ({h.source} KEV) -> {h.where()}")
     if not res.baseline and not res.new:
-        print("  ok    kev-watch: nothing new in CISA KEV")
+        print("  ok    kev-watch: nothing new in KEV")
     for msg in res.errors:
         print(f"  error kev-watch: {msg}", file=sys.stderr)
     return 1 if res.errors else 0
@@ -300,31 +310,23 @@ def _dt_ui_url() -> str:
     return urlunsplit((u.scheme, f"{host}:{env('DT_UI_PORT', '8181') or '8181'}", "", "", ""))
 
 
-def _kev_ids(data_dir: Path) -> set[str]:
-    """The cached CISA KEV catalog's CVE ids (empty when off or unavailable)."""
-    from .intel import KevCache
-
+def _kev_index(data_dir: Path) -> dict[str, dict]:
+    """The cached KEV catalog (CISA, plus VulnCheck with a token): CVE id -> entry; empty
+    when off or unavailable."""
     if not env_flag("VULNFLOW_ENRICH_KEV"):
-        return set()
+        return {}
     try:
-        return set(KevCache(data_dir).index())
+        return _kev_cache(data_dir).index()
     except Exception as e:
         logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
-        return set()
+        return {}
 
 
 def _ranker(inv: Inventory, dt: DependencyTrack, data_dir: Path, machines: Machines) -> Ranker:
     """Everything ranking needs, for dt2dojo's tiers in DefectDojo (dojo_tiers.py)."""
-    from .intel import KevCache
     from .ranking import VECTOR_FILE, VectorCache
 
-    kev: dict[str, dict] = {}
-    if env_flag("VULNFLOW_ENRICH_KEV"):
-        try:
-            kev = KevCache(data_dir).index()
-        except Exception as e:
-            logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
-    return Ranker(inv.rules, kev, VectorCache(dt, data_dir / VECTOR_FILE), machines)
+    return Ranker(inv.rules, _kev_index(data_dir), VectorCache(dt, data_dir / VECTOR_FILE), machines)
 
 
 def _read_lines(path: Path | None) -> list[str]:
@@ -342,7 +344,6 @@ def _newsletter(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
 
     from . import news
     from . import report as rp
-    from .intel import KevCache
     from .kevwatch import followers
     from .patches import open_findings
 
@@ -374,7 +375,7 @@ def _newsletter(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
     kev_index: dict[str, dict] = {}
     if env_flag("VULNFLOW_ENRICH_KEV"):
         try:
-            kev_index = KevCache(data_dir).index()
+            kev_index = _kev_cache(data_dir).index()
         except Exception as e:
             errors.append(f"KEV catalog: {e}")
     alerts = news.jsonl(_read_lines(a.alerts))
@@ -402,7 +403,7 @@ def _newsletter(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
             machines,
             profiles,
             items,
-            set(kev_index),
+            kev_index,
             seen,
             alerts=alerts,
             kev_log=news.jsonl(_read_lines(a.kev_log)),
@@ -467,7 +468,7 @@ def _priorities(a: argparse.Namespace, inv: Inventory, data_dir: Path) -> int:
     rows = rank_findings(
         inv,
         dt,
-        _kev_ids(data_dir),
+        _kev_index(data_dir),
         VectorCache(dt, data_dir / VECTOR_FILE),
         errors,
         a.team,
@@ -801,7 +802,6 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
     `ignore` when DT_ADMIN_PASSWORD is set (see vulnflow/tui.py)."""
     from . import tui
     from .bootstrap import dt_admin_http
-    from .intel import KevCache
     from .machines import last_pushes
     from .upstreams import check
     from .upstreams import report as updates_report
@@ -811,12 +811,7 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
         return 2
     dt_url = env("DT_URL", "http://localhost:8180")
     dt = DependencyTrack(dt_url, env("DT_API_KEY", required=True))
-    kev: set[str] = set()
-    if env_flag("VULNFLOW_ENRICH_KEV"):
-        try:
-            kev = set(KevCache(Path(a.data_dir)).index())
-        except Exception as e:
-            logging.getLogger(__name__).warning("KEV list unavailable: %s", e)
+    kev = _kev_index(Path(a.data_dir))
     machines = load_machines(a.machines, inv.teams)
 
     from .ranking import VECTOR_FILE, VectorCache
@@ -920,7 +915,7 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         except FileNotFoundError:
             text = ""
         except OSError as e:
-            sections.append(rp.error_section("New in CISA KEV", f"cannot read {a.kev_log}: {e}"))
+            sections.append(rp.error_section("New in KEV", f"cannot read {a.kev_log}: {e}"))
             text = None
         if text is not None:
             sec, newest = rp.kev_section(text.splitlines(), str(mine.get("kev_since", "")))
@@ -938,7 +933,7 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
         from .ranking import VECTOR_FILE, VectorCache
 
         errors: list[str] = []
-        kev = _kev_ids(Path(a.data_dir))
+        kev = _kev_index(Path(a.data_dir))
         vectors = VectorCache(dt, Path(a.data_dir) / VECTOR_FILE)
         current = rp.collect_findings(
             inv, dt, errors, kev, vectors, load_machines(a.machines, inv.teams)
@@ -1039,7 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument(
         "--no-kev-watch",
         action="store_true",
-        help="skip `kev-watch` at the end of each round (new CISA KEV entries to chat)",
+        help="skip `kev-watch` at the end of each round (new KEV entries to chat)",
     )
     d.add_argument(
         "--no-finding-watch",
@@ -1093,7 +1088,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     kw = sub.add_parser(
         "kev-watch",
-        help="post new CISA KEV entries to chat with the findings and teams they hit "
+        help="post new KEV entries (CISA; VulnCheck with a token) to chat with the findings and teams "
+        "they hit "
         "(dt2dojo runs this every round; the first run only records the catalog)",
     )
     kw.add_argument("--dry-run", action="store_true", help="show what is new; post and record nothing")
@@ -1619,7 +1615,7 @@ def main(argv: list[str] | None = None) -> int:
         ranked = rank_findings(
             inv,
             dt,
-            _kev_ids(data_dir),
+            _kev_index(data_dir),
             VectorCache(dt, data_dir / VECTOR_FILE),
             errors,
             machines=fw_machines,
@@ -1836,7 +1832,14 @@ def main(argv: list[str] | None = None) -> int:
         if not rules:
             print(f"  no [triage.*] rules in {a.machines}", file=sys.stderr)
             return 0
-        rr = apply_rules(inv, maint, rules, apply=a.apply, ledger=data_dir / "ignored.jsonl")
+        rr = apply_rules(
+            inv,
+            maint,
+            rules,
+            apply=a.apply,
+            ledger=data_dir / "ignored.jsonl",
+            kev=_kev_index(data_dir),
+        )
         for line in rr.written:
             print(f"  {'write' if a.apply else 'would'}  {line}")
         for line in rr.kept:

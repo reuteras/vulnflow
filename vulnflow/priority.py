@@ -73,7 +73,7 @@ def threat(
     name = cvss_label or f"CVSS {cvss}"
     reasons: list[str] = []
     if sig.kev:
-        reasons.append("in CISA KEV" + (" (ransomware use)" if sig.kev_ransomware else ""))
+        reasons.append(f"in {sig.kev_source} KEV" + (" (ransomware use)" if sig.kev_ransomware else ""))
     if sig.exploited_sightings:
         reasons.append(f"{sig.exploited_sightings} 'exploited' sighting(s) (CIRCL)")
     if reasons:

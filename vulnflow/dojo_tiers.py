@@ -5,8 +5,8 @@ ranking.py) and updates the DefectDojo findings of that test through the API:
 
 - tag `tier-p1` .. `tier-p4` (the previous tier tag replaced, other tags kept; the
   re-import only adds tags, so the tag survives the next round);
-- `known_exploited`, `ransomware_used`, `kev_date` from the CISA KEV catalog (DefectDojo's
-  own Dependency-Track parser already copies EPSS);
+- `known_exploited`, `ransomware_used`, `kev_date` from the KEV catalog (CISA, plus
+  VulnCheck with a token; DefectDojo's own Dependency-Track parser already copies EPSS);
 - `planned_remediation_date`: the finding's date plus `[priority] sla_days` for its tier
   (P1 7, P2 30, P3 90 days, P4 none by default). Only a date vulnflow set is changed: an
   empty one, or one that equals what the previous tier tag gave. A date someone set by

@@ -493,7 +493,7 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     # first run: record, post nothing, don't ask DT
     res = kevwatch.watch(inv, index, state, findings, team.append, soc.append)
     assert res.baseline == 1 and not res.new and not team and not soc and not asked
-    assert kevwatch.load_seen(state) == {"CVE-2020-0001"}
+    assert kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
 
     index |= {
         "CVE-2026-0010": _kev_entry("CVE-2026-0010", "OpenSSL", "OpenSSL", "2026-11-25"),
@@ -507,7 +507,7 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     # dry run: shows, posts and records nothing
     res = kevwatch.watch(inv, index, state, findings, team.append, soc.append, dry_run=True)
     assert [h.cve for h in res.new] == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]
-    assert not team and kevwatch.load_seen(state) == {"CVE-2020-0001"}
+    assert not team and kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
 
     # a failed delivery keeps them unseen, so the next run retries
     def broken(text):
@@ -515,22 +515,25 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
 
     res = kevwatch.watch(inv, index, state, findings, broken, soc.append)
     assert res.errors == ["chat delivery failed: chat down"] and len(soc) == 1
-    assert kevwatch.load_seen(state) == {"CVE-2020-0001"}
+    assert kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
     soc.clear()
     res = kevwatch.watch(
         inv, index, state, findings, team.append, soc.append, opencve_url="https://o.example"
     )
-    assert not res.errors and kevwatch.load_seen(state) == set(index)
+    assert not res.errors and kevwatch.load_seen(state)[0] == set(index)
     logged = [json.loads(x)["cve"] for x in (tmp_path / kevwatch.LOG_FILE).read_text().splitlines()]
     assert logged == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]  # once, after delivery
     (msg,) = team
-    assert msg.startswith("@dev @network New in CISA KEV (2):")
+    assert msg.startswith("@dev @network New in KEV (2):")
     assert "CVE-2026-0012" not in msg  # matches nothing of ours: SOC only
     assert "open finding, team dev: code:web@2: openssl 3.0.1; container:app@1.0: openssl 3.0.1" in msg
-    assert "CVE-2026-0011 Citrix NetScaler: NetScaler bug (added 2026-11-25, ransomware use)" in msg
+    assert (
+        "CVE-2026-0011 Citrix NetScaler: NetScaler bug (CISA KEV, added 2026-11-25, ransomware use)"
+        in msg
+    )
     assert "vendor followed by: network" in msg and "https://o.example/cve/CVE-2026-0010" in msg
     (s,) = soc
-    assert "CVE-2026-0012 Acme Widget: Widget bug (added 2026-11-24) -> nothing of ours" in s
+    assert "CVE-2026-0012 Acme Widget: Widget bug (CISA KEV, added 2026-11-24) -> nothing of ours" in s
     assert "CVE-2026-0010" in s and "findings in dev" in s
     # nothing new: no message, DT not asked again
     asked.clear()
@@ -571,7 +574,7 @@ def test_kev_watch_matches_machines_toml_subscriptions(tmp_path, monkeypatch, ca
     )
     assert main(args) == 0
     out = capsys.readouterr().out
-    assert "new   CVE-2026-0020 Veeam Backup & Replication -> dev follows" in out
+    assert "new   CVE-2026-0020 Veeam Backup & Replication (CISA KEV) -> dev follows" in out
 
 
 def test_kev_watch_cli_posts_to_both_webhooks(inv, tmp_path, monkeypatch, capsys):
@@ -609,9 +612,201 @@ def test_kev_watch_cli_posts_to_both_webhooks(inv, tmp_path, monkeypatch, capsys
     catalog["vulnerabilities"].append(_kev_entry("CVE-2026-0011", "Citrix", "NetScaler", "2026-11-25"))
     (tmp_path / "kev.json").unlink()  # the cache would hide the new catalog for an hour
     assert main([*args, "kev-watch"]) == 0
-    assert "new   CVE-2026-0011 Citrix NetScaler -> network follows" in capsys.readouterr().out
+    assert (
+        "new   CVE-2026-0011 Citrix NetScaler (CISA KEV) -> network follows" in capsys.readouterr().out
+    )
     assert [u.rsplit("/", 1)[1] for u, _ in posted] == ["team", "soc"]
-    assert posted[0][1].startswith("@network New in CISA KEV (1):")
+    assert posted[0][1].startswith("@network New in KEV (1):")
+
+
+def _vulncheck_record(cve: str, vendor: str, product: str, added: str, **extra: Any) -> dict:
+    """One record as api.vulncheck.com/v3/index/vulncheck-kev returned it (2026-11-27)."""
+    return {
+        "vendorProject": vendor,
+        "product": product,
+        "shortDescription": f"{product} lets anyone in.",
+        "vulnerabilityName": f"{vendor} {product} Improper Input Validation",
+        "required_action": "Apply remediations or mitigations per vendor instructions.",
+        "knownRansomwareCampaignUse": "Unknown",
+        "cve": [cve],
+        "cwes": [],
+        "vulncheck_xdb": [],
+        "vulncheck_reported_exploitation": [{"url": "https://example.org/x", "date_added": added}],
+        "reported_exploited_by_vulncheck_canaries": False,
+        "date_added": added,
+        "updated_at": added,
+        **extra,
+    }
+
+
+def vulncheck_routes(token: str, pages: list[list[dict]]) -> tuple[dict[str, object], list[str]]:
+    """A fake VulnCheck KEV index: cursor paging as the live API does it (the last page is
+    empty and has no next_cursor). Returns the routes and the queries asked."""
+    asked: list[str] = []
+
+    def route(m, url, h, b):
+        assert h["Authorization"] == f"Bearer {token}" and h["Accept"] == "application/json"
+        query = url.split("vulncheck-kev", 1)[1]
+        asked.append(query)
+        if query == "?start_cursor&limit=2000":
+            n = 0
+        else:
+            assert query.startswith("?cursor=") and query.endswith("&limit=2000"), query
+            n = int(query[len("?cursor=") :].split("&")[0].replace("c%2Fp%2B", ""))
+        meta: dict[str, Any] = {"index": "vulncheck-kev", "limit": 2000}
+        if n + 1 < len(pages):
+            meta["next_cursor"] = f"c/p+{n + 1}"  # quoted on the way back
+        return Response(200, json.dumps({"_meta": meta, "data": pages[n]}).encode(), {})
+
+    return {"GET api.vulncheck.com/v3/index/vulncheck-kev": route}, asked
+
+
+def test_vulncheck_kev_pages_merges_labels_and_falls_back(tmp_path):
+    from vulnflow.intel import KevCache, VulnCheckKev, kev_label, kev_source
+
+    token = secrets.token_hex(16)
+    catalog = {
+        "vulnerabilities": [_kev_entry("CVE-2024-3400", "Palo Alto Networks", "PAN-OS", "2024-04-12")]
+    }
+    pages = [
+        [
+            _vulncheck_record("CVE-2024-3400", "Palo Alto", "PAN-OS", "2024-04-11T00:00:00Z"),
+            _vulncheck_record(
+                "cve-2026-0100",
+                "Linux",
+                "Kernel",
+                "2026-10-19T00:00:00Z",
+                knownRansomwareCampaignUse="Known",
+            ),
+        ],
+        [_vulncheck_record("CVE-2026-0101", "Acme", "Widget", "2026-11-01T00:00:00Z")],
+        [],
+    ]
+    routes, asked = vulncheck_routes(token, pages)
+    t = FakeTransport({**routes, "GET known_exploited_vulnerabilities.json": catalog})
+    kev = KevCache(tmp_path, transport=t, vulncheck=VulnCheckKev(tmp_path, token, transport=t)).index()
+    assert asked == [
+        "?start_cursor&limit=2000",
+        "?cursor=c%2Fp%2B1&limit=2000",
+        "?cursor=c%2Fp%2B2&limit=2000",
+    ]
+    assert set(kev) == {"CVE-2024-3400", "CVE-2026-0100", "CVE-2026-0101"}
+    # in both: CISA's entry stays (its name and date), labelled CISA
+    assert kev["CVE-2024-3400"]["vendorProject"] == "Palo Alto Networks"
+    assert kev_label(kev, "cve-2024-3400") == "CISA KEV"
+    assert kev["CVE-2026-0100"] == {
+        "cveID": "CVE-2026-0100",
+        "vendorProject": "Linux",
+        "product": "Kernel",
+        "vulnerabilityName": "Linux Kernel Improper Input Validation",
+        "shortDescription": "Kernel lets anyone in.",
+        "requiredAction": "Apply remediations or mitigations per vendor instructions.",
+        "knownRansomwareCampaignUse": "Known",
+        "dateAdded": "2026-10-19",
+        "kevSource": "VulnCheck",
+    }
+    assert kev_label(kev, "CVE-2026-0101") == "VulnCheck KEV"
+    assert kev_source({"CVE-2026-0101"}, "CVE-2026-0101") == "CISA"  # a bare set: no source known
+    assert (tmp_path / "vulncheck-kev.json").is_file()
+
+    # cached for 6 h: a new cache object downloads nothing
+    asked.clear()
+    assert set(
+        KevCache(tmp_path, transport=t, vulncheck=VulnCheckKev(tmp_path, token, transport=t)).index()
+    ) == set(kev)
+    assert not asked
+
+    # stale copy and VulnCheck down: the old copy is used
+    old = (tmp_path / "vulncheck-kev.json").stat().st_mtime - 7 * 3600
+    os.utime(tmp_path / "vulncheck-kev.json", (old, old))
+    down = FakeTransport(
+        {
+            "GET api.vulncheck.com": Response(401, b'{"error":true}', {}),
+            "GET known_exploited_vulnerabilities.json": catalog,
+        }
+    )
+    vc = VulnCheckKev(tmp_path, token, transport=down)
+    assert set(KevCache(tmp_path, transport=down, vulncheck=vc).index()) == set(kev)
+    # no copy at all: CISA only, nothing raised
+    (tmp_path / "vulncheck-kev.json").unlink()
+    assert set(KevCache(tmp_path, transport=down, vulncheck=vc).index()) == {"CVE-2024-3400"}
+
+
+def test_vulncheck_kev_reaches_signals_and_ranking():
+    from vulnflow.clients import DTProject
+    from vulnflow.priority import threat
+    from vulnflow.ranking import rank_finding
+
+    kev = {
+        "CVE-2026-0100": {"cveID": "CVE-2026-0100", "kevSource": "VulnCheck"},
+        "CVE-2024-3400": {"cveID": "CVE-2024-3400", "kevSource": "CISA"},
+    }
+    row, why = threat(5.0, Signals("CVE-2026-0100", kev=True, kev_source="VulnCheck"), PriorityRules())
+    assert row == 0 and why == ["in VulnCheck KEV"]
+    p = DTProject("u1", "container:app", "1.0", True, ["team-dev"])
+    f = {
+        "vulnerability": {"vulnId": "CVE-2026-0100", "cvssV3BaseScore": 5.0},
+        "component": {"name": "x"},
+    }
+    verdict, _, _ = rank_finding(p, f, PriorityRules(), kev, None)
+    assert "in VulnCheck KEV" in verdict.reasons
+    verdict, _, _ = rank_finding(p, f, PriorityRules(), set(kev), None)  # ids only: CISA
+    assert "in CISA KEV" in verdict.reasons
+
+
+def test_kev_watch_new_source_is_recorded_quietly(inv, tmp_path):
+    """Adding a VulnCheck token must not post its thousands of extra entries; a state file
+    from before VulnCheck support counts as CISA's."""
+    from vulnflow import kevwatch
+
+    state = tmp_path / "kev-seen.json"
+    state.write_text(json.dumps({"seen": ["CVE-2020-0001"]}))  # written by the old version
+    index = {"CVE-2020-0001": _kev_entry("CVE-2020-0001", "Microsoft", "Windows", "2020-01-01")}
+    vc = {
+        "CVE-2026-0100": {
+            **_kev_entry("CVE-2026-0100", "Citrix", "NetScaler", "2026-10-19"),
+            "kevSource": "VulnCheck",
+        }
+    }
+    soc: list[str] = []
+    res = kevwatch.watch(inv, {**index, **vc}, state, lambda: [], None, soc.append)
+    assert (res.baseline, res.baseline_sources, res.new, soc) == (1, ["VulnCheck"], [], [])
+    assert kevwatch.load_seen(state) == ({"CVE-2020-0001", "CVE-2026-0100"}, {"CISA", "VulnCheck"})
+
+    # from now on VulnCheck entries are posted, labelled; CISA too
+    later = {
+        **index,
+        **vc,
+        "CVE-2026-0101": {
+            **_kev_entry("CVE-2026-0101", "Acme", "Widget", "2026-11-26"),
+            "kevSource": "VulnCheck",
+        },
+        "CVE-2026-0102": {
+            **_kev_entry("CVE-2026-0102", "Acme", "Gadget", "2026-11-27"),
+            "kevSource": "CISA",
+        },
+    }
+    res = kevwatch.watch(inv, later, state, lambda: [], None, soc.append)
+    assert res.baseline == 0 and [(h.cve, h.source) for h in res.new] == [
+        ("CVE-2026-0101", "VulnCheck"),
+        ("CVE-2026-0102", "CISA"),
+    ]
+    (msg,) = soc
+    assert "Widget bug (VulnCheck KEV, added 2026-11-26)" in msg and "Gadget bug (CISA KEV" in msg
+    logged = [json.loads(x) for x in (tmp_path / kevwatch.LOG_FILE).read_text().splitlines()]
+    assert [e["source"] for e in logged] == ["VulnCheck", "CISA"]
+    # VulnCheck down for a run: CISA alone, nothing re-baselined or lost
+    soc.clear()
+    res = kevwatch.watch(
+        inv,
+        {k: v for k, v in later.items() if v.get("kevSource") != "VulnCheck"},
+        state,
+        lambda: [],
+        None,
+        soc.append,
+    )
+    assert not res.new and not res.baseline and not soc
+    assert kevwatch.load_seen(state)[1] == {"CISA", "VulnCheck"}
 
 
 def test_only_new_kev_worse_or_followed_changes_notify(inv, tmp_path):
@@ -2810,6 +3005,15 @@ def test_triage_rules_close_matching_findings_unattended(inv, tmp_path):
     ]
     assert dry.kev_skipped == [f"{scheduler}: apache-airflow CVE-2023-1 (airflow-sqoop)"]
     assert dry.expired == ["old (review by 2026-11-01)"] and dry.unused == ["nothing"]
+    # vulnflow's KEV catalog counts too (VulnCheck KEV here), through the CVE alias
+    vc = apply_rules(
+        inv, dt, rules, ledger=ledger, today=today, kev={"CVE-2023-1": {"kevSource": "VulnCheck"}}
+    )
+    assert vc.written == [f"{worker}: apache-airflow PYSEC-2023-314 <- NOT_AFFECTED (airflow-sqoop)"]
+    assert sorted(vc.kev_skipped) == [
+        f"{scheduler}: apache-airflow CVE-2023-1 (airflow-sqoop)",
+        f"{worker}: apache-airflow GHSA-x (airflow-sqoop)",
+    ]
 
     rep = apply_rules(inv, dt, rules, apply=True, ledger=ledger, today=today)
     assert rep.errors == [] and len(rep.written) == 2
@@ -6422,15 +6626,22 @@ def test_report_kev_section_from_kev_watch_log(inv, tmp_path):
     sec, newest = kev_section(log.read_text().splitlines(), "2026-11-25T00:00:00+00:00")
     assert newest == "2026-11-26T06:00:00+00:00" and sec.notable
     (table,) = sec.blocks
-    assert isinstance(table, Table) and table.header == ["Added", "CVE", "Vulnerability", "Hits"]
+    assert isinstance(table, Table) and table.header == [
+        "Added",
+        "CVE",
+        "Catalog",
+        "Vulnerability",
+        "Hits",
+    ]
     assert table.rows == [
         [
             "2026-11-25",
             "`CVE-2026-0011`",
+            "CISA KEV",
             "Citrix NetScaler: NetScaler bug **(ransomware use)**",
             "network follows",
         ],
-        ["2026-11-24", "`CVE-2026-0012`", "Acme Widget: Widget bug", "findings in dev"],
+        ["2026-11-24", "`CVE-2026-0012`", "CISA KEV", "Acme Widget: Widget bug", "findings in dev"],
     ]
     again, _ = kev_section(log.read_text().splitlines(), newest)
     assert (again.notable, again.blocks) == (False, [Para("None.")])
@@ -6442,7 +6653,7 @@ def test_report_kev_section_from_kev_watch_log(inv, tmp_path):
     )
     lone, _ = kev_section(log.read_text().splitlines(), newest)
     assert not lone.notable and isinstance(lone.blocks[0], Table)
-    assert lone.blocks[0].rows[0][3] == "nothing of ours"
+    assert lone.blocks[0].rows[0][4] == "nothing of ours"
 
 
 def test_report_findings_link_to_defectdojo_and_dt_with_paths(monkeypatch):
