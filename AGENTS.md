@@ -41,6 +41,12 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   filtered locally; never add a request that carries a team's keywords, products or CVEs
   (it would show their stack). Feed XML goes through `xml.etree` (expat's limits); keep it
   stdlib-only and without generated summaries.
+- Device list (`vulnflow/devices.py`, `device-sboms`, every `dt2dojo` round): network and
+  appliance devices from `devices.csv` (gitignored and dockerignored like `machines.toml`;
+  `devices.example.csv` is the committed template) become one-component SBOMs `net:<name>`
+  with the device's NVD CPE. `config.load_machines` loads the list too, so the asset
+  context of `net:` projects reaches ranking, reports and finding-watch. Uploads use
+  `DT_API_KEY`, like `github-sboms`; re-upload at least daily or `prune` retires them.
 - `prune` (`vulnflow/prune.py`, run by every `dt2dojo` round) carries analyses to new project
   versions and deactivates stale ones with its own team `vulnflow-maintenance`
   (`DT_MAINTENANCE_API_KEY`). The glue team `vulnflow` stays read-only: don't give it

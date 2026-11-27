@@ -6712,3 +6712,145 @@ def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
     assert app.handle(scr, scr.getch())
     assert asked == ["updates"]  # GitHub is asked once, when the tab is first opened
     assert app.handle(scr, scr.getch()) is False
+
+
+# ---------------------------------------------------------------------- device list (step 5)
+def test_device_list_csv_json_and_errors(inv, tmp_path):
+    from vulnflow.config import CONTEXT_KEYS, DEVICE_COLUMNS, load_devices
+
+    assert set(DEVICE_COLUMNS[7:]) == CONTEXT_KEYS  # every context key is a column
+    devs = load_devices(ROOT / "devices.example.csv", inv.teams)  # the committed example parses
+    fw = devs["fw-edge-01"]
+    assert (fw.project, fw.team, fw.version) == ("net:fw-edge-01", "network", "7.4.3")
+    assert fw.cpe == "cpe:2.3:o:fortinet:fortios:7.4.3:*:*:*:*:*:*:*"
+    assert (fw.context.exposure, fw.context.criticality) == ("internet", "critical")
+    sw = devs["sw-core-01"]  # a full CPE, version taken from it
+    assert (sw.vendor, sw.product, sw.version) == ("cisco", "ios_xe", "17.9.4")
+    ups = devs["ups-02"]
+    assert ups.context.eol and ups.context.review == "2027-03-01"
+
+    j = tmp_path / "d.json"
+    j.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "esx",
+                    "team": "virt",
+                    "vendor": "vmware",
+                    "product": "esxi",
+                    "version": "8.0.3",
+                    "part": "o",
+                    "eol": True,
+                }
+            ]
+        )
+    )
+    (esx,) = load_devices(j, inv.teams).values()
+    assert esx.cpe.startswith("cpe:2.3:o:vmware:esxi:8.0.3:") and esx.context.eol
+    assert load_devices(tmp_path / "missing.csv", inv.teams) == {}
+
+    head = "name,team,vendor,product,version,part,cpe,exposure\n"
+    f = tmp_path / "d.csv"
+    for bad in (
+        "fw 1,network,fortinet,fortios,7.4.3,,,",  # name
+        "fw,nobody,fortinet,fortios,7.4.3,,,",  # team
+        "fw,network,Fortinet,fortios,7.4.3,,,",  # not an NVD name
+        "fw,network,fortinet,fortios,,,,",  # no version
+        "fw,network,fortinet,fortios,7.4:3,,,",  # ':' would break the CPE
+        "fw,network,fortinet,fortios,7.4.3,x,,",  # part
+        "fw,network,,,7.4.4,,cpe:2.3:o:fortinet:fortios:7.4.3:*:*:*:*:*:*:*,",  # version differs
+        "fw,network,,,,,cpe:2.3:o:fortinet,",  # not 13 fields
+        "fw,network,fortinet,fortios,7.4.3,,,everywhere",  # exposure
+        "fw,network,fortinet,fortios,7.4.3,,,\nfw,network,fortinet,fortios,7.4.4,,,",  # twice
+        "fw,network,fortinet,fortios,7.4.3,,,,extra",  # more cells than columns
+    ):
+        f.write_text(head + bad + "\n")
+        with pytest.raises(SystemExit):
+            load_devices(f, inv.teams)
+    f.write_text("name,team,colour\nfw,network,red\n")
+    with pytest.raises(SystemExit, match="unknown columns"):
+        load_devices(f, inv.teams)
+
+
+def test_device_sboms_upload_once_a_day_with_cpe_and_tags(inv, tmp_path):
+    import base64
+
+    from vulnflow.config import load_machines
+    from vulnflow.devices import REFRESH_SECONDS, import_devices
+
+    devices = tmp_path / "devices.csv"
+    devices.write_text(
+        "# comment\nname,team,vendor,product,version,exposure,criticality\n"
+        "fw-edge-01,network,fortinet,fortios,7.4.3,internet,critical\n"
+        "esx-03,virt,vmware,esxi,8.0.3,,\n"
+    )
+    machines = load_machines(tmp_path / "none.toml", inv.teams, devices)
+    t = FakeTransport({"PUT /api/v1/bom": {"token": "tok"}})
+    dt = DependencyTrack("http://dt", "k", transport=t)
+    state = tmp_path / "device-sboms.json"
+
+    res = import_devices(machines, inv, dt, state, now=1000.0)
+    assert not res.errors and len(res.uploaded) == 2 and len(t.calls) == 2
+    bodies = {json.loads(b)["projectName"]: json.loads(b) for _, _, _, b in t.calls}
+    fw = bodies["net:fw-edge-01"]
+    assert t.calls[0][:2] == ("PUT", "http://dt/api/v1/bom")
+    assert (fw["projectVersion"], fw["autoCreate"]) == ("7.4.3", True)
+    assert fw["projectTags"] == [
+        {"name": "team-network"},
+        {"name": "kind-net"},
+        {"name": "source-devices"},
+    ]
+    bom = json.loads(base64.b64decode(fw["bom"]))
+    assert bom["bomFormat"] == "CycloneDX" and len(bom["components"]) == 1
+    (c,) = bom["components"]
+    assert (c["type"], c["name"], c["version"]) == ("operating-system", "fortios", "7.4.3")
+    assert c["cpe"] == "cpe:2.3:o:fortinet:fortios:7.4.3:*:*:*:*:*:*:*"
+
+    # the same day: nothing; a new version: only that device; a day later: everything again
+    assert import_devices(machines, inv, dt, state, now=2000.0).unchanged == ["esx-03", "fw-edge-01"]
+    devices.write_text(devices.read_text().replace("7.4.3", "7.4.4"))
+    machines = load_machines(tmp_path / "none.toml", inv.teams, devices)
+    res = import_devices(machines, inv, dt, state, now=3000.0)
+    assert [u.split("@")[0] for u in res.uploaded] == ["net:fw-edge-01"]
+    assert json.loads(t.calls[-1][3])["projectVersion"] == "7.4.4"
+    res = import_devices(machines, inv, dt, state, now=1000.0 + REFRESH_SECONDS)
+    assert [u.split("@")[0] for u in res.uploaded] == ["net:esx-03"]  # fw went up at 3000
+    res = import_devices(machines, inv, dt, state, now=3000.0 + REFRESH_SECONDS)
+    assert [u.split("@")[0] for u in res.uploaded] == ["net:fw-edge-01"]
+    # force and dry run
+    n = len(t.calls)
+    assert len(import_devices(machines, inv, dt, state, now=1.0e9, dry_run=True).uploaded) == 2
+    assert len(t.calls) == n
+    assert (
+        len(import_devices(machines, inv, dt, state, now=3001.0 + REFRESH_SECONDS, force=True).uploaded)
+        == 2
+    )
+    # a failed upload is an error and is tried again next time
+    bad = DependencyTrack("http://dt", "k", transport=FakeTransport({}))
+    res = import_devices(machines, inv, bad, tmp_path / "s2.json", now=1.0)
+    assert len(res.errors) == 2 and not (tmp_path / "s2.json").exists()
+
+
+def test_device_context_for_net_projects(inv, tmp_path):
+    from vulnflow.clients import DTProject
+    from vulnflow.config import load_machines
+    from vulnflow.context import context_for
+
+    devices = tmp_path / "devices.csv"
+    devices.write_text(
+        "name,team,vendor,product,version,exposure,criticality\n"
+        "fw,network,fortinet,fortios,7.4.3,internet,critical\n"
+        "sw,network,cisco,ios_xe,17.9.4,,\n"
+    )
+    toml = tmp_path / "machines.toml"
+    toml.write_text('[projects."net:sw"]\nexposure = "internal"\n')
+    m = load_machines(toml, inv.teams, devices)
+
+    def p(name: str) -> DTProject:
+        return DTProject("u", name, "1", True, ["team-network", "kind-net"])
+
+    ctx = context_for(m, p("net:fw"))
+    assert ctx is not None and (ctx.exposure, ctx.criticality) == ("internet", "critical")
+    sw = context_for(m, p("net:sw"))  # machines.toml overrides the list
+    assert sw is not None and sw.exposure == "internal"
+    assert context_for(m, p("net:unknown")) is None

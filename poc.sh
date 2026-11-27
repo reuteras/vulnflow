@@ -509,6 +509,14 @@ glue_compose() {
     export VULNFLOW_MACHINES_HOST
     files+=(-f deploy/docker-compose.glue-machines.yml)
   fi
+  # the device list (device-sboms, net:<name> projects) into dt2dojo, read-only, if it exists
+  local devices="${VULNFLOW_DEVICES:-devices.csv}"
+  if [[ -f "$devices" ]]; then
+    VULNFLOW_DEVICES_HOST="$(cd "$(dirname "$devices")" && pwd)/$(basename "$devices")"
+    VULNFLOW_DEVICES_FILE="/app/devices.${devices##*.}"
+    export VULNFLOW_DEVICES_HOST VULNFLOW_DEVICES_FILE
+    files+=(-f deploy/docker-compose.glue-devices.yml)
+  fi
   docker compose --env-file .env "${files[@]}" "$@"
 }
 

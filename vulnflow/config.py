@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
+import json
 import os
 import re
 import tomllib
@@ -289,6 +292,129 @@ class Machines:
     news_feeds: dict[str, NewsFeed] = field(default_factory=dict)
     news_teams: dict[str, NewsTeam] = field(default_factory=dict)
     chat_channels: dict[str, ChatChannel] = field(default_factory=dict)
+    # network and appliance devices from the device list (VULNFLOW_DEVICES, devices.csv):
+    # uploaded as one-component SBOMs `net:<name>` (vulnflow/devices.py)
+    devices: dict[str, Device] = field(default_factory=dict)
+
+
+# ---- devices (docs/sboms.md "From a device list") -----------------------------------------
+
+DEVICE_COLUMNS = (
+    *("name", "team", "vendor", "product", "version", "part", "cpe"),
+    *("exposure", "input", "criticality", "eol", "certified", "review"),
+)
+DEVICE_PARTS = {"o": "operating-system", "h": "device", "a": "application"}  # CPE part -> CycloneDX
+_DEVICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+_CPE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+~-]*$")
+
+
+@dataclass(frozen=True)
+class Device:
+    """A device whose firmware or OS version comes from another system (an export from
+    NetBox, Ansible facts, the vendor's management system): one component with an NVD CPE."""
+
+    name: str
+    team: str
+    cpe: str  # cpe:2.3:<part>:<vendor>:<product>:<version>:*:*:*:*:*:*:*
+    version: str
+    context: AssetContext = AssetContext()
+
+    @property
+    def project(self) -> str:
+        return f"net:{self.name}"
+
+    @property
+    def part(self) -> str:
+        return self.cpe.split(":")[2]
+
+    @property
+    def vendor(self) -> str:
+        return self.cpe.split(":")[3]
+
+    @property
+    def product(self) -> str:
+        return self.cpe.split(":")[4]
+
+
+def _bool_cell(value: Any, where: str, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    v = str(value or "").strip().lower()
+    if v in ("", "false", "no", "0"):
+        return False
+    if v in ("true", "yes", "1"):
+        return True
+    raise SystemExit(f"{where}: {key} must be true or false, got {value!r}")
+
+
+def _device(row: dict[str, Any], teams: dict[str, Team], where: str) -> Device:
+    bad = sorted(set(row) - set(DEVICE_COLUMNS))
+    if bad:
+        raise SystemExit(f"{where}: unknown columns {bad} (allowed: {', '.join(DEVICE_COLUMNS)})")
+    cell = {k: ("" if v is None else v) for k, v in row.items()}
+    name = str(cell.get("name", "")).strip()
+    if not _DEVICE_NAME_RE.match(name):
+        raise SystemExit(f"{where}: name {name!r}: use letters, digits, '.', '_' and '-'")
+    team = str(cell.get("team", "")).strip()
+    if team not in teams:
+        raise SystemExit(f"{where}: team {team!r} is not in the inventory ({', '.join(teams)})")
+    version = str(cell.get("version", "")).strip()
+    cpe = str(cell.get("cpe", "")).strip()
+    if cpe:
+        parts = cpe.split(":")
+        if len(parts) != 13 or parts[:2] != ["cpe", "2.3"] or parts[2] not in DEVICE_PARTS:
+            raise SystemExit(f"{where}: cpe {cpe!r} is not a CPE 2.3 name (13 fields, part o/h/a)")
+        if not version:
+            version = parts[5]
+        if parts[5] != version or not all(_CPE_PART_RE.match(x) for x in parts[3:5]):
+            raise SystemExit(f"{where}: cpe {cpe!r} must name vendor, product and version {version!r}")
+    else:
+        part = str(cell.get("part", "") or "o").strip()
+        vendor, product = (str(cell.get(k, "")).strip() for k in ("vendor", "product"))
+        if part not in DEVICE_PARTS:
+            raise SystemExit(f"{where}: part must be one of {sorted(DEVICE_PARTS)}, got {part!r}")
+        for k, v in (("vendor", vendor), ("product", product)):
+            if not _CPE_PART_RE.match(v):
+                raise SystemExit(f"{where}: {k} {v!r} is not an NVD name (lower case, e.g. fortinet)")
+        cpe = f"cpe:2.3:{part}:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
+    if not _CPE_VERSION_RE.match(version) or version in ("-",):
+        raise SystemExit(f"{where}: version {version!r} must be a concrete version (7.4.3)")
+    ctx = {k: cell[k] for k in CONTEXT_KEYS if str(cell.get(k, "")).strip() != ""}
+    for k in ("eol", "certified"):
+        if k in ctx:
+            ctx[k] = _bool_cell(ctx[k], where, k)
+    return Device(name, team, cpe, version, _context(ctx, where))
+
+
+def load_devices(path: str | Path, teams: dict[str, Team]) -> dict[str, Device]:
+    """The device list: CSV (a header row with DEVICE_COLUMNS; lines starting with `#` are
+    comments) or JSON (a list of objects with the same keys), by the file's suffix. A missing
+    file is no devices."""
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    text = p.read_text(encoding="utf-8")
+    rows: list[tuple[str, dict[str, Any]]] = []
+    if p.suffix.lower() == ".json":
+        data = json.loads(text)
+        if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+            raise SystemExit(f"{path}: must be a JSON list of objects")
+        rows = [(f"{path} entry {i}", r) for i, r in enumerate(data, 1)]
+    else:
+        lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        reader = csv.DictReader(io.StringIO("\n".join(lines)))
+        for i, r in enumerate(reader, 2):
+            if None in r:
+                raise SystemExit(f"{path} row {i}: more cells than columns")
+            if any(str(v or "").strip() for v in r.values()):
+                rows.append((f"{path} row {i}", {k.strip(): v for k, v in r.items() if k}))
+    out: dict[str, Device] = {}
+    for where, row in rows:
+        d = _device(row, teams, where)
+        if d.name in out:
+            raise SystemExit(f"{where}: device {d.name!r} is listed twice")
+        out[d.name] = d
+    return out
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
@@ -356,10 +482,21 @@ def _machine(
     )
 
 
-def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
+def load_machines(
+    path: str | Path, teams: dict[str, Team], devices: str | Path | None = None
+) -> Machines:
     """Parse machines.toml: [groups.*] with shared settings and a `hosts` list, optional
     [hosts.*] overrides (or stand-alone hosts), [code.*] and [cpe_map]. A missing file is an
-    empty estate; the example lives in machines.example.toml."""
+    empty estate; the example lives in machines.example.toml. The device list comes along
+    (`devices`, else $VULNFLOW_DEVICES, else devices.csv), so every user of the asset
+    context sees the devices' too."""
+    devs = load_devices(devices or env("VULNFLOW_DEVICES") or "devices.csv", teams)
+    m = _load_machines(path, teams)
+    m.devices = devs
+    return m
+
+
+def _load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     p = Path(path)
     if not p.is_file():
         return Machines()
