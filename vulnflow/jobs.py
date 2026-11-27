@@ -123,6 +123,28 @@ def reimport_project(
     )
 
 
+def close_leftovers(
+    dtrack: DependencyTrack, dojo: DefectDojo, team: Team, p: DTProject, engagement: str, *, apply: bool
+) -> int:
+    """Active DefectDojo findings of a retired (inactive) DT project, closed. `prune` closes
+    them when it deactivates a project, but a project deactivated another way (by hand in
+    DT's UI, or by an older vulnflow) kept them open for good, since rounds skip inactive
+    projects (seen live 2026-11-27: 149 findings of a container retired on 2026-11-24).
+    One query per inactive project; the close is the same empty re-import `prune` does.
+    Returns how many findings were (or, without `apply`, would be) closed."""
+    title = f"Dependency-Track {p.version}".strip()
+    stale = sum(
+        n
+        for test_id, n in dojo.active_findings_by_test(p.name).items()
+        if dojo.test_title(test_id) == title
+    )
+    if stale and apply:
+        from .prune import _Proj, close_in_dojo
+
+        close_in_dojo(dtrack, dojo, _Proj(team, p), engagement)
+    return stale
+
+
 def dt_to_dojo(
     inv: Inventory,
     dtrack: DependencyTrack,
@@ -191,6 +213,15 @@ def dt_to_dojo(
             label = f"{p.name}@{p.version or '-'} -> {team.defectdojo_product_type}"
             if not p.active:  # retired by prune (or by hand); its findings are closed
                 inactive += 1
+                try:
+                    stale = close_leftovers(dtrack, dojo, team, p, engagement, apply=not dry_run)
+                    if stale:
+                        what = "would close" if dry_run else "closed"
+                        rep.done.append(
+                            f"{label}: retired, {what} {stale} finding(s) left open in DefectDojo"
+                        )
+                except Exception as e:
+                    rep.errors.append(f"{label}: closing findings of the retired project: {e}")
                 continue
             if dry_run:
                 rep.done.append(f"[dry-run] {label}")
