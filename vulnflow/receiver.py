@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .clients import OpenCVE
-from .config import Inventory
+from .config import ChatChannel, Inventory
 from .intel import Enricher
 from .net import Http
 from .priority import assess
@@ -62,6 +62,7 @@ class Alert:
     enrichment_errors: list[str]
     title: str = ""  # KEV's name, OpenCVE's title, or the description's first sentence
     products: list[str] = field(default_factory=list)  # the subscriptions it matched
+    subscribed: list[str] = field(default_factory=list)  # the same, raw (vendor, vendor$PRODUCT$p)
     # why this change notifies: new, kev, worse, followed; "" = log only
     notify: str = ""
     # a non-quiet change: notifies if the CVE turns out to be followed (Pipeline checks)
@@ -171,6 +172,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
             notify = "worse" if v.tier < old.tier else ""
         quiet = set(inv.rules.quiet_event_types)
         subs = (cve.get("subscriptions") or {}).get("human") or []
+        raw_subs = (cve.get("subscriptions") or {}).get("raw") or []
         alerts.append(
             Alert(
                 received_at=now,
@@ -191,6 +193,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
                 enrichment_errors=sig.errors,
                 title=_title(sig.kev_name, events, str(cve.get("description") or "")),
                 products=[str(x) for x in subs],
+                subscribed=[str(x) for x in raw_subs],
                 notify=notify,
                 followable=any(t not in quiet for t in types),
             )
@@ -230,13 +233,50 @@ def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> s
     return "\n".join(lines)
 
 
-def format_soc(alerts: list[Alert], min_tier: int, opencve_url: str = "") -> str | None:
+def _vendor_product(raw: str) -> tuple[str, str]:
+    """OpenCVE's raw subscription of a CVE: "vendor" or "vendor$PRODUCT$product" (assumed from
+    OpenCVE's vendors field; ":" is accepted too) -> (vendor, product or "")."""
+    vendor, sep, product = raw.lower().replace("$product$", ":").partition(":")
+    return vendor, product if sep else ""
+
+
+def channel_matches(channel: ChatChannel, a: Alert) -> bool:
+    """A "vendor" pattern matches any of that vendor's products, "vendor:product" only that one."""
+    seen = {_vendor_product(r) for r in a.subscribed}
+    for m in channel.match:
+        vendor, _, product = m.partition(":")
+        if any(v == vendor and (not product or p == product) for v, p in seen):
+            return True
+    return False
+
+
+def route_channels(
+    alerts: list[Alert], channels: list[ChatChannel]
+) -> tuple[list[Alert], dict[str, list[Alert]]]:
+    """Split off the alerts a noisy-product channel takes: (the rest, {channel: alerts}). An
+    alert goes to the first channel (in machines.toml order) that matches it, and then not to
+    the team's channel."""
+    rest: list[Alert] = []
+    routed: dict[str, list[Alert]] = {}
+    for a in alerts:
+        ch = next((c for c in channels if channel_matches(c, a)), None)
+        if ch is None:
+            rest.append(a)
+        else:
+            routed.setdefault(ch.name, []).append(a)
+    return rest, routed
+
+
+def format_soc(
+    alerts: list[Alert], min_tier: int, opencve_url: str = "", label: str = "SOC"
+) -> str | None:
     """The SOC channel's message: every alert at or above min_tier, whatever the team
-    (unrouted included), with the team named in each line instead of mentioned."""
+    (unrouted included), with the team named in each line instead of mentioned. Also the
+    noisy-product channels' message (label = the channel)."""
     hot = [a for a in alerts if a.tier <= min_tier and a.notify]
     if not hot:
         return None
-    lines = [f"SOC: {len(hot)} CVE(s) to look at from OpenCVE project '{hot[0].project}'"]
+    lines = [f"{label}: {len(hot)} CVE(s) to look at from OpenCVE project '{hot[0].project}'"]
     lines += [alert_line(a, opencve_url, team=True) for a in hot]
     return "\n".join(lines)
 
@@ -257,8 +297,21 @@ class Pipeline:
         soc_webhook: str = "",
         soc_sender: Callable[[str], None] | None = None,
         soc_min_tier: int = 1,
+        channels: list[ChatChannel] | None = None,
+        channel_senders: dict[str, Callable[[str], None]] | None = None,
     ):
         self.inv, self.enricher, self.log_path = inv, enricher, log_path
+        # Noisy-product channels ([chat.*] in machines.toml): a channel takes its products'
+        # alerts away from the team's channel, but only when its webhook is set; without one
+        # the alerts stay where they were rather than going nowhere.
+        senders = channel_senders or {}
+        self.channels = [c for c in channels or [] if c.name in senders]
+        self._channel_send = senders
+        for c in channels or []:
+            if c.name not in senders:
+                log.warning(
+                    "chat channel %s: %s is not set, its alerts stay in team chat", c.name, c.webhook_env
+                )
         self.opencve_url = opencve_url
         # Write-back: mark P1..P(triage_max_tier) CVEs "to_evaluate" in OpenCVE so they
         # show up in the team's triage view. Never overwrites a status a human set.
@@ -284,7 +337,17 @@ class Pipeline:
                 f.write(json.dumps(asdict(a), ensure_ascii=False) + "\n")
         if self.opencve and self.triage_max_tier:
             self._triage(alerts)
-        msg = format_chat(alerts, self.inv, self.opencve_url)
+        rest, routed = route_channels(alerts, self.channels)
+        for name, chunk in routed.items():
+            ch = next(c for c in self.channels if c.name == name)
+            tier = ch.min_tier or self.inv.rules.chat_min_tier
+            text = format_soc(chunk, tier, self.opencve_url, label=f"#{name}")
+            if text:
+                try:
+                    self._channel_send[name](text)
+                except Exception as e:
+                    log.error("chat channel %s delivery failed: %s", name, e)
+        msg = format_chat(rest, self.inv, self.opencve_url)
         if msg and self._send:
             try:
                 self._send(msg)
@@ -309,7 +372,11 @@ class Pipeline:
         Asked only for changes that could reach chat and don't notify anyway."""
         if self.opencve is None:
             return
-        limit = max(self.inv.rules.chat_min_tier, self.soc_min_tier if self._soc_send else 0)
+        limit = max(
+            self.inv.rules.chat_min_tier,
+            self.soc_min_tier if self._soc_send else 0,
+            *(c.min_tier or 0 for c in self.channels),
+        )
         for a in alerts:
             if a.notify or not a.followable or a.tier > limit or a.team == "unrouted":
                 continue

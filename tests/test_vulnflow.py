@@ -10,7 +10,7 @@ import secrets
 import threading
 import time
 import urllib.request
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -262,6 +262,95 @@ def test_format_chat_only_hot_tiers(inv, tmp_path):
     assert msg is not None and msg.startswith("@sysadm")
     assert "CVE-2024-3400" in msg and "http://opencve.local/cve/CVE-2024-3400" in msg
     assert "CVE-2026-0001" not in msg and "other change(s) in the log" in msg
+
+
+def test_noisy_product_channel_takes_alerts_from_team_chat(inv, tmp_path, monkeypatch):
+    from vulnflow.config import ChatChannel
+    from vulnflow.receiver import channel_matches, route_channels
+
+    e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
+    alerts = process_payload(PAYLOAD, inv, e)
+    kernel = ChatChannel("linux-kernel", ["linux:linux_kernel"])
+    vendor = ChatChannel("palo", ["paloaltonetworks"])
+    a = next(x for x in alerts if x.cve == "CVE-2024-3400")
+    a.subscribed = ["linux", "linux$PRODUCT$linux_kernel"]
+    assert channel_matches(kernel, a) and not channel_matches(vendor, a)
+    a.subscribed = ["linux$PRODUCT$linux_kernel_rt"]  # a different product of the vendor
+    assert not channel_matches(kernel, a)
+    a.subscribed = ["paloaltonetworks$PRODUCT$pan-os"]
+    assert channel_matches(vendor, a) and not channel_matches(kernel, a)
+    a.subscribed = ["linux$PRODUCT$linux_kernel"]
+    rest, routed = route_channels(alerts, [vendor, kernel])
+    assert a not in rest and routed == {"linux-kernel": [a]}
+
+    team: list[str] = []
+    chan: list[str] = []
+    real = process_payload
+
+    def tagged(*args, **kw):  # the P1 is a kernel CVE
+        out = real(*args, **kw)
+        for x in out:
+            if x.cve == "CVE-2024-3400":
+                x.subscribed = ["linux$PRODUCT$linux_kernel"]
+        return out
+
+    monkeypatch.setattr("vulnflow.receiver.process_payload", tagged)
+    senders = {"linux-kernel": chan.append}
+
+    def pipe(name, **kw):
+        return Pipeline(inv, e, tmp_path / name, chat_sender=team.append, **kw)
+
+    pipe("a.jsonl", channels=[kernel], channel_senders=senders).handle(PAYLOAD)
+    assert len(chan) == 1 and chan[0].startswith("#linux-kernel: 1 CVE(s)") and "team sysadm" in chan[0]
+    assert "@sysadm" not in chan[0]
+    assert all("CVE-2024-3400" not in t for t in team)  # left the team channel
+    # no webhook for the channel: the alert stays in team chat
+    team.clear()
+    pipe("b.jsonl", channels=[kernel]).handle(PAYLOAD)
+    assert len(team) == 1 and "CVE-2024-3400" in team[0]
+
+    def broken(text: str) -> None:
+        raise OSError("chat down")
+
+    # a failing channel doesn't stop the handling
+    team.clear()
+    pipe("c.jsonl", channels=[kernel], channel_senders={"linux-kernel": broken}).handle(PAYLOAD)
+    assert all("CVE-2024-3400" not in t for t in team)
+    # min_tier above the alert's tier: not posted to the channel, and still not in team chat
+    chan.clear()
+    strict = ChatChannel("linux-kernel", ["linux:linux_kernel"], min_tier=1)
+    payload: Any = PAYLOAD
+    only = [c for c in payload["changes"] if c["cve"]["cve_id"] == "CVE-2024-3400"]
+    quiet = {**payload, "changes": only}
+    monkeypatch.setattr(
+        "vulnflow.receiver.process_payload",
+        lambda *a, **k: [replace(x, tier=2, subscribed=["linux"]) for x in real(*a, **k)],
+    )
+    team.clear()
+    pipe("d.jsonl", channels=[strict], channel_senders=senders).handle(quiet)
+    assert chan == [] and team == []
+
+
+def test_chat_channels_in_machines_toml(tmp_path):
+    from vulnflow.config import chat_webhook_env
+
+    inv = load_inventory(INV)
+    f = tmp_path / "m.toml"
+    f.write_text('[chat.linux-kernel]\nmatch = ["linux:linux_kernel", "debian"]\nmin_tier = 3\n')
+    ch = load_machines(f, inv.teams).chat_channels["linux-kernel"]
+    assert (ch.match, ch.min_tier) == (["linux:linux_kernel", "debian"], 3)
+    assert ch.webhook_env == chat_webhook_env("linux-kernel") == "VULNFLOW_CHAT_WEBHOOK_LINUX_KERNEL"
+    for bad in (
+        '[chat.soc]\nmatch = ["linux"]',  # reserved
+        '[chat."Bad Name"]\nmatch = ["linux"]',
+        "[chat.x]\n",  # no match
+        '[chat.x]\nmatch = ["Linux Kernel"]',
+        '[chat.x]\nmatch = ["linux"]\nmin_tier = 9',
+        '[chat.x]\nmatch = ["linux"]\nteam = "dev"',
+    ):
+        f.write_text(bad)
+        with pytest.raises(SystemExit):
+            load_machines(f, inv.teams)
 
 
 def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):

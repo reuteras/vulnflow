@@ -32,8 +32,12 @@ the server. The receiver then:
    `./poc.sh chat-up`, channel `alerts`), and sets the CVE's status in the OpenCVE project to `to_evaluate` if nobody has set one;
 5. for P1 (`VULNFLOW_SOC_MIN_TIER`) changes that notify, whatever the team and also when no team owns the
    project: posts it to the SOC channel (`VULNFLOW_SOC_WEBHOOK`; the local Mattermost's
-   `soc` channel), naming the team instead of mentioning it. The two deliveries are
-   independent: one failing doesn't stop the other.
+   `soc` channel), naming the team instead of mentioning it.
+   The two deliveries are independent: one failing doesn't stop the other.
+   Noisy products are the exception for step 4's channel: CVEs matching a `[chat.<name>]` in
+   `machines.toml` (its `match` against the subscription that made OpenCVE notify) go to
+   that channel (`VULNFLOW_CHAT_WEBHOOK_<NAME>`) instead, from `min_tier` up (default P2).
+   Without the webhook set, they stay in the team channel.
 
 **Match: a CVE is found in something you run (Dependency-Track).** The push agents (daily)
 and CI (per release) upload SBOMs; Dependency-Track matches every component against NVD,

@@ -24,6 +24,11 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
 - Email reports: `vulnflow report daily|weekly` (`vulnflow/report.py`) builds the digest;
   `./poc.sh report` mails it with the host's `sendmail` (no SMTP code or credentials in
   vulnflow) and `./poc.sh schedule` installs the systemd units in `deploy/timers/`.
+- Noisy-product chat channels: `[chat.<name>]` in `machines.toml` (`config.ChatChannel`,
+  routing in `receiver.route_channels`). Matching alerts leave the team channel for
+  `VULNFLOW_CHAT_WEBHOOK_<NAME>` (written by `mm-bootstrap`); the SOC channel is unaffected.
+  The match is on the raw OpenCVE subscription in the webhook payload
+  (`vendor` / `vendor$PRODUCT$product`, an assumption: not yet checked against v3.1.0).
 - Newsletters: `vulnflow newsletter weekly|daily|alert <id>` (`vulnflow/news.py`): feeds from
   `[news.*]` in `machines.toml`, matched per team. Feeds are always downloaded whole and
   filtered locally; never add a request that carries a team's keywords, products or CVEs
