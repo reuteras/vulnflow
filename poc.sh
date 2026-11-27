@@ -222,7 +222,9 @@ opencve_args() { if [[ -n "${OPENCVE_REF:-}" ]]; then echo "-r $OPENCVE_REF"; fi
 opencve_compose() { (cd "$UP/opencve/docker" && docker compose "$@"); }
 
 # restart: unless-stopped for OpenCVE's long-running services (upstream: on-failure, so a
-# reboot left them down). docker compose loads the file from that directory by itself.
+# reboot left them down), and the rest of stacks/opencve/docker-compose.override.yaml.
+# docker compose loads the file from that directory by itself. Copied by every command that
+# starts OpenCVE (opencve-prepare, opencve-start, up), so an edit applies on the next one.
 opencve_overlay() {
   [[ -d "$UP/opencve/docker" ]] || return 0
   cp "$ROOT/stacks/opencve/docker-compose.override.yaml" "$UP/opencve/docker/"
@@ -372,6 +374,9 @@ cmd_opencve_start() {
   # create-superuser prompt. Run the steps (each is an install.sh subcommand) and let
   # opencve-bootstrap create the admin from .env instead, so nothing waits for a human.
   opencve_reset_airflow_connections
+  # init-docker-stack runs `docker compose up -d`: copy the overlay first, so a changed
+  # stacks/opencve/docker-compose.override.yaml applies here as in opencve-prepare and up
+  opencve_overlay
   local step
   for step in init-docker-stack clone-repositories import-opencve-kb start-opencve-dag; do
     # shellcheck disable=SC2046
