@@ -1080,10 +1080,10 @@ class FakeDT:
         if path == "api/v1/configProperty" and method == "POST":
             req = json.loads(body)
             self.prop_posts.append(req)
-            key = (req["groupName"], req["propertyName"])
-            if key not in self.props:
+            prop = (req["groupName"], req["propertyName"])
+            if prop not in self.props:
                 return Response(404, b"The config property could not be found.", {})
-            self.props[key] = req["propertyValue"]
+            self.props[prop] = req["propertyValue"]
             return ok({**req, "propertyType": "BOOLEAN"})
         if path == "api/v2/vuln-data-sources/osv/mirror-runs" and method == "POST":
             # a run reads the config it starts with: was it a full one?
