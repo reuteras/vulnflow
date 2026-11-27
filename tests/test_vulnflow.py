@@ -333,6 +333,76 @@ def test_noisy_product_channel_takes_alerts_from_team_chat(inv, tmp_path, monkey
     assert chan == [] and team == []
 
 
+def test_noisy_product_channel_posts_once_for_all_teams(inv, tmp_path):
+    """OpenCVE sends each team's project its own webhook: a shared channel posts the CVE
+    change once, naming every team it reaches, also across a receiver restart."""
+    from vulnflow.config import ChatChannel
+
+    inv.teams["sysadm"].products["linux"] = ["linux_kernel"]
+    inv.teams["users"].products["linux"] = ["linux_kernel"]
+    inv.teams["dev"].vendors.append("linux")
+    e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
+    raw = {"raw": ["linux$PRODUCT$linux_kernel"], "human": ["Linux Kernel"]}
+    change = {
+        "cve": {"cve_id": "CVE-2024-3400", "description": "x", "cvss31": 9.8, "subscriptions": raw},
+        "events": [{"type": "first_time", "details": []}],
+    }
+
+    def payload(project: str) -> dict:
+        return {**PAYLOAD, "project": project, "changes": [change]}
+
+    kernel = ChatChannel("linux-kernel", ["linux:linux_kernel"])
+    posted: list[str] = []
+    team: list[str] = []
+
+    def pipe(sender=posted.append, log="alerts.jsonl"):
+        return Pipeline(
+            inv,
+            e,
+            tmp_path / log,
+            chat_sender=team.append,
+            channels=[kernel],
+            channel_senders={"linux-kernel": sender},
+        )
+
+    p = pipe()
+    p.handle(payload("sysadm"))
+    assert len(posted) == 1 and "teams sysadm, dev, users," in posted[0] and team == []
+    p.handle(payload("users"))  # the same change through the next team's project
+    pipe().handle(payload("dev"))  # and after a restart
+    assert len(posted) == 1 and team == []
+    seen = tmp_path / "alerts.channels-seen.json"
+    old = {k: t - 25 * 3600 for k, t in json.loads(seen.read_text()).items()}
+    seen.write_text(json.dumps(old))
+    pipe().handle(payload("users"))  # 24 h later it is posted again
+    assert len(posted) == 2 and "teams users, dev, sysadm," in posted[1]
+
+    def broken(text: str) -> None:
+        raise OSError("chat down")
+
+    # a failed delivery isn't recorded: the next team's webhook tries again
+    pipe(broken, "f.jsonl").handle(payload("sysadm"))
+    pipe(log="f.jsonl").handle(payload("users"))
+    assert len(posted) == 3
+    # an unreadable record starts empty rather than stopping the receiver
+    (tmp_path / "g.channels-seen.json").write_text("junk")
+    pipe(log="g.jsonl").handle(payload("dev"))
+    assert len(posted) == 4 and "teams dev, sysadm, users," in posted[3]
+
+
+def test_chat_channel_warnings(inv):
+    from vulnflow.config import ChatChannel, chat_channel_warnings
+
+    inv.teams["dev"].vendors.append("linux")
+    chans = {"k": ChatChannel("k", ["linux:linux_kernel", "linux", "paloaltonetworks", "nobody"])}
+    w = chat_channel_warnings(chans, inv.teams)
+    assert len(w) == 2
+    assert "team(s) ['dev'] subscribe to all of 'linux'" in w[0] and 'match = ["linux"]' in w[0]
+    assert "'nobody': no team subscribes" in w[1]
+    inv.teams["dev"].products["linux"] = ["linux_kernel"]  # vendor and product: both reported
+    assert chat_channel_warnings(chans, inv.teams) == w[1:]
+
+
 def test_chat_channels_in_machines_toml(tmp_path):
     from vulnflow.config import chat_webhook_env
 

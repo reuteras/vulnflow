@@ -37,7 +37,11 @@ the server. The receiver then:
    Noisy products are the exception for step 4's channel: CVEs matching a `[chat.<name>]` in
    `machines.toml` (its `match` against the subscription that made OpenCVE notify) go to
    that channel (`VULNFLOW_CHAT_WEBHOOK_<NAME>`) instead, from `min_tier` up (default P2).
-   Without the webhook set, they stay in the team channel.
+   The channel is shared by all teams: OpenCVE sends each team's project its own webhook,
+   and the receiver posts a CVE change once (remembered for 24 h in
+   `data/alerts.channels-seen.json`), naming every team whose subscriptions cover it.
+   Without the webhook set, they stay in the team channel. A team subscribed to a whole
+   vendor never matches a `vendor:product` channel; `serve` and `chat-up` warn about it.
 
 **Match: a CVE is found in something you run (Dependency-Track).** The push agents (daily)
 and CI (per release) upload SBOMs; Dependency-Track matches every component against NVD,

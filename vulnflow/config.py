@@ -469,6 +469,32 @@ def _chat_channels(data: dict[str, Any], path: str | Path) -> dict[str, ChatChan
     return out
 
 
+def chat_channel_warnings(channels: dict[str, ChatChannel], teams: dict[str, Team]) -> list[str]:
+    """Why a [chat.*] match can't catch anything. OpenCVE's webhook names only the project
+    subscriptions a CVE matched (v3.1.0 `BaseNotifier.prepare_payload`), so a team that
+    subscribes to the whole vendor reports "linux", never "linux$PRODUCT$linux_kernel".
+    Pass the teams with machines.toml's [subscriptions.*] merged in (add_subscriptions)."""
+    out: list[str] = []
+    for ch in channels.values():
+        for m in ch.match:
+            vendor, _, product = m.partition(":")
+            exact = [
+                k
+                for k, t in teams.items()
+                if (product in t.products.get(vendor, []) if product else vendor in t.products)
+            ]
+            whole = [k for k, t in teams.items() if vendor in t.vendors and k not in exact]
+            if product and whole:
+                out.append(
+                    f"[chat.{ch.name}] {m!r}: team(s) {sorted(whole)} subscribe to all of "
+                    f"{vendor!r}, so OpenCVE reports their CVEs as {vendor!r} and they stay in "
+                    f'team chat; use match = ["{vendor}"] or subscribe them to the product'
+                )
+            elif not exact and not whole:
+                out.append(f"[chat.{ch.name}] {m!r}: no team subscribes to it, nothing will match")
+    return out
+
+
 def _news(
     data: dict[str, Any], teams: dict[str, Team], path: str | Path
 ) -> tuple[dict[str, NewsFeed], dict[str, NewsTeam]]:

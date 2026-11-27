@@ -18,6 +18,7 @@ from .config import (
     Inventory,
     Machines,
     add_subscriptions,
+    chat_channel_warnings,
     env,
     env_flag,
     load_dotenv,
@@ -1288,8 +1289,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "dd-bootstrap":
         return _dd_bootstrap(a.env_file, a.wait)
     if a.cmd == "mm-bootstrap":
-        teams = load_inventory(a.inventory).teams
-        return _mm_bootstrap(a.env_file, a.wait, load_machines(a.machines, teams))
+        mm_inv = load_inventory(a.inventory)
+        mm_machines = load_machines(a.machines, mm_inv.teams)
+        add_subscriptions(mm_inv, mm_machines)
+        for w in chat_channel_warnings(mm_machines.chat_channels, mm_inv.teams):
+            print(f"  warn  {w}")
+        return _mm_bootstrap(a.env_file, a.wait, mm_machines)
     if a.cmd == "check-updates":
         from .upstreams import check, report
 
@@ -1680,7 +1685,11 @@ def main(argv: list[str] | None = None) -> int:
         from .receiver import Pipeline, chat_sender, serve
 
         triage = int(env("VULNFLOW_OPENCVE_TRIAGE_MAX_TIER", "0") or 0)
-        channels = list(load_machines(a.machines, inv.teams).chat_channels.values())
+        machines = load_machines(a.machines, inv.teams)
+        add_subscriptions(inv, machines)  # a channel names every team a CVE reaches
+        for w in chat_channel_warnings(machines.chat_channels, inv.teams):
+            logging.getLogger(__name__).warning("%s", w)
+        channels = list(machines.chat_channels.values())
         pipe = Pipeline(
             inv,
             _enricher(data_dir),
