@@ -86,6 +86,7 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
                 for e in env("DT_OSV_ECOSYSTEMS", "Debian,PyPI,crates.io").split(",")
                 if e.strip()
             ),
+            telemetry=env_flag("DT_TELEMETRY", default=False),
             wait_timeout=wait,
         )
     except BootstrapError as e:
@@ -109,6 +110,17 @@ def _dt_bootstrap(env_file: str, team_name: str, wait: float) -> int:
         )
     else:
         print(f"  {'set ' if res.osv.startswith('updated') else 'ok  '}  OSV source: {res.osv}")
+    if res.telemetry.startswith("failed"):
+        print(
+            f"  warn  telemetry not set ({res.telemetry}); set it in the DT UI under "
+            "Administration (DT_TELEMETRY in .env)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  {'set ' if res.telemetry.startswith('turned') else 'ok  '}  "
+            f"telemetry: {res.telemetry} (DT_TELEMETRY)"
+        )
     from .bootstrap import DT_MAINTENANCE_TEAM, dt_admin_http, maintenance_key
 
     try:

@@ -986,6 +986,9 @@ class FakeDT:
             "dataUrl": "https://storage.googleapis.com/osv-vulnerabilities",
             "ecosystems": ["Go", "Maven", "npm", "NuGet", "PyPI"],
         }
+        # DT 5.2.2 seeds telemetry/submission.enabled from default-enabled (true)
+        self.props: dict[tuple[str, str], str] = {("telemetry", "submission.enabled"): "true"}
+        self.prop_posts: list[dict] = []
         self.mirror_runs: list[dict] = []  # OSV config each triggered mirror run started with
         self.run_status: list[str] = []  # what GET .../mirror-runs/latest answers, in turn
 
@@ -1067,6 +1070,21 @@ class FakeDT:
                     return Response(304, b"", {})
                 self.osv = cfg
                 return Response(204, b"", {})
+        if path == "api/v1/configProperty" and method == "GET":
+            return ok(
+                [
+                    {"groupName": g, "propertyName": n, "propertyValue": v, "propertyType": "BOOLEAN"}
+                    for (g, n), v in self.props.items()
+                ]
+            )
+        if path == "api/v1/configProperty" and method == "POST":
+            req = json.loads(body)
+            self.prop_posts.append(req)
+            prop = (req["groupName"], req["propertyName"])
+            if prop not in self.props:
+                return Response(404, b"The config property could not be found.", {})
+            self.props[prop] = req["propertyValue"]
+            return ok({**req, "propertyType": "BOOLEAN"})
         if path == "api/v2/vuln-data-sources/osv/mirror-runs" and method == "POST":
             # a run reads the config it starts with: was it a full one?
             self.mirror_runs.append(dict(self.osv or {}))
@@ -1100,6 +1118,38 @@ def test_dt_bootstrap_fresh_install_then_idempotent():
     assert ("PUT", "api/v2/extension-points/vuln-data-source/extensions/osv/config") not in (
         dt.calls[dt.calls.index(("GET", "api/version"), 1) :]
     )
+    # telemetry is off by default: turned off once, then left alone
+    assert r1.telemetry == "turned off" and r2.telemetry == "off"
+    assert dt.prop_posts == [
+        {"groupName": "telemetry", "propertyName": "submission.enabled", "propertyValue": "false"}
+    ]
+
+
+def test_dt_set_telemetry_on_off_and_never_raises():
+    from vulnflow.bootstrap import dt_set_telemetry
+    from vulnflow.net import Http
+
+    dt = FakeDT(password=TEST_PW, force_change=False)
+    http = Http("http://dt", headers={"Authorization": "Bearer jwt-token"}, transport=dt)
+    assert dt_set_telemetry(http, enabled=False) == "turned off"
+    assert dt.props[("telemetry", "submission.enabled")] == "false"
+    assert dt_set_telemetry(http, enabled=False) == "off"
+    assert dt_set_telemetry(http, enabled=True) == "turned on"
+    assert dt.prop_posts[-1] == {
+        "groupName": "telemetry",
+        "propertyName": "submission.enabled",
+        "propertyValue": "true",
+    }
+    assert dt_set_telemetry(http, enabled=True) == "on" and len(dt.prop_posts) == 2
+
+    dt.props.clear()
+    assert dt_set_telemetry(http, enabled=False).startswith("failed: no telemetry/submission")
+
+    def broken(method, url, headers, body, timeout):
+        return Response(403, b"forbidden", {})
+
+    denied = Http("http://dt", transport=broken, retries=0)
+    assert dt_set_telemetry(denied, enabled=False) == "failed: GET config properties HTTP 403"
 
 
 def test_dt_enable_osv_keeps_operator_choices_and_never_raises():
