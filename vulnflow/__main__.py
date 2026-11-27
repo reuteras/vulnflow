@@ -1224,6 +1224,15 @@ def main(argv: list[str] | None = None) -> int:
     wh.add_argument("--team", default=None, help="only this team (default: all)")
     wh.add_argument("--json", action="store_true")
 
+    st = sub.add_parser(
+        "stats",
+        help="where the open findings come from: counts per project kind, project, component, "
+        "ecosystem and advisory source (findings that are aliases of each other count once)",
+    )
+    st.add_argument("--team", default=None, help="only this team (default: all)")
+    st.add_argument("--top", type=int, default=20, metavar="N", help="rows per table (0 = all)")
+    st.add_argument("--json", action="store_true")
+
     ig = sub.add_parser(
         "ignore",
         help="mark reviewed findings (a file edited down from `debian --json` or "
@@ -1773,6 +1782,21 @@ def main(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
+
+    if a.cmd == "stats":
+        from .stats import collect, render, to_json
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        stats = collect(inv, dt, a.team)
+        print(json.dumps(to_json(stats, a.top), indent=2) if a.json else render(stats, a.top))
+        for msg in stats.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if stats.errors else 0
 
     if a.cmd == "disputed":
         from .disputed import NvdFeeds, disputed_findings

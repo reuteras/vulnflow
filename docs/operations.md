@@ -98,6 +98,7 @@ new critical/high/KEV findings, hosts that stopped uploading, and versions to de
 | Does a team have no SBOM at all yet? | `python3 -m vulnflow sync --dry-run` |
 | How serious is CVE-X right now? | `python3 -m vulnflow enrich CVE-X` ([Look up a CVE](#look-up-a-cve)) |
 | Where on disk is component X? | `python3 -m vulnflow where <name> [--version V]` |
+| Where do most findings come from? | `python3 -m vulnflow stats [--team T] [--top N] [--json]`: per project kind, project, component, ecosystem and advisory source; findings DT knows are aliases count once |
 
 Dependency-Track analyses new SBOMs within minutes; DefectDojo follows at the next
 `dt2dojo` round (`python3 -m vulnflow dt2dojo` runs one now).
