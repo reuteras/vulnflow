@@ -1784,7 +1784,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if errors else 0
 
     if a.cmd == "stats":
-        from .stats import collect, render, to_json
+        from . import stats as findings_stats
 
         if a.team and a.team not in inv.teams:
             print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
@@ -1792,8 +1792,11 @@ def main(argv: list[str] | None = None) -> int:
         dt = _dtrack(required=True)
         if dt is None:  # unreachable: required=True exits first
             return 2
-        stats = collect(inv, dt, a.team)
-        print(json.dumps(to_json(stats, a.top), indent=2) if a.json else render(stats, a.top))
+        stats = findings_stats.collect(inv, dt, a.team)
+        if a.json:
+            print(json.dumps(findings_stats.to_json(stats, a.top), indent=2))
+        else:
+            print(findings_stats.render(stats, a.top))
         for msg in stats.errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if stats.errors else 0
