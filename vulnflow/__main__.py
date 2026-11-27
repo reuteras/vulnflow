@@ -215,6 +215,8 @@ def _finding_watch(
         },
         soc_min_tier=int(env("VULNFLOW_SOC_MIN_TIER", "1") or 1),
         opencve_url=env("OPENCVE_URL"),
+        defectdojo_url=env("DD_SITE_URL"),
+        dependency_track_url=_dt_ui_url(),
         dry_run=dry_run,
         channels=channels,
     )
