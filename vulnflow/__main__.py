@@ -870,6 +870,7 @@ def _context_sections(inv: Inventory, a: argparse.Namespace, dt: DependencyTrack
         return [rp.error_section("Asset context", "; ".join(cx.errors)[:500])]
     return [
         rp.accepted_risks_section(cx.flagged, current, date.today()),
+        rp.vendor_section(cx.vendors, current, time.time()),
         rp.unknown_context_section(cx.unknown),
     ]
 

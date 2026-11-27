@@ -53,7 +53,8 @@ path = "/srv/myapp"
 # Set on what runs, never on a group: one group can run a public service and an internal
 # admin page. Keys: exposure (internet | external-auth | internal | restricted |
 # hostile-device), input (public | partner | staff), criticality (critical | high | normal |
-# low), eol and certified (true/false), and with eol/certified an optional review date
+# low), eol, certified and vendor (true/false; vendor = fixes come from the vendor, listed
+# in the weekly report's vendor section), and with eol/certified an optional review date
 # (review = 2027-03-01: the weekly report flags the accepted risk once it has passed). Unset
 # stays unknown. They become Dependency-Track tags (exposure-internet, crit-high, ...) at
 # the next dt2dojo round; preview with `python3 -m vulnflow context --unknown`.

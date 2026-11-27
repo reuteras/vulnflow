@@ -87,7 +87,7 @@ _MACHINE_KEYS = {"team", "kind", "scans", "language_paths", "containers_team"}
 EXPOSURES = ("internet", "external-auth", "internal", "restricted", "hostile-device")
 INPUTS = ("public", "partner", "staff")
 CRITICALITIES = ("critical", "high", "normal", "low")
-CONTEXT_KEYS = {"exposure", "input", "criticality", "eol", "certified", "review"}
+CONTEXT_KEYS = {"exposure", "input", "criticality", "eol", "certified", "vendor", "review"}
 
 
 @dataclass(frozen=True)
@@ -97,13 +97,18 @@ class AssetContext:
     criticality: str = ""
     eol: bool = False
     certified: bool = False
+    # an appliance or vendor system: fixes come from the vendor (the report's vendor
+    # section counts how long they take); imported devices always are
+    vendor: bool = False
     # an eol/certified system's accepted risk is looked at again by this date (YYYY-MM-DD;
     # the weekly report flags it once passed). Not a tag: only the report reads it.
     review: str = ""
 
     def __bool__(self) -> bool:
         """False when nothing is set: the asset's context is unknown."""
-        return bool(self.exposure or self.input or self.criticality or self.eol or self.certified)
+        return bool(
+            self.exposure or self.input or self.criticality or self.eol or self.certified or self.vendor
+        )
 
     def tags(self) -> list[str]:
         """Dependency-Track project tags; unknown values get none."""
@@ -115,6 +120,7 @@ class AssetContext:
         if self.criticality:
             out.append(f"crit-{self.criticality}")
         out += ["flag-eol"] * self.eol + ["flag-certified"] * self.certified
+        out += ["flag-vendor"] * self.vendor
         return out
 
 
@@ -123,7 +129,7 @@ def _context(settings: dict[str, Any], where: str) -> AssetContext:
         v = settings.get(key, "")
         if v and v not in allowed:
             raise SystemExit(f"{where}: {key} must be one of {allowed}, got {v!r}")
-    for key in ("eol", "certified"):
+    for key in ("eol", "certified", "vendor"):
         if not isinstance(settings.get(key, False), bool):
             raise SystemExit(f"{where}: {key} must be true or false")
     review = _review_date(settings.get("review"), where)
@@ -135,6 +141,7 @@ def _context(settings: dict[str, Any], where: str) -> AssetContext:
         criticality=str(settings.get("criticality", "")),
         eol=bool(settings.get("eol", False)),
         certified=bool(settings.get("certified", False)),
+        vendor=bool(settings.get("vendor", False)),
         review=review,
     )
 
@@ -379,11 +386,13 @@ def _device(row: dict[str, Any], teams: dict[str, Team], where: str) -> Device:
         cpe = f"cpe:2.3:{part}:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
     if not _CPE_VERSION_RE.match(version) or version in ("-",):
         raise SystemExit(f"{where}: version {version!r} must be a concrete version (7.4.3)")
-    ctx = {k: cell[k] for k in CONTEXT_KEYS if str(cell.get(k, "")).strip() != ""}
+    ctx: dict[str, Any] = {k: cell[k] for k in DEVICE_COLUMNS[7:] if str(cell.get(k, "")).strip() != ""}
     for k in ("eol", "certified"):
         if k in ctx:
             ctx[k] = _bool_cell(ctx[k], where, k)
-    return Device(name, team, cpe, version, _context(ctx, where))
+    # a device is a vendor system (its fixes come from the vendor); the `vendor` column is
+    # the NVD vendor name, so the flag is set here rather than read
+    return Device(name, team, cpe, version, _context({**ctx, "vendor": True}, where))
 
 
 def load_devices(path: str | Path, teams: dict[str, Team]) -> dict[str, Device]:

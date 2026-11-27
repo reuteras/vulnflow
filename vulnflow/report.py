@@ -20,7 +20,8 @@ Sections:
                weekly lists those, counts the rest and the resolved ones, and adds the
                open totals per team
     context    weekly: accepted risks (eol/certified projects, their open P1/P2 and review
-               dates; one past its date is flagged) and projects without context
+               dates; one past its date is flagged), vendor systems (open findings and
+               the age of the oldest) and projects without context
     machines   own hosts that stopped pushing SBOMs
 
 Order of the new findings (docs/exposure.md, step 6): internet-facing or exploited (KEV)
@@ -136,6 +137,7 @@ class OpenFinding:
     component_uuid: str = ""  # for the paths on disk and the Dependency-Track link
     exposure: str = ""  # the asset's context when ranked ("" = unknown)
     criticality: str = ""
+    attributed: float = 0.0  # when DT first matched it (epoch s; earliest over versions); 0 = ?
 
     @property
     def key(self) -> str:
@@ -321,12 +323,24 @@ def collect_findings(
             component_uuid=str(comp.get("uuid", "")),
             exposure=exposure,
             criticality=criticality,
+            attributed=_attributed(f),
         )
-        if of.key not in out or 0 < of.tier < (out[of.key].tier or 9):
+        old = out.get(of.key)
+        if old is None or 0 < of.tier < (old.tier or 9):
             out[of.key] = of  # the same finding on two versions: keep the higher tier
+        if old is not None and old.attributed and (not of.attributed or old.attributed < of.attributed):
+            out[of.key].attributed = old.attributed  # ... and the earliest first match
     if vectors is not None:
         vectors.save()
     return out
+
+
+def _attributed(f: dict[str, Any]) -> float:
+    """DT's attribution.attributedOn (epoch ms, when the finding was first matched) in s."""
+    try:
+        return float((f.get("attribution") or {}).get("attributedOn") or 0) / 1000
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -500,6 +514,48 @@ def accepted_risks_section(
     _table(
         s,
         ["Project", "Team", "Flag", "Review", "Open P1/P2", "Open"],
+        [r for _, r in sorted(rows, key=lambda x: x[0])],
+    )
+    return s
+
+
+def vendor_section(
+    vendors: list[tuple[str, DTProject, AssetContext]],
+    current: dict[str, OpenFinding],
+    now: float,
+) -> Section:
+    """Appliances and vendor systems (`vendor`; every imported device): open findings and
+    how long the oldest has waited for the vendor's fix."""
+    s = Section("Vendor systems")
+    if not vendors:
+        s.blocks.append(
+            Para("No project is marked `vendor` (machines.toml) or comes from the device list.")
+        )
+        return s
+    by_project: dict[str, list[OpenFinding]] = {}
+    for f in current.values():
+        by_project.setdefault(f.project, []).append(f)
+    rows: list[tuple[tuple[int, float, str], list[str]]] = []
+    waiting = 0
+    for team, p, _ctx in vendors:
+        mine = by_project.get(p.name, [])
+        hot = sum(1 for f in mine if 0 < f.tier <= 2)
+        dated = [f for f in mine if f.attributed]
+        oldest = min(dated, key=lambda f: f.attributed) if dated else None
+        days = (now - oldest.attributed) / 86400 if oldest else 0.0
+        age = f"{days:.0f} days ({code(oldest.vuln_id)})" if oldest else "-"
+        waiting += bool(mine)
+        label = project_label(p.name, p.version)
+        rows.append(((-hot, -days, label), [code(label), team, str(hot), str(len(mine)), age]))
+    s.blocks.append(
+        Para(
+            f"**{len(vendors)}** vendor system(s), **{waiting}** with open findings. The oldest "
+            "open finding shows how long the vendor's fix has been awaited."
+        )
+    )
+    _table(
+        s,
+        ["Project", "Team", "Open P1/P2", "Open", "Oldest open"],
         [r for _, r in sorted(rows, key=lambda x: x[0])],
     )
     return s

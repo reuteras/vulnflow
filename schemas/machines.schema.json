@@ -198,6 +198,10 @@
             "type": "boolean",
             "description": "Changes follow a certification cycle."
           },
+          "vendor": {
+            "type": "boolean",
+            "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
+          },
           "review": {
             "type": "string",
             "format": "date",
@@ -259,6 +263,10 @@
                   "type": "boolean",
                   "description": "Changes follow a certification cycle."
                 },
+                "vendor": {
+                  "type": "boolean",
+                  "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
+                },
                 "review": {
                   "type": "string",
                   "format": "date",
@@ -314,6 +322,10 @@
                 "certified": {
                   "type": "boolean",
                   "description": "Changes follow a certification cycle."
+                },
+                "vendor": {
+                  "type": "boolean",
+                  "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
                 },
                 "review": {
                   "type": "string",
@@ -407,6 +419,10 @@
             "type": "boolean",
             "description": "Changes follow a certification cycle."
           },
+          "vendor": {
+            "type": "boolean",
+            "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
+          },
           "review": {
             "type": "string",
             "format": "date",
@@ -494,6 +510,10 @@
             "type": "boolean",
             "description": "Changes follow a certification cycle."
           },
+          "vendor": {
+            "type": "boolean",
+            "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
+          },
           "review": {
             "type": "string",
             "format": "date",
@@ -549,6 +569,10 @@
           "certified": {
             "type": "boolean",
             "description": "Changes follow a certification cycle."
+          },
+          "vendor": {
+            "type": "boolean",
+            "description": "An appliance or vendor system: fixes come from the vendor (the weekly report's vendor section)."
           },
           "review": {
             "type": "string",

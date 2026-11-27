@@ -6718,7 +6718,8 @@ def test_tui_tabs_alerts_hosts_and_quit(inv, tmp_path):
 def test_device_list_csv_json_and_errors(inv, tmp_path):
     from vulnflow.config import CONTEXT_KEYS, DEVICE_COLUMNS, load_devices
 
-    assert set(DEVICE_COLUMNS[7:]) == CONTEXT_KEYS  # every context key is a column
+    # every context key is a column, but `vendor` (that column is the NVD vendor; always on)
+    assert set(DEVICE_COLUMNS[7:]) == CONTEXT_KEYS - {"vendor"}
     devs = load_devices(ROOT / "devices.example.csv", inv.teams)  # the committed example parses
     fw = devs["fw-edge-01"]
     assert (fw.project, fw.team, fw.version) == ("net:fw-edge-01", "network", "7.4.3")
@@ -6854,3 +6855,86 @@ def test_device_context_for_net_projects(inv, tmp_path):
     sw = context_for(m, p("net:sw"))  # machines.toml overrides the list
     assert sw is not None and sw.exposure == "internal"
     assert context_for(m, p("net:unknown")) is None
+
+
+def test_vendor_flag_and_vendor_section(inv, tmp_path):
+    """`vendor` in the asset context (always on for devices), its tag, and the weekly
+    vendor section: open findings and the age of the oldest, kept over project versions."""
+    from vulnflow import report as rp
+    from vulnflow.clients import DTProject
+    from vulnflow.config import AssetContext, load_devices, load_machines
+
+    f = tmp_path / "m.toml"
+    f.write_text('[projects."code:pos"]\nvendor = true\ncriticality = "high"\n')
+    ctx = load_machines(f, inv.teams).projects["code:pos"]
+    assert ctx.vendor and "flag-vendor" in ctx.tags()
+    f.write_text('[projects."code:pos"]\nvendor = "yes"\n')
+    with pytest.raises(SystemExit):
+        load_machines(f, inv.teams)
+    assert AssetContext(vendor=True)  # a vendor flag alone is known context
+    d = tmp_path / "devices.csv"
+    d.write_text("name,team,vendor,product,version\nfw,network,fortinet,fortios,7.4.3\n")
+    assert load_devices(d, inv.teams)["fw"].context.vendor
+
+    # the earliest first match over versions survives the merge in collect_findings
+    fake = _report_portfolio()
+    p2 = fake.findings["p2"][0]
+    p2["attribution"] = {"attributedOn": 1_700_000_000_000}
+    fake.projects["p4"] = {
+        "uuid": "p4",
+        "name": "container:grafana",
+        "version": "13.3.2",
+        "active": True,
+        "tags": [{"name": "team-dev"}, {"name": "kind-host"}],
+        "lastBomImport": 1_800_000_000_000,
+    }
+    later = _dt_finding("grafana", "13.3.2", "CVE-2026-0004", "MEDIUM")
+    later["attribution"] = {"attributedOn": 1_790_000_000_000}
+    fake.findings["p4"] = [later]
+    current = rp.collect_findings(inv, DependencyTrack("http://dt", "k", transport=fake), [])
+    assert current["dev|container:grafana|grafana|CVE-2026-0004"].attributed == 1_700_000_000
+
+    now = 1_700_000_000 + 40 * 86400
+    hot = rp.OpenFinding(
+        "network",
+        "net:fw",
+        "7.4.3",
+        "fortios",
+        "7.4.3",
+        "CVE-1",
+        "HIGH",
+        tier=2,
+        attributed=now - 10 * 86400,
+    )
+    old = rp.OpenFinding(
+        "network",
+        "net:fw",
+        "7.4.3",
+        "fortios",
+        "7.4.3",
+        "CVE-2",
+        "MEDIUM",
+        tier=3,
+        attributed=now - 30 * 86400,
+    )
+    current |= {hot.key: hot, old.key: old}
+
+    def dp(name: str) -> DTProject:
+        return DTProject(f"u-{name}", name, "1", True, [])
+
+    vendors = [
+        ("network", dp("net:quiet"), AssetContext(vendor=True)),
+        ("network", dp("net:fw"), AssetContext(vendor=True)),
+        ("dev", dp("container:grafana"), AssetContext(vendor=True)),
+    ]
+    sec = rp.vendor_section(vendors, current, now)
+    para, table = sec.blocks
+    assert isinstance(para, rp.Para) and "**3** vendor system(s), **2** with open findings" in para.text
+    assert isinstance(table, rp.Table)
+    assert table.header == ["Project", "Team", "Open P1/P2", "Open", "Oldest open"]
+    assert table.rows == [
+        ["`net:fw@1`", "network", "1", "2", "30 days (`CVE-2`)"],
+        ["`container:grafana@1`", "dev", "0", "1", "40 days (`CVE-2026-0004`)"],
+        ["`net:quiet@1`", "network", "0", "0", "-"],
+    ]
+    assert "No project" in rp.vendor_section([], current, now).text()

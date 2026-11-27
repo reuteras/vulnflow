@@ -187,6 +187,9 @@ sw-core-01,network,,,,,cpe:2.3:o:cisco:ios_xe:17.9.4:*:*:*:*:*:*:*,internal,staf
   NVD's CPE dictionary: they are lower case (`fortinet`, `fortios`).
 - `exposure` … `review` are the device's asset context, as in `machines.toml`
   ([Exposure](exposure.md#step-5-in-use)). A `[projects."net:<name>"]` there overrides them.
+  Every device is also flagged `vendor` (tag `flag-vendor`): the weekly report lists it under
+  vendor systems with the age of its oldest open finding. The `vendor` column is the NVD
+  vendor name, not that flag.
 - Lines starting with `#` are comments. A wrong value (unknown team, a name that isn't an
   NVD name, a version with `:`) stops the run with the row number.
 
