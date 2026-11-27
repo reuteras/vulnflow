@@ -2566,29 +2566,37 @@ def test_duplicates_keeps_one_finding_per_alias_group_and_respects_triage(inv, t
             finding("jwt", "CVE-2", "HIGH"),
             # same CVE on another component: a different group
             finding("urllib3", "GHSA-c", "LOW", ["CVE-1"]),
-            # somebody triaged one of these: the group is left alone
+            # somebody decided on one id: the decision is copied to the other
             finding("werkzeug", "GHSA-d", "HIGH", ["CVE-4"], state="NOT_AFFECTED", suppressed=True),
             finding("werkzeug", "PYSEC-d", "HIGH", ["CVE-4"]),
             finding("pip", "CVE-9", "MEDIUM"),  # no alias: alone
+            # somebody is looking at one (IN_TRIAGE is no decision): the group is theirs
+            finding("requests", "GHSA-e", "MEDIUM", ["CVE-5"], state="IN_TRIAGE"),
+            finding("requests", "PYSEC-e", "MEDIUM", ["CVE-5"]),
         ],
         "p0": [finding("x", "GHSA-z", "HIGH", ["CVE-z"]), finding("x", "PYSEC-z", "HIGH", ["CVE-z"])],
     }
     fake = FakePortfolio(projects, findings)
+    fake.analyses[("p1", "werkzeug", "V-GHSA-d")] = {
+        "analysisState": "NOT_AFFECTED",
+        "analysisJustification": "CODE_NOT_REACHABLE",
+        "isSuppressed": True,
+        "analysisComments": [{"comment": "debugger not enabled; review by 2027-01-31; via vulnflow"}],
+    }
     dt = DependencyTrack("http://dt", "k", transport=fake)
     record = tmp_path / "duplicates.json"
     day = date(2026, 11, 27)
 
     dry = suppress_duplicates(inv, dt, record_path=record, today=day)
     assert [c for c in fake.calls if c[0] != "GET"] == [] and not record.exists()
-    assert dry.groups == 3 and dry.errors == []
+    assert dry.groups == 4 and dry.errors == []
     assert dry.suppressed == [
         "dev/container:airflow@1: aiohttp GHSA-a duplicate of PYSEC-a",
         "dev/container:airflow@1: jwt CVE-2 duplicate of GHSA-b",
         "dev/container:airflow@1: jwt PYSEC-b duplicate of GHSA-b",
     ]
-    assert dry.left_alone == [
-        "dev/container:airflow@1: werkzeug GHSA-d, PYSEC-d (GHSA-d is NOT_AFFECTED)"
-    ]
+    assert dry.copied == ["dev/container:airflow@1: werkzeug PYSEC-d <- NOT_AFFECTED from GHSA-d"]
+    assert dry.left_alone == ["dev/container:airflow@1: requests GHSA-e, PYSEC-e (GHSA-e is IN_TRIAGE)"]
     assert not any("/finding/project/p0" in c[1] for c in fake.calls)  # inactive
 
     rep = suppress_duplicates(inv, dt, apply=True, record_path=record, today=day)
@@ -2599,6 +2607,16 @@ def test_duplicates_keeps_one_finding_per_alias_group_and_respects_triage(inv, t
         "Duplicate of PYSEC-a on this component (aliases: GHSA-a, PYSEC-a); tracked there; via vulnflow"
     )
     assert ("p1", "aiohttp", "V-PYSEC-a") not in fake.analyses
+    copy = fake.analyses[("p1", "werkzeug", "V-PYSEC-d")]
+    assert (copy["analysisState"], copy["analysisJustification"], copy["isSuppressed"]) == (
+        "NOT_AFFECTED",
+        "CODE_NOT_REACHABLE",
+        True,
+    )
+    # the review date goes along, so prune reopens both on the same day
+    assert copy["analysisComments"][0]["comment"] == (
+        "Same vulnerability as GHSA-d (alias): debugger not enabled; review by 2027-01-31; via vulnflow"
+    )
     assert json.loads(record.read_text())["p1/aiohttp/V-GHSA-a"] == {
         "keeper": "PYSEC-a",
         "since": "2026-11-27",
@@ -2606,7 +2624,7 @@ def test_duplicates_keeps_one_finding_per_alias_group_and_respects_triage(inv, t
 
     writes = len([c for c in fake.calls if c[0] == "PUT"])
     again = suppress_duplicates(inv, dt, apply=True, record_path=record, today=day)
-    assert again.suppressed == again.restored == [] and again.errors == []
+    assert again.suppressed == again.restored == again.copied == [] and again.errors == []
     assert len([c for c in fake.calls if c[0] == "PUT"]) == writes  # idempotent
 
     # the GHSA becomes known-exploited: it is kept now, the PYSEC is the duplicate
@@ -2644,6 +2662,168 @@ def test_duplicates_keeps_one_finding_per_alias_group_and_respects_triage(inv, t
     assert "dev/container:airflow@1: werkzeug GHSA-d, PYSEC-d (PYSEC-d suppressed by hand)" in (
         by_hand.left_alone
     )
+
+
+def test_triage_rules_config_is_strict(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.config import _triage_rules
+
+    today = date(2026, 11, 27)
+    ok = {
+        "vulnerabilities": ["PYSEC-2023-314"],
+        "component": "apache-airflow",
+        "reason": "sqoop provider  not installed",
+        "review_by": date(2027, 5, 27),
+        "justification": "CODE_NOT_PRESENT",
+        "projects": ["container:opencve-airflow-*"],
+        "teams": ["dev"],
+    }
+    (rule,) = _triage_rules({"sqoop": ok}, inv.teams, "m.toml", today).values()
+    assert (rule.state, rule.reason, rule.allow_kev) == (
+        "NOT_AFFECTED",
+        "sqoop provider not installed",
+        False,
+    )
+
+    def refused(change: dict, message: str) -> None:
+        bad = {**ok, **change}
+        bad = {k: v for k, v in bad.items() if v is not None}
+        with pytest.raises(SystemExit, match=message):
+            _triage_rules({"r": bad}, inv.teams, "m.toml", today)
+
+    refused({"reason": None}, "reason required")
+    refused({"review_by": None}, "review_by required")
+    refused({"review_by": "2027-05-27"}, "TOML date")
+    refused({"review_by": date(2028, 1, 1)}, "more than 366 days")
+    refused({"state": "RESOLVED"}, "state must be one of")
+    refused({"justification": "BECAUSE"}, "justification goes with")
+    refused({"state": "EXPLOITABLE", "justification": None}, "needs response")
+    refused({"response": "WILL_NOT_FIX"}, "needs response")  # only EXPLOITABLE takes one
+    refused({"teams": ["nobody"]}, "unknown teams")
+    refused({"versions": "2.10.4"}, "list of non-empty strings")
+    refused({"component_name": "x"}, "takes only")
+    accepted = {**ok, "state": "EXPLOITABLE", "response": "CAN_NOT_FIX", "justification": None}
+    accepted = {k: v for k, v in accepted.items() if v is not None}
+    assert _triage_rules({"r": accepted}, inv.teams, "m.toml", today)["r"].response == "CAN_NOT_FIX"
+
+
+def test_triage_rules_close_matching_findings_unattended(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow.config import TriageRule
+    from vulnflow.report import rule_closures_section
+    from vulnflow.rules import apply_rules
+
+    def finding(comp, version, vuln_id, aliases=(), kev=False, state=""):
+        vuln = {
+            "uuid": f"V-{vuln_id}",
+            "vulnId": vuln_id,
+            "isKev": kev,
+            "aliases": [{"cveId": a} for a in aliases],
+        }
+        comp = {"uuid": f"{comp}-{version}", "name": comp, "version": version}
+        return {"component": comp, "vulnerability": vuln, "analysis": {"state": state} if state else {}}
+
+    def project(uuid, name, team="dev"):
+        return {
+            "uuid": uuid,
+            "name": name,
+            "version": "latest",
+            "active": True,
+            "tags": [{"name": f"team-{team}"}],
+        }
+
+    projects = [
+        project("w", "container:opencve-airflow-worker"),
+        project("s", "container:opencve-airflow-scheduler"),
+        project("o", "container:other-airflow"),
+    ]
+    findings = {
+        "w": [
+            finding("apache-airflow", "2.10.4", "PYSEC-2023-314"),
+            # the GHSA of the same issue: matched through the CVE alias
+            finding("Apache-Airflow", "2.10.4", "GHSA-x", aliases=["CVE-2023-1"]),
+            finding("apache-airflow", "2.10.4", "PYSEC-other"),  # other vulnerability
+            finding("gitpython", "3.1.44", "PYSEC-2023-314"),  # other component
+        ],
+        "s": [
+            finding("apache-airflow", "2.10.4", "PYSEC-2023-314", state="IN_TRIAGE"),  # somebody's
+            finding("apache-airflow", "2.10.4", "CVE-2023-1", kev=True),  # KEV: skipped
+        ],
+        "o": [finding("apache-airflow", "2.10.4", "PYSEC-2023-314")],  # project pattern: no
+    }
+    fake = FakePortfolio(projects, findings)
+    dt = DependencyTrack("http://dt", "k", transport=fake)
+    today = date(2026, 11, 27)
+    rules = {
+        "airflow-sqoop": TriageRule(
+            name="airflow-sqoop",
+            vulnerabilities=["PYSEC-2023-314", "CVE-2023-1"],
+            component="apache-airflow",
+            reason="apache-airflow-providers-sqoop is not installed",
+            review_by=date(2027, 5, 27),
+            justification="CODE_NOT_PRESENT",
+            projects=["container:opencve-airflow-*"],
+        ),
+        "old": TriageRule(
+            name="old",
+            vulnerabilities=["PYSEC-other"],
+            component="apache-airflow",
+            reason="x",
+            review_by=date(2026, 11, 1),
+        ),
+        "nothing": TriageRule(
+            name="nothing",
+            vulnerabilities=["CVE-0"],
+            component="zlib",
+            reason="x",
+            review_by=date(2027, 1, 1),
+        ),
+    }
+    ledger = tmp_path / "ignored.jsonl"
+
+    dry = apply_rules(inv, dt, rules, ledger=ledger, today=today)
+    assert [c for c in fake.calls if c[0] != "GET"] == [] and not ledger.exists()
+    worker, scheduler = (
+        "dev/container:opencve-airflow-worker@latest",
+        "dev/container:opencve-airflow-scheduler@latest",
+    )
+    assert dry.written == [
+        f"{worker}: Apache-Airflow GHSA-x <- NOT_AFFECTED (airflow-sqoop)",
+        f"{worker}: apache-airflow PYSEC-2023-314 <- NOT_AFFECTED (airflow-sqoop)",
+    ]
+    assert dry.kev_skipped == [f"{scheduler}: apache-airflow CVE-2023-1 (airflow-sqoop)"]
+    assert dry.expired == ["old (review by 2026-11-01)"] and dry.unused == ["nothing"]
+
+    rep = apply_rules(inv, dt, rules, apply=True, ledger=ledger, today=today)
+    assert rep.errors == [] and len(rep.written) == 2
+    assert (
+        rep.kept
+        == dry.kept
+        == [f"{scheduler}: apache-airflow PYSEC-2023-314 is IN_TRIAGE (airflow-sqoop)"]
+    )
+    a = fake.analyses[("w", "apache-airflow-2.10.4", "V-PYSEC-2023-314")]
+    assert (a["analysisState"], a["analysisJustification"], a["isSuppressed"]) == (
+        "NOT_AFFECTED",
+        "CODE_NOT_PRESENT",
+        True,
+    )
+    assert a["analysisComments"][0]["comment"] == (
+        "apache-airflow-providers-sqoop is not installed; rule triage.airflow-sqoop; "
+        "review by 2027-05-27; reviewed 2026-11-27 via vulnflow"
+    )
+    assert ("w", "apache-airflow-2.10.4", "V-PYSEC-other") not in fake.analyses  # expired rule
+
+    again = apply_rules(inv, dt, rules, apply=True, ledger=ledger, today=today)
+    assert again.written == [] and again.errors == []  # suppressed now: no longer open
+
+    sec, newest = rule_closures_section(ledger.read_text().splitlines(), "", ["old"])
+    assert sec.notable and newest
+    text = sec.text()
+    assert "`airflow-sqoop`" in text and "apache-airflow PYSEC-2023-314" in text and "`old`" in text
+    later, _ = rule_closures_section(ledger.read_text().splitlines(), newest)
+    assert "None." in later.text() and not later.notable
 
 
 def test_prune_retires_what_the_hosts_last_scan_did_not_upload(inv):

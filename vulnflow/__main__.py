@@ -966,6 +966,25 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
                 sections += _context_sections(inv, a, dt, current)
 
     machines = load_machines(a.machines, inv.teams)
+    if machines.triage_rules:
+        from datetime import date
+
+        expired = sorted(n for n, r in machines.triage_rules.items() if r.review_by < date.today())
+        try:
+            text = (Path(a.data_dir) / "ignored.jsonl").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        sec, newest = rp.rule_closures_section(
+            text.splitlines(), str(mine.get("rules_since", "")), expired
+        )
+        if "rules_since" not in mine:
+            sec = rp.Section(
+                sec.title, [rp.Para("First report: listed from the next one.")], sec.notable
+            )
+            if expired:
+                sec.blocks = rp.rule_closures_section([], "", expired)[0].blocks
+        sections.append(sec)
+        mine["rules_since"] = newest
     if machines.hosts and dt is not None:
         try:
             sections.append(rp.machines_section(machines, last_pushes(dt), a.stale_days))
@@ -1223,6 +1242,13 @@ def main(argv: list[str] | None = None) -> int:
     wh.add_argument("--project", default=None, help="only projects whose name contains this")
     wh.add_argument("--team", default=None, help="only this team (default: all)")
     wh.add_argument("--json", action="store_true")
+
+    tr = sub.add_parser(
+        "triage-rules",
+        help="apply machines.toml's [triage.*] decisions to matching open findings; runs in every "
+        "dt2dojo round; dry run unless --apply",
+    )
+    tr.add_argument("--apply", action="store_true", help="write (DT_MAINTENANCE_API_KEY)")
 
     du = sub.add_parser(
         "duplicates",
@@ -1793,6 +1819,42 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
 
+    if a.cmd == "triage-rules":
+        from .rules import apply_rules
+
+        maint = _maintenance_dt()
+        if maint is None:
+            print(
+                "  error DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates team "
+                "vulnflow-maintenance and its key",
+                file=sys.stderr,
+            )
+            return 2
+        rules = load_machines(a.machines, inv.teams).triage_rules
+        if not rules:
+            print(f"  no [triage.*] rules in {a.machines}", file=sys.stderr)
+            return 0
+        rr = apply_rules(inv, maint, rules, apply=a.apply, ledger=data_dir / "ignored.jsonl")
+        for line in rr.written:
+            print(f"  {'write' if a.apply else 'would'}  {line}")
+        for line in rr.kept:
+            print(f"  kept   {line}")
+        for line in rr.kev_skipped:
+            print(f"  kev    {line} (KEV-listed; set allow_kev = true to include)")
+        for name in rr.expired:
+            print(f"  expired {name}: review it and set a new review_by")
+        for name in rr.unused:
+            print(f"  unused {name}: matches no open finding")
+        print(
+            f"  {len(rules)} rule(s): {len(rr.written)} finding(s) "
+            f"{'written' if a.apply else 'to write'}, {rr.already} already done, {len(rr.kept)} "
+            f"triaged by somebody else" + ("" if a.apply else "; dry run, add --apply"),
+            file=sys.stderr,
+        )
+        for msg in rr.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if rr.errors else 0
+
     if a.cmd == "duplicates":
         from .duplicates import suppress_duplicates
 
@@ -1814,11 +1876,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  restore   {line}")
         for line in dup.suppressed:
             print(f"  suppress  {line}")
+        for line in dup.copied:
+            print(f"  copy      {line}")
         if a.verbose_groups:
             for line in dup.left_alone:
                 print(f"  leave     {line}")
         print(
             f"  {dup.groups} alias group(s): {len(dup.suppressed)} finding(s) to suppress, "
+            f"{len(dup.copied)} to get the decision of an alias, "
             f"{len(dup.restored)} to keep open again, {len(dup.left_alone)} group(s) triaged by "
             "somebody and left alone" + ("" if a.apply else "; dry run, add --apply"),
             file=sys.stderr,
