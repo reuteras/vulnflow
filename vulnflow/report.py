@@ -61,7 +61,10 @@ from .machines import host_scans, project_name
 from .patches import open_findings
 from .ranking import VectorCache, rank_finding
 from .receiver import NOTIFY_LABELS
+from .rules import RULE_TAG
 from .upstreams import Status
+
+RULE_RE = re.compile(re.escape(RULE_TAG) + r"([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 KINDS = ("daily", "weekly")
 IMPORTANT = ("CRITICAL", "HIGH")
@@ -240,6 +243,44 @@ def kev_section(lines: Iterable[str], since: str) -> tuple[Section, str]:
     if rows:
         _table(s, ["Added", "CVE", "Vulnerability", "Hits"], rows)
     else:
+        s.blocks.append(Para("None."))
+    return s, newest
+
+
+def rule_closures_section(
+    lines: Iterable[str], since: str, expired: list[str] | None = None
+) -> tuple[Section, str]:
+    """Findings the [triage.*] rules closed after `since`, from the ignore ledger
+    (data/ignored.jsonl, entries whose comment names `rule triage.<name>`), and rules past
+    their review date (notable: they no longer apply and their findings come back)."""
+    s = Section("Closed by triage rules")
+    newest = since
+    count: Counter[tuple[str, str]] = Counter()
+    for raw in lines:
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        at = str(e.get("at", ""))
+        m = RULE_RE.search(str(e.get("comment") or ""))
+        if e.get("op") != "ignore" or m is None:
+            continue
+        newest = max(newest, at)
+        if since and at <= since:
+            continue
+        count[(m.group(1), f"{e.get('component', '')} {e.get('vuln_id', '')}")] += 1
+    if expired:
+        s.notable = True
+        s.blocks.append(
+            Para(
+                "Past their review date, no longer applied (review them and set a new "
+                "`review_by` in machines.toml, or remove them): " + ", ".join(code(r) for r in expired)
+            )
+        )
+    if count:
+        rows = [[code(rule), what, str(n)] for (rule, what), n in sorted(count.items())]
+        _table(s, ["Rule", "Finding", "Projects"], rows)
+    elif not expired:
         s.blocks.append(Para("None."))
     return s, newest
 

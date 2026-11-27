@@ -21,6 +21,18 @@ there), so checked against a running 5.2.2 instead (2026-11-24):
   PUT  same path  {"config": {...}}  -> 204, or 304 if unchanged. It answers only as
        application/problem+json: with Accept: application/json it is a 406.
   OSV ships disabled, ecosystems PyPI/npm/Go/Maven/NuGet (no Debian); only NVD is on.
+  aliasSyncEnabled (default false) keeps each OSV record's `aliases`. OSV's PyPI data holds
+  both the PYSEC and the GHSA record of one issue, and DT files GHSA-* ids under source
+  GITHUB (ModelConverter.SOURCE_NAME_BY_PREFIX); without the aliases every such issue is two
+  findings. Aliases are only stored when a record is mirrored, and incremental mirroring
+  (a watermark per ecosystem) skips records already seen, so turning it on needs one run
+  with incrementalMirroringEnabled false (5.2.2 source, vuln-data-source/osv; seen live
+  2026-11-27: a full run of 7 ecosystems took under 4 minutes and the open findings went
+  from 3194 to 2451 issues).
+OSV mirror runs (OpenAPI in the 5.2.2 tag, VulnDataSourcesResource; SYSTEM_CONFIGURATION):
+  POST /api/v2/vuln-data-sources/osv/mirror-runs         -> 202 (seen live)
+  GET  /api/v2/vuln-data-sources/osv/mirror-runs/latest  -> {"status": PENDING|RUNNING|
+       COMPLETED|FAILED, "started_at", "completed_at"} (seen live)
 
 DefectDojo (checked against 3.5.300): the initializer creates the admin with DD_ADMIN_PASSWORD
 (passed in by stacks/defectdojo/override.yml) and
@@ -105,6 +117,10 @@ class DTBootstrapResult:
 
 
 DT_OSV_PATH = "api/v2/extension-points/vuln-data-source/extensions/osv/config"
+DT_OSV_RUNS = "api/v2/vuln-data-sources/osv/mirror-runs"
+# The v2 API answers only as application/problem+json; with the client's usual
+# Accept: application/json, DT 5.2.2 rejects a PUT with 406 (seen live 2026-11-24)
+DT_V2_ACCEPT = {"Accept": "application/json, application/problem+json"}
 # OsvVulnDataSourceFactory defaults in DT 5.2.2, used if no config is stored yet
 DT_OSV_DEFAULTS: dict[str, Any] = {
     "enabled": False,
@@ -115,10 +131,64 @@ DT_OSV_DEFAULTS: dict[str, Any] = {
 }
 
 
-def dt_enable_osv(http: Http, ecosystems: list[str]) -> str:
-    """Enable DT's OSV source with at least these ecosystems. Keeps everything else as it
-    is (ecosystems are only added, never removed). Never raises: DT works without OSV, so
-    the caller reports a failure instead of aborting the bootstrap."""
+class _OsvConfigError(Exception):
+    pass
+
+
+def _put_osv_config(http: Http, config: dict[str, Any]) -> bool:
+    """Store the OSV config; False when DT says it was already so (304)."""
+    r = http.put(DT_OSV_PATH, json_body={"config": config}, headers=DT_V2_ACCEPT, expect_ok=False)
+    if r.status == 304:
+        return False
+    if not r.ok:
+        raise _OsvConfigError(
+            f"PUT OSV config HTTP {r.status} {r.body[:200].decode('utf-8', 'replace')}"
+        )
+    return True
+
+
+def dt_osv_full_mirror(
+    http: Http,
+    config: dict[str, Any],
+    *,
+    timeout: float = 900.0,
+    interval: float = 10.0,
+    sleep: Any = time.sleep,
+) -> str:
+    """Run one OSV mirror with incremental mirroring off, so every record is read again
+    (and gets its aliases), then put `config`'s own incremental setting back. Never
+    raises; says how it went."""
+    try:
+        _put_osv_config(http, {**config, "incrementalMirroringEnabled": False})
+        status = "not started"
+        try:
+            r = http.post(DT_OSV_RUNS, headers=DT_V2_ACCEPT, expect_ok=False)
+            if r.status != 202:
+                return f"failed: start OSV mirror run HTTP {r.status}"
+            waited = 0.0
+            while waited <= timeout:
+                sleep(interval)
+                waited += interval
+                r = http.get(f"{DT_OSV_RUNS}/latest", headers=DT_V2_ACCEPT, expect_ok=False)
+                status = str((r.json() or {}).get("status") or "") if r.ok else f"HTTP {r.status}"
+                if status in ("COMPLETED", "FAILED"):
+                    break
+        finally:
+            # back to incremental even if the run is still going: it read its config at start
+            _put_osv_config(http, config)
+        if status == "COMPLETED":
+            return "full mirror completed"
+        return f"full mirror {status.lower() or 'unknown'} after {waited:.0f}s"
+    except (OSError, _OsvConfigError) as e:
+        return f"failed: {e}"
+
+
+def dt_enable_osv(http: Http, ecosystems: list[str], *, sleep: Any = time.sleep) -> str:
+    """Enable DT's OSV source with at least these ecosystems and with alias sync. Keeps
+    everything else as it is (ecosystems are only added, never removed). When alias sync
+    is turned on for an OSV source that has already mirrored, runs one full mirror so the
+    records seen before get their aliases too. Never raises: DT works without OSV, so the
+    caller reports a failure instead of aborting the bootstrap."""
     if not ecosystems:
         return "skipped"
     try:
@@ -131,24 +201,14 @@ def dt_enable_osv(http: Http, ecosystems: list[str]) -> str:
             return f"failed: GET OSV config HTTP {r.status}"
         have = list(current.get("ecosystems") or [])
         added = [e for e in ecosystems if e not in have]
-        wanted = {**current, "enabled": True, "ecosystems": have + added}
-        if wanted == current:
+        wanted = {**current, "enabled": True, "aliasSyncEnabled": True, "ecosystems": have + added}
+        if wanted == current or not _put_osv_config(http, wanted):
             return "unchanged"
-        # The v2 API answers this PUT only as application/problem+json; with the client's
-        # usual Accept: application/json, DT 5.2.2 rejects it with 406 (seen live 2026-11-24)
-        r = http.put(
-            DT_OSV_PATH,
-            json_body={"config": wanted},
-            headers={"Accept": "application/json, application/problem+json"},
-            expect_ok=False,
-        )
-        if r.status == 304:
-            return "unchanged"
-        if not r.ok:
-            body = r.body[:200].decode("utf-8", "replace")
-            return f"failed: PUT OSV config HTTP {r.status} {body}"
-        return "updated: enabled, ecosystems " + ", ".join(wanted["ecosystems"])
-    except OSError as e:
+        msg = "updated: enabled, alias sync, ecosystems " + ", ".join(wanted["ecosystems"])
+        if current.get("enabled") and not current.get("aliasSyncEnabled"):
+            msg += "; " + dt_osv_full_mirror(http, wanted, sleep=sleep)
+        return msg
+    except (OSError, _OsvConfigError) as e:
         return f"failed: {e}"
 
 
