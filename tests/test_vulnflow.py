@@ -4729,7 +4729,7 @@ def test_finding_watch_notifies_once_per_channel(inv, tmp_path):
         "@sysadm 1 new finding(s) to act on for team sysadm\n"
         "- [P1 Act] CVE-2026-1: OpenSSL overflow\n"
         "  new finding: openssl 3.0.1 in host:web@13, critical asset, CVSS 9.8, EPSS 0.500: "
-        "in CISA KEV; internet-facing http://oc/cve/CVE-2026-1"
+        "in CISA KEV; internet-facing · [OpenCVE](http://oc/cve/CVE-2026-1)"
     )
     assert sent["soc"][0].startswith("SOC: 1 new finding(s)") and ", team sysadm," in sent["soc"][0]
     assert sent["page"][0].startswith("PAGE: 1 P1 finding(s) on critical assets")
@@ -7448,3 +7448,38 @@ def test_dt2dojo_recalculates_dt_metrics_only_after_writing_analyses(inv, tmp_pa
 
     again = dt_to_dojo(inv, dt, dojo, maintenance=dt, data_dir=tmp_path)
     assert again.errors == [] and len(metric_calls()) == 2  # nothing written: no recalculation
+
+
+def test_finding_watch_links_to_opencve_via_aliases_and_to_dojo_and_dt():
+    from vulnflow.findwatch import ChatLinks
+    from vulnflow.ranking import Ranked
+
+    def ranked(vuln_id, aliases=(), component_uuid="c-1"):
+        return Ranked(
+            team="dev",
+            project="container:docker.io/grafana/grafana",
+            project_version="13.3.2",
+            component="github.com/grafana/grafana",
+            version="13.3.2",
+            vuln_id=vuln_id,
+            severity="HIGH",
+            tier=2,
+            tier_name="P2 Attend",
+            component_uuid=component_uuid,
+            aliases=list(aliases),
+        )
+
+    links = ChatLinks("https://oc.ts.net/", "https://dd.ts.net", "https://dt.ts.net:8443")
+    # a Go advisory: OpenCVE through its CVE alias, DefectDojo by its own id
+    assert links.for_finding(ranked("GO-2024-3215", ["CVE-2024-9264", "GHSA-q99m-qcv4-fpm7"])) == (
+        " · [OpenCVE](https://oc.ts.net/cve/CVE-2024-9264)"
+        " [DefectDojo](https://dd.ts.net/simple_search?query=GO-2024-3215)"
+        " [Dependency-Track](https://dt.ts.net:8443/components/c-1)"
+    )
+    # no CVE among the ids: no OpenCVE link
+    assert links.for_finding(ranked("GHSA-x")).startswith(" · [DefectDojo](")
+    # nothing configured: no links at all, and no dangling separator
+    assert ChatLinks().for_finding(ranked("CVE-2024-1")) == ""
+    assert ChatLinks(opencve="https://oc").for_finding(ranked("cve-2024-1")) == (
+        " · [OpenCVE](https://oc/cve/CVE-2024-1)"
+    )

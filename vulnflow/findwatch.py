@@ -43,6 +43,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .config import ChatChannel, Inventory, cpe_vendor_product
 from .net import Http
@@ -101,7 +102,33 @@ class WatchResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _line(n: Notice, opencve_url: str, team: bool, also: list[Notice] | None = None) -> str:
+@dataclass
+class ChatLinks:
+    """Where a finding's line links to (browser-facing base URLs, "" = no such link):
+    OpenCVE (OPENCVE_URL), DefectDojo (DD_SITE_URL) and the Dependency-Track UI."""
+
+    opencve: str = ""
+    defectdojo: str = ""
+    dependency_track: str = ""
+
+    def for_finding(self, r: Ranked) -> str:
+        """Markdown links for one finding, " · "-prefixed; "" when none is configured.
+        OpenCVE needs a CVE id: the finding's own, else the first CVE among its aliases (a
+        GO-/GHSA-/PYSEC- finding usually has one since DT's alias sync)."""
+        links = []
+        cve = next((i for i in [r.vuln_id, *r.aliases] if i.upper().startswith("CVE-")), "")
+        if self.opencve and cve:
+            links.append(f"[OpenCVE]({self.opencve.rstrip('/')}/cve/{cve.upper()})")
+        if self.defectdojo and r.vuln_id:
+            q = quote(r.vuln_id, safe="")
+            links.append(f"[DefectDojo]({self.defectdojo.rstrip('/')}/simple_search?query={q})")
+        if self.dependency_track and r.component_uuid:
+            uuid = quote(r.component_uuid, safe="")
+            links.append(f"[Dependency-Track]({self.dependency_track.rstrip('/')}/components/{uuid})")
+        return f" · {' '.join(links)}" if links else ""
+
+
+def _line(n: Notice, links: ChatLinks, team: bool, also: list[Notice] | None = None) -> str:
     """One finding; with `also`, the same vulnerability elsewhere, named in the same line."""
     r = n.finding
     group = [n, *(also or [])]
@@ -109,9 +136,7 @@ def _line(n: Notice, opencve_url: str, team: bool, also: list[Notice] | None = N
     teams = sorted({x.finding.team for x in group})
     epss = f"{r.epss:.3f}" if r.epss is not None else "n/a"
     cvss = r.cvss if r.cvss is not None else "n/a"
-    link = ""
-    if opencve_url and r.vuln_id.upper().startswith("CVE-"):
-        link = f" {opencve_url.rstrip('/')}/cve/{r.vuln_id.upper()}"
+    link = links.for_finding(r)
     crit = f", {r.criticality} asset" if r.criticality else ""
     named = f", team{'s' if len(teams) > 1 else ''} {', '.join(teams)}" if team else ""
     return (
@@ -121,14 +146,14 @@ def _line(n: Notice, opencve_url: str, team: bool, also: list[Notice] | None = N
     )
 
 
-def _message(head: str, notices: list[Notice], opencve_url: str, team: bool) -> str:
-    lines = [head, *(_line(n, opencve_url, team) for n in notices[:MAX_LINES])]
+def _message(head: str, notices: list[Notice], links: ChatLinks, team: bool) -> str:
+    lines = [head, *(_line(n, links, team) for n in notices[:MAX_LINES])]
     if len(notices) > MAX_LINES:
         lines.append(f"(+{len(notices) - MAX_LINES} more; DefectDojo tags tier-p1/tier-p2)")
     return "\n".join(lines)
 
 
-def _grouped_message(head: str, notices: list[Notice], opencve_url: str) -> str:
+def _grouped_message(head: str, notices: list[Notice], links: ChatLinks) -> str:
     """A [chat.*] channel's message: one line per vulnerability and component version,
     naming every host and team it is on."""
     groups: dict[tuple[str, str, str], list[Notice]] = {}
@@ -136,18 +161,19 @@ def _grouped_message(head: str, notices: list[Notice], opencve_url: str) -> str:
         r = n.finding
         groups.setdefault((r.vuln_id, r.component, r.version), []).append(n)
     lines = [f"{head}: {len(groups)} new finding(s) in Dependency-Track"]
-    lines += [_line(g[0], opencve_url, True, g[1:]) for g in list(groups.values())[:MAX_LINES]]
+    lines += [_line(g[0], links, True, g[1:]) for g in list(groups.values())[:MAX_LINES]]
     if len(groups) > MAX_LINES:
         lines.append(f"(+{len(groups) - MAX_LINES} more; DefectDojo tags tier-p1/tier-p2)")
     return "\n".join(lines)
 
 
 def messages(
-    channel: str, notices: list[Notice], inv: Inventory, opencve_url: str = ""
+    channel: str, notices: list[Notice], inv: Inventory, links: ChatLinks | None = None
 ) -> list[tuple[str, list[Notice]]]:
     """(text, the notices it carries) for one channel."""
     if not notices:
         return []
+    links = links or ChatLinks()
     if channel == "team":
         out = []
         for t in sorted({n.finding.team for n in notices}):
@@ -155,16 +181,16 @@ def messages(
             team = inv.teams.get(t)
             mention = f"{team.chat_mention} " if team and team.chat_mention else ""
             head = f"{mention}{len(mine)} new finding(s) to act on for team {t}"
-            out.append((_message(head, mine, opencve_url, False), mine))
+            out.append((_message(head, mine, links, False), mine))
         return out
     if channel.startswith(CHAT_PREFIX):
         head = f"#{channel.removeprefix(CHAT_PREFIX)}"
-        return [(_grouped_message(head, notices, opencve_url), notices)]
+        return [(_grouped_message(head, notices, links), notices)]
     if channel == "soc":
         head = f"SOC: {len(notices)} new finding(s) in Dependency-Track"
-        return [(_message(head, notices, opencve_url, True), notices)]
+        return [(_message(head, notices, links, True), notices)]
     head = f"PAGE: {len(notices)} P1 finding(s) on critical assets"
-    return [(_message(head, notices, opencve_url, True), notices)]
+    return [(_message(head, notices, links, True), notices)]
 
 
 def chat_channel_for(r: Ranked, channels: list[ChatChannel]) -> ChatChannel | None:
@@ -236,6 +262,8 @@ def watch(
     *,
     soc_min_tier: int = 1,
     opencve_url: str = "",
+    defectdojo_url: str = "",
+    dependency_track_url: str = "",
     now: float | None = None,
     dry_run: bool = False,
     channels: list[ChatChannel] | None = None,
@@ -285,7 +313,8 @@ def watch(
         if dry_run:
             res.sent[channel] = notices
             continue
-        for text, carried in messages(channel, notices, inv, opencve_url):
+        links = ChatLinks(opencve_url, defectdojo_url, dependency_track_url)
+        for text, carried in messages(channel, notices, inv, links):
             try:
                 send(text)
             except Exception as e:
