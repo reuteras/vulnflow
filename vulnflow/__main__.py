@@ -585,6 +585,25 @@ def _env_set(env_file: str) -> int:
     return 0
 
 
+def _env_sync(env_file: str, example: str, dry_run: bool) -> int:
+    """`env-sync`: new keys from .env.example into .env (bootstrap.sync_env)."""
+    from .bootstrap import sync_env
+
+    try:
+        added, unknown = sync_env(example, env_file, dry_run=dry_run)
+    except FileNotFoundError as e:
+        print(f"  error {e.filename} not found", file=sys.stderr)
+        return 2
+    verb = "would add" if dry_run else "added"
+    for key in added:
+        print(f"  {'new ' if not dry_run else 'plan'}  {key} {verb} to {env_file} from {example}")
+    for key in unknown:
+        print(f"  note  {key} is in {env_file} but not in {example} (left as is)")
+    if not added:
+        print(f"  ok    {env_file} has every key in {example}")
+    return 0
+
+
 def _ignore(a: argparse.Namespace) -> int:
     from .bootstrap import BootstrapError, dt_admin_http
     from .triage import ReviewFileError, apply_ignores, load_review
@@ -1409,6 +1428,13 @@ def main(argv: list[str] | None = None) -> int:
     owi.add_argument("--webhook-url", default=None, help="default: $VULNFLOW_WEBHOOK_URL")
 
     sub.add_parser("env-set", help="read KEY=VALUE lines from stdin into the .env file")
+    es = sub.add_parser(
+        "env-sync",
+        help="add keys that are new in .env.example to the .env file, with their comments "
+        "and defaults (existing values are never changed)",
+    )
+    es.add_argument("--example", default=".env.example", metavar="FILE")
+    es.add_argument("--dry-run", action="store_true", help="show what would be added")
 
     rpt = sub.add_parser(
         "report",
@@ -1457,6 +1483,8 @@ def main(argv: list[str] | None = None) -> int:
     a.machines = a.machines or env("VULNFLOW_MACHINES") or "machines.toml"
     if a.cmd == "env-set":
         return _env_set(a.env_file)
+    if a.cmd == "env-sync":
+        return _env_sync(a.env_file, a.example, a.dry_run)
     if a.cmd == "dd-bootstrap":
         return _dd_bootstrap(a.env_file, a.wait)
     if a.cmd == "mm-bootstrap":

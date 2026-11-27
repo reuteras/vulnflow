@@ -1167,6 +1167,74 @@ def test_set_env_values_keeps_layout(tmp_path):
         set_env_values(p, {"X": "a\nEVIL=1"})
 
 
+def test_sync_env_adds_new_keys_in_place_and_keeps_values(tmp_path, capsys):
+    from vulnflow.__main__ import main
+    from vulnflow.bootstrap import sync_env
+
+    example = tmp_path / ".env.example"
+    example.write_text(
+        "# Keys are sorted within each section.\n"
+        "\n"
+        "# ---- Dependency-Track ----\n"
+        "DT_API_KEY=\n"
+        "# OSV ecosystems\n"
+        "DT_OSV_ECOSYSTEMS=Debian,PyPI\n"
+        "# Telemetry: off unless true\n"
+        "# (second comment line)\n"
+        "DT_TELEMETRY=false\n"
+        "DT_URL=http://localhost:8180\n"
+        "\n"
+        "# ---- Receiver ----\n"
+        "CIRCL_URL=https://vulnerability.circl.lu\n"
+        "# VulnCheck KEV token\n"
+        "VULNCHECK_API_TOKEN=\n"
+        "# DT_COMMENTED=not a key\n"
+    )
+    key = secrets.token_hex(8)
+    env = tmp_path / ".env"
+    env.write_text(
+        "# ---- Dependency-Track ----\n"
+        f"DT_API_KEY={key}\n"
+        "DT_OSV_ECOSYSTEMS=Debian\n"  # the operator's value: kept
+        "DT_URL=http://dt:8180\n"
+        "OLD_SETTING=1\n"
+        "VULNFLOW_CHAT_WEBHOOK_DEBIAN=http://mm/hooks/x\n"  # mm-bootstrap's: not unknown
+    )
+    env.chmod(0o644)
+    before = env.read_text()
+    assert sync_env(example, env, dry_run=True) == (
+        ["DT_TELEMETRY", "CIRCL_URL", "VULNCHECK_API_TOKEN"],
+        ["OLD_SETTING"],
+    )
+    assert env.read_text() == before
+
+    added, unknown = sync_env(example, env)
+    assert added == ["DT_TELEMETRY", "CIRCL_URL", "VULNCHECK_API_TOKEN"] and unknown == ["OLD_SETTING"]
+    assert env.read_text() == (
+        "# ---- Dependency-Track ----\n"
+        f"DT_API_KEY={key}\n"
+        "DT_OSV_ECOSYSTEMS=Debian\n"
+        "# Telemetry: off unless true\n"
+        "# (second comment line)\n"
+        "DT_TELEMETRY=false\n"  # after the key before it in the example, with its comments
+        "DT_URL=http://dt:8180\n"
+        "\n"  # a new section keeps its blank line and header
+        "# ---- Receiver ----\n"
+        "CIRCL_URL=https://vulnerability.circl.lu\n"
+        "# VulnCheck KEV token\n"
+        "VULNCHECK_API_TOKEN=\n"
+        "OLD_SETTING=1\n"  # not in the example: left where it was, after the new keys
+        "VULNFLOW_CHAT_WEBHOOK_DEBIAN=http://mm/hooks/x\n"
+    )
+    assert env.stat().st_mode & 0o777 == 0o600
+    assert sync_env(example, env) == ([], ["OLD_SETTING"])  # rerun: nothing to add
+
+    assert main(["--env-file", str(env), "env-sync", "--example", str(example)]) == 0
+    out = capsys.readouterr().out
+    assert "has every key" in out and "OLD_SETTING is in" in out and key not in out
+    assert main(["--env-file", str(env), "env-sync", "--example", str(tmp_path / "nope")]) == 2
+
+
 def test_dd_bootstrap_waits_for_admin_then_returns_token():
     from vulnflow.bootstrap import bootstrap_defectdojo
 
