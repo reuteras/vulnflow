@@ -1,7 +1,7 @@
 # osv-scanner config for .github/workflows/osv-images.yml (`scan image --config`).
 #
 # Only vulnerabilities that no release of the affected binary fixes yet and that don't
-# apply to how vulnflow uses it. Every entry has an ignoreUntil date: after it the image
+# apply to how vulnflow uses it. Every entry has an effectiveUntil date: after it the image
 # check fails again, so the entry is looked at again (bump the binary, or renew with a
 # reason). Remove an entry as soon as a release with the fix is adopted.
 
@@ -10,7 +10,7 @@
 
 [[IgnoredVulns]]
 id = "GO-2026-6865"
-ignoreUntil = 2027-01-15
+effectiveUntil = 2027-01-15
 reason = """klauspost/compress 1.20.1 in the cosign binary: a panic on malformed zstd \
 frames (fse/huff0). vulnflow runs only `cosign verify-blob` on a downloaded SBOM and its \
 bundle, which decompresses no zstd; a panic would fail the verification and the SBOM \
@@ -18,7 +18,7 @@ would not be uploaded (fails closed). Fixed in 1.20.2; no cosign release has it 
 
 [[IgnoredVulns]]
 id = "GO-2026-6859"
-ignoreUntil = 2027-01-15
+effectiveUntil = 2027-01-15
 reason = """Go stdlib 1.27.3 in the cosign binary: an HTTP/1 *server* crash (MaxBytesReader \
 header race). cosign is only an HTTP client here; it runs no server. Fixed in Go 1.27.4; \
 no cosign release is built with it yet."""

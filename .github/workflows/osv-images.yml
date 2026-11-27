@@ -11,7 +11,7 @@
 # The osv-scanner image is pinned in .github/osv-scanner/Dockerfile so that
 # Dependabot keeps its tag and digest up to date. .github/osv-scanner/osv-scanner.toml
 # ignores the few that no release fixes yet and that don't apply, each with a reason
-# and an ignoreUntil date after which the check fails again.
+# and an effectiveUntil date after which the check fails again.
 
 name: osv-images
 

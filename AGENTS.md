@@ -76,7 +76,7 @@ committing" instruction.
 
 `osv-images` reads `.github/osv-scanner/osv-scanner.toml`: ignores only for vulnerabilities
 that no upstream release fixes yet and that don't apply to how vulnflow uses the binary
-(today: two in the cosign binary). Each needs a reason and an `ignoreUntil` date; adding
+(today: two in the cosign binary). Each needs a reason and an `effectiveUntil` date; adding
 one is the owner's call. Remove the entry when a bump brings the fix.
 
 Things that keep CI and the hooks in agreement. Don't undo them without a reason:
