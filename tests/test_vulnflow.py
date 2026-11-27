@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import pwd
+import re
 import secrets
+import subprocess
 import threading
 import time
 import urllib.request
@@ -3541,6 +3543,117 @@ def test_github_sboms_pull_check_upload_and_refresh(inv, tmp_path):
     assert "refusing download URL" in pull(machines, inv, gh, dt, state).errors[0]
     assert len(uploads) == 3
     assert json.loads(state.read_text())["mini-app"]["tag"] == "v1.9.0"
+
+
+def test_machines_github_verify(inv, tmp_path):
+    mf = tmp_path / "m.toml"
+    mf.write_text(
+        '[github.x]\nrepo = "a/b"\nverify = { identity = "https://github.com/a/b/*@refs/tags/*" }\n'
+    )
+    v = load_machines(mf, inv.teams).github["x"].verify
+    assert v is not None
+    assert v.identity.endswith("refs/tags/*") and v.issuer.endswith("githubusercontent.com")
+    mf.write_text('[github.x]\nrepo = "a/b"\n')
+    assert load_machines(mf, inv.teams).github["x"].verify is None
+    for bad, msg in (
+        ("verify = {}", "needs an identity"),
+        ('verify = { identity = "x", key = "k" }', "only identity and issuer"),
+        ('verify = { identity = "x", issuer = "http://i" }', "https URL"),
+        ('verify = "yes"', "only identity and issuer"),
+    ):
+        mf.write_text(f'[github.x]\nrepo = "a/b"\n{bad}\n')
+        with pytest.raises(SystemExit, match=msg):
+            load_machines(mf, inv.teams)
+
+
+def test_github_sboms_cosign_verification(inv, tmp_path):
+    from vulnflow.config import CosignVerify, GithubSource, Machines
+    from vulnflow.github import GitHub, VerifyError, cosign_verify, identity_regexp, pull
+
+    rx = re.compile(identity_regexp("https://github.com/a/b/.github/workflows/p.yml@refs/tags/*"))
+    assert rx.match("https://github.com/a/b/.github/workflows/p.yml@refs/tags/v1.0")
+    assert not rx.match("https://github.com/a/b/xgithub/workflows/p.yml@refs/tags/v1")  # `.` literal
+    assert not rx.match("https://github.com/a/b/.github/workflows/p.yml@refs/heads/main")
+    assert not rx.match("evil https://github.com/a/b/.github/workflows/p.yml@refs/tags/v1")
+
+    bom = json.dumps(
+        {"bomFormat": "CycloneDX", "components": [{"purl": "pkg:pypi/p@1", "name": "p"}]}
+    ).encode()
+    base = "https://github.com/a/b/releases/download/v1/"
+    assets = [{"name": "m.cdx.json", "browser_download_url": base + "m.cdx.json"}]
+    bundle_asset = {"name": "m.cdx.json.sig.bundle", "browser_download_url": base + "m.sig"}
+    release = {"tag_name": "v1", "draft": False, "prerelease": False, "assets": assets}
+    uploads: list[bytes] = []
+
+    def upload(m, u, h, b):
+        uploads.append(b)
+        return Response(200, b"{}", {})
+
+    t = FakeTransport(
+        {
+            "GET api.github.com/repos/a/b/releases?per_page=20": lambda m, u, h, b: Response(
+                200, json.dumps([release]).encode(), {}
+            ),
+            "GET https://github.com/a/b/releases/download/v1/m.cdx.json": lambda m, u, h, b: Response(
+                200, bom, {}
+            ),
+            "GET https://github.com/a/b/releases/download/v1/m.sig": lambda m, u, h, b: Response(
+                200, b"BUNDLE", {}
+            ),
+            "PUT /api/v1/bom": upload,
+        }
+    )
+    gh, dt = GitHub(transport=t), DependencyTrack("http://dt", "k", transport=t)
+    ident = "https://github.com/a/b/*"
+    verify = CosignVerify(ident)
+    src = GithubSource("m", "a/b", "*.cdx.json", "users", verify=verify)
+    machines = Machines(github={"m": src})
+    state = tmp_path / "s.json"
+    calls: list[tuple[Any, ...]] = []
+
+    def good(blob, bundle, identity, issuer):
+        calls.append((blob, bundle, identity, issuer))
+
+    def bad(blob, bundle, identity, issuer):
+        raise VerifyError("none of the expected identities matched")
+
+    # no bundle among the assets: refused, nothing uploaded
+    res = pull(machines, inv, gh, dt, state, verifier=good)
+    assert "has no m.cdx.json.sig.bundle" in res.errors[0] and not uploads and not calls
+    release["assets"] = [*assets, bundle_asset]
+    # bad signature: refused with the reason, nothing uploaded, no state written
+    res = pull(machines, inv, gh, dt, state, verifier=bad)
+    assert "not verified, not uploaded: none of the expected" in res.errors[0]
+    assert not uploads and not state.exists()
+    # good signature: uploaded; the verifier saw the asset, bundle, anchored regexp and issuer
+    res = pull(machines, inv, gh, dt, state, verifier=good)
+    assert not res.errors and len(uploads) == 1 and "signature verified" in res.uploaded[0]
+    assert calls == [(bom, b"BUNDLE", identity_regexp(ident), verify.issuer)]
+    # without `verify` the verifier is never called and no bundle is needed
+    machines.github["m"] = GithubSource("m", "a/b", "*.cdx.json", "users")
+    release["assets"] = assets
+    res = pull(machines, inv, gh, dt, state, force=True, verifier=bad)
+    assert not res.errors and len(uploads) == 2
+
+    # the real runner: without the binary it fails closed; with it, exit status decides
+    with (
+        patch("vulnflow.github.shutil.which", return_value=None),
+        pytest.raises(VerifyError, match="not installed"),
+    ):
+        cosign_verify(bom, b"B", "^x$", "https://i")
+    fake = subprocess.CompletedProcess([], 1, "", "error: no matching signatures\nsome detail\n")
+    with (
+        patch("vulnflow.github.shutil.which", return_value="/bin/cosign"),
+        patch("vulnflow.github.subprocess.run", return_value=fake) as run,
+    ):
+        with pytest.raises(VerifyError, match="some detail"):
+            cosign_verify(bom, b"B", "^x$", "https://i")
+        cmd = run.call_args.args[0]
+        assert cmd[1:2] == ["verify-blob"] and "--bundle" in cmd
+        assert cmd[cmd.index("--certificate-identity-regexp") + 1] == "^x$"
+        assert cmd[cmd.index("--certificate-oidc-issuer") + 1] == "https://i"
+        run.return_value = subprocess.CompletedProcess([], 0, "Verified OK", "")
+        cosign_verify(bom, b"B", "^x$", "https://i")
 
 
 CONTEXT_TOML = """

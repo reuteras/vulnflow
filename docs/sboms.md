@@ -138,7 +138,32 @@ team  = "dev"
 - Public repositories need no token. `VULNFLOW_GITHUB_TOKEN` (read-only) only raises the
   API limit and is never sent with the download, which must be under
   `https://github.com/<repo>/releases/download/`.
-- Not done yet: checking the release's cosign signature before the upload.
+
+### Verifying the signature (cosign)
+
+The checks above say what is in the SBOM, not who made it. If the release workflow signs
+its assets with keyless cosign (`<asset>.sig.bundle` next to each asset), say whose
+signature to accept:
+
+```toml
+[github.someapp]
+repo   = "owner/someapp"
+verify = { identity = "https://github.com/owner/someapp/.github/workflows/publish.yml@refs/tags/*" }
+# issuer = "https://token.actions.githubusercontent.com"   # default
+```
+
+- `identity` is the certificate identity (the signing workflow and ref). `*` is the only
+  wildcard; the rest must match exactly, from start to end. Look it up with
+  `cosign verify-blob --bundle … --certificate-identity-regexp '.*' …` on a real release
+  and read the identity in the error, or from the certificate in the bundle.
+- With `verify`, `<asset>.sig.bundle` is downloaded too and `cosign verify-blob` checks the
+  asset. A missing bundle, an unsigned or tampered asset, or a signature from another
+  identity gives an error, nothing is uploaded, and Dependency-Track keeps the previous
+  upload. Without `verify` nothing changes.
+- cosign is a pinned, checksum-verified binary in the glue image (`deploy/Dockerfile`:
+  `COSIGN_VERSION` and the two sha256 values, bumped by hand). The Sigstore bundle needs
+  X.509 and transparency-log proof checks, which the standard library can't do. If cosign
+  is missing (running outside the image), a `verify` entry fails closed.
 
 ## Own machines (push agents)
 

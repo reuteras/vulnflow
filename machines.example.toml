@@ -97,6 +97,9 @@ path = "/srv/myapp"
 # repo  = "owner/someapp"
 # asset = "*.cdx.json"             # glob on the release asset names (default)
 # team  = "dev"
+# verify = { identity = "https://github.com/owner/someapp/.github/workflows/publish.yml@refs/tags/*" }
+#                                  # optional: require a keyless cosign signature
+#                                  # (<asset>.sig.bundle); `*` is the only wildcard
 
 # ---- Newsletters (vulnflow newsletter weekly|daily|alert <id>) -------------------------
 # Feeds are downloaded whole and filtered here, never searched per keyword. kind: advisory,

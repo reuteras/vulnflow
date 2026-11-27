@@ -78,6 +78,13 @@ connects in.
 | `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h); `kev-watch` in each `dt2dojo` round (cached 1 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
 | `api.github.com`, `github.com` (release downloads) | `github-sboms` in each `dt2dojo` round, only with `[github.*]` in `machines.toml` | the repository names; `VULNFLOW_GITHUB_TOKEN` to the API if set | remove the `[github.*]` entries, or `dt2dojo --no-github-sboms` |
+| `tuf-repo-cdn.sigstore.dev` | `cosign verify-blob` in `github-sboms` fetches the Sigstore trust root (cached in `data/.sigstore`), only for entries with `verify` | nothing about your stack: a plain download of public metadata | drop `verify` (then the SBOM's origin is not checked) |
+
+`github-sboms` accepts what a release publishes, so a compromised release would put a forged
+SBOM into Dependency-Track (an SBOM without the vulnerable component closes its findings).
+`verify` in a `[github.*]` entry requires a keyless cosign signature from the named workflow
+identity; a missing, bad or foreign signature means no upload and an error. See
+[SBOMs](sboms.md#verifying-the-signature-cosign).
 | the feeds in `[news.feeds.*]` (`machines.toml`) | `newsletter` (daily, weekly, `alert`) | nothing about you: each feed is downloaded whole and filtered on the server, never searched per keyword or CVE | remove or `enabled = false` the feed, or point `url` at an internal mirror |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |

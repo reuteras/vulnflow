@@ -75,6 +75,12 @@ committing" instruction.
 | `.github/workflows/linter.yml` | super-linter (slim) + a separate `uv run mypy` job |
 | `.github/workflows/tests.yml` | `ruff check` + `pytest` on Python 3.11–3.15 |
 | `.github/workflows/osv-scanner-scheduled.yml` | OSV-Scanner on push to main and nightly |
+| `.github/workflows/osv-images.yml` | OSV-Scanner on the built `deploy/Dockerfile` image (PRs touching a Dockerfile, main, every 4 h); fails on fixable vulnerabilities |
+
+`osv-images` reads `.github/osv-scanner/osv-scanner.toml`: ignores only for vulnerabilities
+that no upstream release fixes yet and that don't apply to how vulnflow uses the binary
+(today: two in the cosign binary). Each needs a reason and an `effectiveUntil` date; adding
+one is the owner's call. Remove the entry when a bump brings the fix.
 
 Things that keep CI and the hooks in agreement. Don't undo them without a reason:
 
