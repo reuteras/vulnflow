@@ -19,6 +19,8 @@ Dependency-Track
   GET  /api/v1/project/tag/{tag}                                        documented
        lastBomImport: a Date (Project.java in the 5.2.2 tag); epoch ms or ISO-8601 accepted
   GET  /api/v1/finding/project/{uuid}/export  (FPF)                    documented
+  GET  /api/v1/metrics/project/{uuid}/refresh, /api/v1/metrics/portfolio/refresh
+       PORTFOLIO_MANAGEMENT (MetricsResource in the 5.2.2 tag; run live 2026-11-27)
   GET  /api/v1/component/project/{uuid}  paginated, VIEW_PORTFOLIO; cpe, purl, classifier
        (ComponentResource/Component.java in the 5.2.2 tag)
   GET  /api/v1/finding/project/{uuid}  paginated; component, vulnerability{source,vulnId,
@@ -239,6 +241,18 @@ class DependencyTrack:
                 f"api/v1/vulnerability/source/{quote(source, safe='')}/vuln/{quote(vuln_id, safe='')}"
             )  # raise with details
         return r.json() or None
+
+    def refresh_project_metrics(self, project_uuid: str) -> None:
+        """Recalculate one project's metrics now (MetricsResource in the 5.2.2 tag:
+        PORTFOLIO_MANAGEMENT; runs updateProjectMetrics synchronously). DT itself recalculates
+        a project only once a day (the hourly task skips projects with a row for today) or
+        after a new analysis, so suppressions don't show in its numbers until then."""
+        self.http.get(f"api/v1/metrics/project/{project_uuid}/refresh")
+
+    def refresh_portfolio_metrics(self) -> None:
+        """Rebuild the portfolio totals from the project metrics (starts DT's
+        UpdatePortfolioMetricsWorkflow, which refreshes PORTFOLIOMETRICS_GLOBAL)."""
+        self.http.get("api/v1/metrics/portfolio/refresh")
 
     def upload_bom(self, name: str, version: str, bom: bytes, tags: list[str]) -> str:
         body = {
