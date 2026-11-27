@@ -1,0 +1,10 @@
+# Added by poc.sh (glue_compose) when the device list exists (VULNFLOW_DEVICES, default
+# devices.csv): dt2dojo uploads each device as a one-component SBOM `net:<name>`
+# (device-sboms) and reads the devices' asset context from it. Read-only. Not in the base
+# file because a bind mount of a missing file makes Docker create a directory in its place.
+services:
+  dt2dojo:
+    volumes:
+      - ${VULNFLOW_DEVICES_HOST:?set by poc.sh}:${VULNFLOW_DEVICES_FILE:?set by poc.sh}:ro
+    environment:
+      VULNFLOW_DEVICES: ${VULNFLOW_DEVICES_FILE:?set by poc.sh}

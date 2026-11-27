@@ -165,6 +165,50 @@ verify = { identity = "https://github.com/owner/someapp/.github/workflows/publis
   X.509 and transparency-log proof checks, which the standard library can't do. If cosign
   is missing (running outside the image), a `verify` entry fails closed.
 
+## From a device list
+
+Network and appliance devices (firewalls, switches, hypervisors, UPS cards) have no agent,
+and their firmware changes too often to keep in `machines.toml`. Export them from the
+system that has their versions (NetBox, Ansible facts, the vendor's management system, the
+CMDB) to `devices.csv` in the repository root, starting from `devices.example.csv`. Like
+`machines.toml` it names your devices, so it is not in git or the image
+(`VULNFLOW_DEVICES` in `.env` if it lives elsewhere; a `.json` file holds a list of objects
+with the same keys).
+
+```csv
+name,team,vendor,product,version,part,cpe,exposure,input,criticality,eol,certified,review
+fw-edge-01,network,fortinet,fortios,7.4.3,,,internet,public,critical,,,
+sw-core-01,network,,,,,cpe:2.3:o:cisco:ios_xe:17.9.4:*:*:*:*:*:*:*,internal,staff,high,,,
+```
+
+- `vendor`, `product` and `version` are NVD names and the running version; they make the
+  CPE `cpe:2.3:<part>:<vendor>:<product>:<version>:*:*:*:*:*:*:*` (`part` `o` by default,
+  `h` for hardware, `a` for an application). Or give a full `cpe`. Look the names up in
+  NVD's CPE dictionary: they are lower case (`fortinet`, `fortios`).
+- `exposure` … `review` are the device's asset context, as in `machines.toml`
+  ([Exposure](exposure.md#step-5-in-use)). A `[projects."net:<name>"]` there overrides them.
+- Lines starting with `#` are comments. A wrong value (unknown team, a name that isn't an
+  NVD name, a version with `:`) stops the run with the row number.
+
+Each `dt2dojo` round uploads every device as project `net:<name>`, version = the device's
+version, tags `team-<team>`, `kind-net` and `source-devices`, with one component: the
+device and its CPE. A device is uploaded again when its version or team changes and about
+once a day otherwise, because `prune` retires a project after 7 days without an upload.
+So a device dropped from the list is retired a week later, and after a firmware upgrade
+the old version is retired as a superseded one. Dependency-Track sets tags only when it
+creates a project version: a device moved to another team keeps its old team tag until
+its next version.
+
+```bash
+python3 -m vulnflow device-sboms --dry-run   # check the list, upload nothing
+python3 -m vulnflow device-sboms             # upload what is due (dt2dojo does this)
+python3 -m vulnflow device-sboms --force     # upload every device now
+```
+
+`./poc.sh glue-up` mounts the list into `dt2dojo` when it exists. It uses `DT_API_KEY`,
+like the GitHub releases. Matching needs NVD to have CPEs on a CVE, which often comes late:
+keep the OpenCVE product subscriptions as the early warning.
+
 ## Own machines (push agents)
 
 The vulnflow server is always on and every machine **pushes** to it; nothing connects to

@@ -1,0 +1,14 @@
+# Device list for `vulnflow device-sboms` (docs/sboms.md "From a device list"). Copy to
+# devices.csv (not in git: it names your devices) and fill it from NetBox, Ansible facts,
+# the vendor's management system or the CMDB. Lines starting with # are comments.
+#   name      the device; its project in Dependency-Track is net:<name>
+#   team      owning team (inventory/inventory.toml)
+#   vendor, product, version   NVD names and the running version -> cpe:2.3:o:<vendor>:<product>:<version>
+#   part      o (operating system, default), h (hardware) or a (application)
+#   cpe       a full CPE 2.3 name instead of vendor/product/part (version may then be empty)
+#   exposure, input, criticality, eol, certified, review   asset context, as in machines.toml
+name,team,vendor,product,version,part,cpe,exposure,input,criticality,eol,certified,review
+fw-edge-01,network,fortinet,fortios,7.4.3,,,internet,public,critical,,,
+esx-03,virt,vmware,esxi,8.0.3,,,restricted,staff,high,,,
+sw-core-01,network,,,,,cpe:2.3:o:cisco:ios_xe:17.9.4:*:*:*:*:*:*:*,internal,staff,high,,,
+ups-02,itmgmt,apc,network_management_card_firmware,2.4.0,,,restricted,staff,normal,true,,2027-03-01

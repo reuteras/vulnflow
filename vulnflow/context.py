@@ -14,7 +14,8 @@ Where a project's context comes from, first match wins:
    or a glob (`ghcr.io/acme/*`); an exact name first, then the longest glob, so `"*"` is
    a catch-all for the host's other containers;
 4. code:<name>         -> [code.<name>];
-5. <name>              -> [github.<name>].
+5. net:<name>          -> the device list (devices.csv, vulnflow/devices.py);
+6. <name>              -> [github.<name>].
 
 Never from a group: one group can run a public service and an internal admin page. A
 project without context stays unknown (no tags), which step 2 will report.
@@ -75,6 +76,8 @@ def _context_for(machines: Machines, p: DTProject) -> AssetContext | None:
         return None
     if kind == "code" and rest in machines.code:
         return machines.code[rest].context
+    if kind == "net" and rest in machines.devices:
+        return machines.devices[rest].context
     if p.name in machines.github:
         return machines.github[p.name].context
     return None
@@ -163,6 +166,8 @@ def unknown_toml(machines: Machines, raw: dict[str, Any], projects: list[DTProje
             hosts.setdefault(host, {"self": False, "images": set()})["images"].add(rest)
         elif kind == "code" and rest in machines.code:
             other.append((f"[code.{_key(rest)}]", "exists"))
+        elif kind == "net" and rest in machines.devices:
+            other.append((f"[projects.{json.dumps(p.name)}]", "a device: or set it in the device list"))
         elif p.name in machines.github:
             other.append((f"[github.{_key(p.name)}]", "exists"))
         else:

@@ -234,6 +234,28 @@ def _finding_watch(
     return 1 if res.errors else 0
 
 
+def _device_sboms(
+    a: argparse.Namespace,
+    inv: Inventory,
+    dt: DependencyTrack,
+    machines: Machines,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> int:
+    """`device-sboms` (and every dt2dojo round): the device list, see devices.py."""
+    from .devices import STATE_FILE, import_devices
+
+    res = import_devices(machines, inv, dt, Path(a.data_dir) / STATE_FILE, dry_run=dry_run, force=force)
+    for line in res.uploaded:
+        print(f"  upl   device {line}")
+    if res.unchanged:
+        print(f"  ok    devices: {len(res.unchanged)} already uploaded today")
+    for msg in res.errors:
+        print(f"  error device {msg}", file=sys.stderr)
+    return 1 if res.errors else 0
+
+
 def _github_sboms(
     a: argparse.Namespace, inv: Inventory, dt: DependencyTrack, *, dry_run: bool, force: bool
 ) -> int:
@@ -1071,6 +1093,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     gs.add_argument("--dry-run", action="store_true", help="download and check, upload nothing")
     gs.add_argument("--force", action="store_true", help="upload even if done today")
+    d.add_argument(
+        "--no-device-sboms",
+        action="store_true",
+        help="skip `device-sboms` in each round (the device list, devices.csv)",
+    )
+    ds = sub.add_parser(
+        "device-sboms",
+        help="upload each device of the device list ($VULNFLOW_DEVICES, devices.csv) as a "
+        "one-component SBOM net:<name> with its CPE; dt2dojo runs this every round",
+    )
+    ds.add_argument("--dry-run", action="store_true", help="check the list, upload nothing")
+    ds.add_argument("--force", action="store_true", help="upload even if done today")
     pr = sub.add_parser(
         "prune",
         help="carry Not Affected/False Positive decisions to new project versions, deactivate "
@@ -1470,8 +1504,11 @@ def main(argv: list[str] | None = None) -> int:
             gh_rc = 0
             if not a.no_github_sboms:
                 gh_rc = _github_sboms(a, inv, dt, dry_run=a.dry_run, force=False)
+            dev_rc = 0
+            if not a.no_device_sboms and machines.devices:
+                dev_rc = _device_sboms(a, inv, dt, machines, dry_run=a.dry_run, force=False)
             if not a.loop:
-                return 1 if rep.errors or kev_rc or fw_rc or gh_rc else 0
+                return 1 if rep.errors or kev_rc or fw_rc or gh_rc or dev_rc else 0
             time.sleep(a.loop)
 
     if a.cmd == "newsletter":
@@ -1600,6 +1637,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  skip  github-sboms: no [github.*] in {a.machines}")
             return 0
         return _github_sboms(a, inv, dt, dry_run=a.dry_run, force=a.force)
+
+    if a.cmd == "device-sboms":
+        dt = _dtrack(required=True)
+        if dt is None:  # unreachable: required=True exits first
+            return 2
+        machines = load_machines(a.machines, inv.teams)
+        if not machines.devices:
+            where = env("VULNFLOW_DEVICES") or "devices.csv"
+            print(f"  skip  device-sboms: no devices in {where}")
+            return 0
+        return _device_sboms(a, inv, dt, machines, dry_run=a.dry_run, force=a.force)
 
     if a.cmd == "prune":
         from .prune import prune

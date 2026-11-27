@@ -7,7 +7,8 @@ place**: the asset model and its tags ([Step 1 in use](#step-1-in-use)), the sco
 Dependency-Track findings with them ([Step 2 in use](#step-2-in-use)), the tiers in
 DefectDojo ([Step 3 in use](#step-3-in-use)), routing to chat and paging
 ([Step 4 in use](#step-4-in-use)) and the report sections ([Step 6 in use](#step-6-in-use)),
-except the vendor section; the importers (step 5) are not. Before this, vulnflow ranked a CVE by threat alone
+except the vendor section; of the importers (step 5), the device list is
+([Step 5 in use](#step-5-in-use)); CMDB, MDM and attack-surface sources are not. Before this, vulnflow ranked a CVE by threat alone
 (KEV, CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)), so the
 same CVE got the same tier on a public web service and on a locked-down admin workstation;
 OpenCVE alerts still do, because they are per product, not per asset. This document describes how to add *asset context*, how exposed an asset is and
@@ -178,14 +179,15 @@ Every alert carries its reasons, as tiers do today, extended with the context, f
 5. **Importers.** A CMDB or application register for owner, exposure and criticality
    (`machines.toml` becomes an override file on top; hand-maintaining a large estate does
    not scale), the MDM for OS versions per device, and an external attack-surface source
-   for drift.
+   for drift. First: a device list (CSV/JSON) for network and appliance firmware
+   ([Step 5 in use](#step-5-in-use)).
 6. **Report.** The sections listed above ([Step 6 in use](#step-6-in-use)). The vendor
    section (open CVEs, days waiting for a fix) waits for step 5: appliances are only
    OpenCVE subscriptions today, with no versions to count from.
 
-Steps 1–4 and 6 fit the current design and are built and tested offline. Step 5 depends
-on the CMDB, MDM and attack-surface tools in use; it starts with a generic CSV/JSON
-import.
+Steps 1–4 and 6 fit the current design and are built and tested offline. The rest of
+step 5 depends on the CMDB, MDM and attack-surface tools in use; it starts with the
+generic device list.
 
 ## Step 1 in use
 
@@ -352,6 +354,25 @@ The same round also tells people about new findings, once per finding and channe
 `python3 -m vulnflow finding-watch --dry-run` ranks every open finding and shows what
 would be posted; `dt2dojo --no-finding-watch` turns it off. Each message lists at most 20
 findings and counts the rest; filter on the `tier-p1` tag in DefectDojo for all of them.
+
+## Step 5 in use
+
+The first importer is a **device list**: network and appliance devices whose firmware
+version lives in another system (NetBox, Ansible facts, FortiManager, vCenter, the CMDB),
+exported to `devices.csv` (or JSON) next to `machines.toml`. Each row is one device with its
+NVD vendor, product and running version, its team, and the same context keys as
+`machines.toml`. `dt2dojo` uploads each one as a one-component SBOM `net:<name>` with the
+device's CPE (`cpe:2.3:o:fortinet:fortios:7.4.3:…`), so Dependency-Track matches it against
+NVD's version ranges and the ranking, tiers, chat and reports treat it like any project.
+The list's context columns are the project's asset context; `[projects."net:<name>"]` in
+`machines.toml` still overrides them. Details: [SBOMs: From a device
+list](sboms.md#from-a-device-list).
+
+This answers the network, virt and itmgmt teams' problem from issue #108: OpenCVE product
+subscriptions have no versions, so every FortiOS or ESXi CVE is an alert whether or not it
+affects what runs. With the device list, a CVE becomes a finding only on the devices whose
+version is in NVD's range. NVD often adds CPEs to new CVEs late, so the subscriptions stay
+as the early warning.
 
 ## Step 6 in use
 
