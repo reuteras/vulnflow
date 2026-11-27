@@ -29,8 +29,9 @@ project does not hold back the others. Exit code 1 if anything failed.
 
 Kernels: the host SBOM carries only the running kernel (`uname -r`). Kernel packages that
 are installed but not booted, linux-libc-dev and syft's /boot/vmlinuz-* entries are
-dropped (every kernel CVE matches them); a self-built kernel is added as linux_kernel with
-an NVD CPE. Container SBOMs carry no kernel-source packages.
+dropped (every kernel CVE matches them); a self-built kernel (no package, or a
+`make bindeb-pkg` one from source linux-upstream, whose packages are all dropped) is added
+as linux_kernel with an NVD CPE. Container SBOMs carry no kernel-source packages.
 
 Homebrew and app components are matched by CPE only (no package-URL type, no OSV data).
 NVD vendor names can't be derived from Homebrew metadata: the default guess is vendor =
@@ -429,16 +430,29 @@ def apps_bom(plists: list[Doc], cpe_map: dict[str, str]) -> Doc:
 
 
 # ---------------------------------------------------------------------------- the scans
-def is_kernel_package(c: Doc) -> bool:
-    """A Debian/Ubuntu package built from the kernel source (linux, linux-signed-*):
-    linux-image-*, linux-headers-*, linux-modules-*, the linux-image-<flavour> metapackage,
-    linux-libc-dev (userland headers) ... Every kernel CVE matches all of them."""
+def deb_source(c: Doc) -> str:
+    """A Debian package's source package (syft's purl `upstream=`, else its own name); "" for
+    anything that isn't a .deb."""
     purl = str(c.get("purl", ""))
     if not purl.startswith("pkg:deb/"):
-        return False
+        return ""
     m = re.search(r"[?&]upstream=([^&@%]+)", purl)
-    source = m.group(1) if m else str(c.get("name", ""))
-    return source == "linux" or source.startswith("linux-signed")
+    return m.group(1) if m else str(c.get("name", ""))
+
+
+def is_self_built_kernel_package(c: Doc) -> bool:
+    """A kernel packaged by `make bindeb-pkg` (source linux-upstream): no distro tracks it and
+    its package names carry no NVD CPE, so the running one is tracked as linux_kernel."""
+    return deb_source(c) == "linux-upstream"
+
+
+def is_kernel_package(c: Doc) -> bool:
+    """A Debian/Ubuntu package built from a kernel source (linux, linux-signed-*, a
+    self-built linux-upstream): linux-image-*, linux-headers-*, linux-modules-*, the
+    linux-image-<flavour> metapackage, linux-libc-dev (userland headers) ... Every kernel
+    CVE matches all of them."""
+    source = deb_source(c)
+    return source == "linux" or source.startswith("linux-signed") or source == "linux-upstream"
 
 
 def is_boot_kernel(c: Doc) -> bool:
@@ -458,14 +472,15 @@ def running_kernel_only(docs: list[Doc], release: str) -> list[Doc]:
     """Keep only the kernel that runs. Installed-but-not-booted kernels (old ones Debian
     keeps, a newer one waiting for a reboot), linux-libc-dev and syft's /boot entries are
     dropped. A packaged running kernel is tracked by its package (its CPE would flag fixes
-    the distro backported); one that isn't a package (self-built) is added as linux_kernel
-    with a clean NVD CPE, so Dependency-Track matches it by version."""
+    the distro backported); a self-built one (no package, or bindeb-pkg's linux-upstream
+    packages, all dropped) is added as linux_kernel with a clean NVD CPE, so
+    Dependency-Track matches it by version."""
     packaged = False
     out: list[Doc] = []
     for d in docs:
         comps = []
         for c in d.get("components") or []:
-            if is_boot_kernel(c):
+            if is_boot_kernel(c) or is_self_built_kernel_package(c):
                 continue
             if is_kernel_package(c):
                 if release not in str(c.get("name", "")):

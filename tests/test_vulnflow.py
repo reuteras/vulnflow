@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -265,6 +265,167 @@ def test_format_chat_only_hot_tiers(inv, tmp_path):
     assert msg is not None and msg.startswith("@sysadm")
     assert "CVE-2024-3400" in msg and "http://opencve.local/cve/CVE-2024-3400" in msg
     assert "CVE-2026-0001" not in msg and "other change(s) in the log" in msg
+
+
+def test_noisy_product_channel_takes_alerts_from_team_chat(inv, tmp_path, monkeypatch):
+    from vulnflow.config import ChatChannel
+    from vulnflow.receiver import channel_matches, route_channels
+
+    e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
+    alerts = process_payload(PAYLOAD, inv, e)
+    kernel = ChatChannel("linux-kernel", ["linux:linux_kernel"])
+    vendor = ChatChannel("palo", ["paloaltonetworks"])
+    a = next(x for x in alerts if x.cve == "CVE-2024-3400")
+    a.subscribed = ["linux", "linux$PRODUCT$linux_kernel"]
+    assert channel_matches(kernel, a) and not channel_matches(vendor, a)
+    a.subscribed = ["linux$PRODUCT$linux_kernel_rt"]  # a different product of the vendor
+    assert not channel_matches(kernel, a)
+    a.subscribed = ["paloaltonetworks$PRODUCT$pan-os"]
+    assert channel_matches(vendor, a) and not channel_matches(kernel, a)
+    a.subscribed = ["linux$PRODUCT$linux_kernel"]
+    rest, routed = route_channels(alerts, [vendor, kernel])
+    assert a not in rest and routed == {"linux-kernel": [a]}
+
+    team: list[str] = []
+    chan: list[str] = []
+    real = process_payload
+
+    def tagged(*args, **kw):  # the P1 is a kernel CVE
+        out = real(*args, **kw)
+        for x in out:
+            if x.cve == "CVE-2024-3400":
+                x.subscribed = ["linux$PRODUCT$linux_kernel"]
+        return out
+
+    monkeypatch.setattr("vulnflow.receiver.process_payload", tagged)
+    senders = {"linux-kernel": chan.append}
+
+    def pipe(name, **kw):
+        return Pipeline(inv, e, tmp_path / name, chat_sender=team.append, **kw)
+
+    pipe("a.jsonl", channels=[kernel], channel_senders=senders).handle(PAYLOAD)
+    assert len(chan) == 1 and chan[0].startswith("#linux-kernel: 1 CVE(s)") and "team sysadm" in chan[0]
+    assert "@sysadm" not in chan[0]
+    assert all("CVE-2024-3400" not in t for t in team)  # left the team channel
+    # no webhook for the channel: the alert stays in team chat
+    team.clear()
+    pipe("b.jsonl", channels=[kernel]).handle(PAYLOAD)
+    assert len(team) == 1 and "CVE-2024-3400" in team[0]
+
+    def broken(text: str) -> None:
+        raise OSError("chat down")
+
+    # a failing channel doesn't stop the handling
+    team.clear()
+    pipe("c.jsonl", channels=[kernel], channel_senders={"linux-kernel": broken}).handle(PAYLOAD)
+    assert all("CVE-2024-3400" not in t for t in team)
+    # min_tier above the alert's tier: not posted to the channel, and still not in team chat
+    chan.clear()
+    strict = ChatChannel("linux-kernel", ["linux:linux_kernel"], min_tier=1)
+    payload: Any = PAYLOAD
+    only = [c for c in payload["changes"] if c["cve"]["cve_id"] == "CVE-2024-3400"]
+    quiet = {**payload, "changes": only}
+    monkeypatch.setattr(
+        "vulnflow.receiver.process_payload",
+        lambda *a, **k: [
+            replace(x, tier=2, subscribed=["linux$PRODUCT$linux_kernel"]) for x in real(*a, **k)
+        ],
+    )
+    team.clear()
+    pipe("d.jsonl", channels=[strict], channel_senders=senders).handle(quiet)
+    assert chan == [] and team == []
+
+
+def test_noisy_product_channel_posts_once_for_all_teams(inv, tmp_path):
+    """OpenCVE sends each team's project its own webhook: a shared channel posts the CVE
+    change once, naming every team it reaches, also across a receiver restart."""
+    from vulnflow.config import ChatChannel
+
+    inv.teams["sysadm"].products["linux"] = ["linux_kernel"]
+    inv.teams["users"].products["linux"] = ["linux_kernel"]
+    inv.teams["dev"].vendors.append("linux")
+    e, _ = make_enricher(tmp_path, epss={"CVE-2024-3400": 0.94})
+    raw = {"raw": ["linux$PRODUCT$linux_kernel"], "human": ["Linux Kernel"]}
+    change = {
+        "cve": {"cve_id": "CVE-2024-3400", "description": "x", "cvss31": 9.8, "subscriptions": raw},
+        "events": [{"type": "first_time", "details": []}],
+    }
+
+    def payload(project: str) -> dict:
+        return {**PAYLOAD, "project": project, "changes": [change]}
+
+    kernel = ChatChannel("linux-kernel", ["linux:linux_kernel"])
+    posted: list[str] = []
+    team: list[str] = []
+
+    def pipe(sender=posted.append, log="alerts.jsonl"):
+        return Pipeline(
+            inv,
+            e,
+            tmp_path / log,
+            chat_sender=team.append,
+            channels=[kernel],
+            channel_senders={"linux-kernel": sender},
+        )
+
+    p = pipe()
+    p.handle(payload("sysadm"))
+    assert len(posted) == 1 and "teams sysadm, dev, users," in posted[0] and team == []
+    p.handle(payload("users"))  # the same change through the next team's project
+    pipe().handle(payload("dev"))  # and after a restart
+    assert len(posted) == 1 and team == []
+    seen = tmp_path / "alerts.channels-seen.json"
+    old = {k: t - 25 * 3600 for k, t in json.loads(seen.read_text()).items()}
+    seen.write_text(json.dumps(old))
+    pipe().handle(payload("users"))  # 24 h later it is posted again
+    assert len(posted) == 2 and "teams users, dev, sysadm," in posted[1]
+
+    def broken(text: str) -> None:
+        raise OSError("chat down")
+
+    # a failed delivery isn't recorded: the next team's webhook tries again
+    pipe(broken, "f.jsonl").handle(payload("sysadm"))
+    pipe(log="f.jsonl").handle(payload("users"))
+    assert len(posted) == 3
+    # an unreadable record starts empty rather than stopping the receiver
+    (tmp_path / "g.channels-seen.json").write_text("junk")
+    pipe(log="g.jsonl").handle(payload("dev"))
+    assert len(posted) == 4 and "teams dev, sysadm, users," in posted[3]
+
+
+def test_chat_channel_warnings(inv):
+    from vulnflow.config import ChatChannel, chat_channel_warnings
+
+    inv.teams["dev"].vendors.append("linux")
+    chans = {"k": ChatChannel("k", ["linux:linux_kernel", "linux", "paloaltonetworks", "nobody"])}
+    w = chat_channel_warnings(chans, inv.teams)
+    assert len(w) == 2
+    assert "team(s) ['dev'] subscribe to all of 'linux'" in w[0] and 'match = ["linux"]' in w[0]
+    assert "'nobody': no team subscribes" in w[1]
+    inv.teams["dev"].products["linux"] = ["linux_kernel"]  # vendor and product: both reported
+    assert chat_channel_warnings(chans, inv.teams) == w[1:]
+
+
+def test_chat_channels_in_machines_toml(tmp_path):
+    from vulnflow.config import chat_webhook_env
+
+    inv = load_inventory(INV)
+    f = tmp_path / "m.toml"
+    f.write_text('[chat.linux-kernel]\nmatch = ["linux:linux_kernel", "debian"]\nmin_tier = 3\n')
+    ch = load_machines(f, inv.teams).chat_channels["linux-kernel"]
+    assert (ch.match, ch.min_tier) == (["linux:linux_kernel", "debian"], 3)
+    assert ch.webhook_env == chat_webhook_env("linux-kernel") == "VULNFLOW_CHAT_WEBHOOK_LINUX_KERNEL"
+    for bad in (
+        '[chat.soc]\nmatch = ["linux"]',  # reserved
+        '[chat."Bad Name"]\nmatch = ["linux"]',
+        "[chat.x]\n",  # no match
+        '[chat.x]\nmatch = ["Linux Kernel"]',
+        '[chat.x]\nmatch = ["linux"]\nmin_tier = 9',
+        '[chat.x]\nmatch = ["linux"]\nteam = "dev"',
+    ):
+        f.write_text(bad)
+        with pytest.raises(SystemExit):
+            load_machines(f, inv.teams)
 
 
 def test_soc_channel_gets_every_p1_across_teams(inv, tmp_path):
@@ -5086,6 +5247,18 @@ def test_agent_tracks_only_the_running_kernel():
     assert kernel["cpe"] == "cpe:2.3:o:linux:linux_kernel:7.3.5:*:*:*:*:*:*:*"
     # a container has no kernel: linux-libc-dev and friends are dropped
     assert names(a.no_kernel_packages([a.bom(list(pkgs))])) == ["libc6", "linux-base"]
+    # self-built with `make bindeb-pkg` (source linux-upstream): every such package goes,
+    # the running one and the older ones alike; the running kernel is added by CPE
+    built = [
+        deb("linux-image-7.3.6", "7.3.6-1", "linux-upstream"),
+        deb("linux-headers-7.3.6", "7.3.6-1", "linux-upstream"),
+        deb("linux-image-7.3.5", "7.3.5-1", "linux-upstream"),
+        deb("linux-libc-dev", "7.3.6-1", "linux-upstream"),
+    ]
+    got = a.running_kernel_only([a.bom(list(pkgs) + built)], "7.3.6")
+    assert names(got) == ["libc6", "linux-base", "linux_kernel"]
+    assert got[-1]["components"][0]["cpe"] == "cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*"
+    assert names(a.no_kernel_packages([a.bom(built)])) == []
 
 
 def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):

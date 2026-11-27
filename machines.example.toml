@@ -126,3 +126,22 @@ path = "/srv/myapp"
 # [news.teams.network]
 # to = "network-team@example.org"
 # keywords = ["fortigate", "anyconnect"]
+
+# ---- Separate chat channels for noisy products --------------------------------------------
+# The Linux kernel (and some vendors) publish so many CVEs that they drown the team's
+# channel. A [chat.<channel>] section is a Mattermost channel only for the products you
+# list; leave it out and nothing changes. CVEs matching `match` go there *instead of* the
+# team's channel (naming the team in each line, no @mention); the SOC channel still gets
+# every P1. One channel serves all teams: a CVE that several teams subscribe to is posted
+# once, naming them all. The match is on the subscription that made OpenCVE notify, so the
+# product must be subscribed (above or in the inventory): a team subscribed to the whole
+# vendor reports "linux", not "linux:linux_kernel" (chat-up warns). `./poc.sh chat-up`
+# (rerun after a change) creates the channel and writes its webhook to
+# VULNFLOW_CHAT_WEBHOOK_<NAME> in .env.
+#   match     "vendor" (all its products) or "vendor:product", NVD names
+#   min_tier  lowest tier posted, 1..4 (default: the team channel's, P2)
+# [chat.linux-kernel]
+# match = ["linux:linux_kernel"]
+# [chat.microsoft]
+# match = ["microsoft"]
+# min_tier = 1

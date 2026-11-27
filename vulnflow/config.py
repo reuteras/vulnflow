@@ -207,6 +207,30 @@ class NewsTeam:
 
 
 @dataclass
+class ChatChannel:
+    """[chat.<name>]: a Mattermost channel for a noisy product (the Linux kernel, a vendor
+    with a CVE a week). CVEs that match go there instead of the team's channel."""
+
+    name: str
+    match: list[str]  # "vendor" (all its products) or "vendor:product", NVD names
+    min_tier: int | None = None  # None = rules.chat_min_tier
+
+    @property
+    def webhook_env(self) -> str:
+        return chat_webhook_env(self.name)
+
+
+RESERVED_CHANNELS = ("alerts", "soc")
+_CHANNEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_MATCH_RE = re.compile(r"^[a-z0-9][a-z0-9._~+-]*(:[a-z0-9][a-z0-9._~+-]*)?$")
+
+
+def chat_webhook_env(channel: str) -> str:
+    """A channel's webhook key in .env: linux-kernel -> VULNFLOW_CHAT_WEBHOOK_LINUX_KERNEL."""
+    return "VULNFLOW_CHAT_WEBHOOK_" + channel.upper().replace("-", "_")
+
+
+@dataclass
 class Machines:
     """machines.toml: the operator's own hosts. Not in git (like .env)."""
 
@@ -224,6 +248,7 @@ class Machines:
     projects: dict[str, AssetContext] = field(default_factory=dict)
     news_feeds: dict[str, NewsFeed] = field(default_factory=dict)
     news_teams: dict[str, NewsTeam] = field(default_factory=dict)
+    chat_channels: dict[str, ChatChannel] = field(default_factory=dict)
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
@@ -299,7 +324,17 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
     if not p.is_file():
         return Machines()
     data: dict[str, Any] = tomllib.loads(p.read_text(encoding="utf-8"))
-    sections = {"groups", "hosts", "code", "cpe_map", "subscriptions", "github", "projects", "news"}
+    sections = {
+        "groups",
+        "hosts",
+        "code",
+        "cpe_map",
+        "subscriptions",
+        "github",
+        "projects",
+        "news",
+        "chat",
+    }
     unknown = sorted(set(data) - sections)
     if unknown:
         raise SystemExit(f"{path}: unknown sections {unknown}")
@@ -418,6 +453,7 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
             raise SystemExit(f"{where}: takes only {sorted(CONTEXT_KEYS)}")
         projects[str(name)] = _context(pc, where)
     news_feeds, news_teams = _news(data.get("news") or {}, teams, path)
+    chat_channels = _chat_channels(data.get("chat") or {}, path)
     return Machines(
         hosts=hosts,
         groups=groups,
@@ -428,7 +464,58 @@ def load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         projects=projects,
         news_feeds=news_feeds,
         news_teams=news_teams,
+        chat_channels=chat_channels,
     )
+
+
+def _chat_channels(data: dict[str, Any], path: str | Path) -> dict[str, ChatChannel]:
+    out: dict[str, ChatChannel] = {}
+    for name, c in data.items():
+        where = f"[chat.{name}] in {path}"
+        if not _CHANNEL_RE.match(name) or name in RESERVED_CHANNELS:
+            raise SystemExit(
+                f"{where}: channel name must match {_CHANNEL_RE.pattern} and not be one of "
+                f"{list(RESERVED_CHANNELS)}"
+            )
+        if not isinstance(c, dict) or set(c) - {"match", "min_tier"}:
+            raise SystemExit(f"{where}: takes only 'match' and 'min_tier'")
+        match = [str(m) for m in c.get("match") or []]
+        if not match:
+            raise SystemExit(f'{where}: match = [...] is required ("vendor" or "vendor:product")')
+        for m in match:
+            if not _MATCH_RE.match(m):
+                raise SystemExit(f"{where}: {m!r} is not an NVD 'vendor' or 'vendor:product'")
+        tier = c.get("min_tier")
+        if tier is not None and (isinstance(tier, bool) or tier not in (1, 2, 3, 4)):
+            raise SystemExit(f"{where}: min_tier must be 1..4 (P1..P4), got {tier!r}")
+        out[name] = ChatChannel(name, match, tier)
+    return out
+
+
+def chat_channel_warnings(channels: dict[str, ChatChannel], teams: dict[str, Team]) -> list[str]:
+    """Why a [chat.*] match can't catch anything. OpenCVE's webhook names only the project
+    subscriptions a CVE matched (v3.1.0 `BaseNotifier.prepare_payload`), so a team that
+    subscribes to the whole vendor reports "linux", never "linux$PRODUCT$linux_kernel".
+    Pass the teams with machines.toml's [subscriptions.*] merged in (add_subscriptions)."""
+    out: list[str] = []
+    for ch in channels.values():
+        for m in ch.match:
+            vendor, _, product = m.partition(":")
+            exact = [
+                k
+                for k, t in teams.items()
+                if (product in t.products.get(vendor, []) if product else vendor in t.products)
+            ]
+            whole = [k for k, t in teams.items() if vendor in t.vendors and k not in exact]
+            if product and whole:
+                out.append(
+                    f"[chat.{ch.name}] {m!r}: team(s) {sorted(whole)} subscribe to all of "
+                    f"{vendor!r}, so OpenCVE reports their CVEs as {vendor!r} and they stay in "
+                    f'team chat; use match = ["{vendor}"] or subscribe them to the product'
+                )
+            elif not exact and not whole:
+                out.append(f"[chat.{ch.name}] {m!r}: no team subscribes to it, nothing will match")
+    return out
 
 
 def _news(
