@@ -1224,6 +1224,15 @@ def main(argv: list[str] | None = None) -> int:
     wh.add_argument("--team", default=None, help="only this team (default: all)")
     wh.add_argument("--json", action="store_true")
 
+    du = sub.add_parser(
+        "duplicates",
+        help="suppress all but one finding of each alias group (one vulnerability under several "
+        "ids, e.g. GHSA and PYSEC); runs in every dt2dojo round; dry run unless --apply",
+    )
+    du.add_argument("--team", default=None, help="only this team (default: all)")
+    du.add_argument("--apply", action="store_true", help="write (DT_MAINTENANCE_API_KEY)")
+    du.add_argument("--verbose-groups", action="store_true", help="also list triaged groups left alone")
+
     st = sub.add_parser(
         "stats",
         help="where the open findings come from: counts per project kind, project, component, "
@@ -1496,6 +1505,7 @@ def main(argv: list[str] | None = None) -> int:
                 maintenance=maint,
                 machines=machines,
                 ranker=ranker,
+                data_dir=data_dir,
             )
             if ranker.vectors is not None:
                 ranker.vectors.save()
@@ -1782,6 +1792,40 @@ def main(argv: list[str] | None = None) -> int:
         for msg in errors:
             print(f"  error {msg}", file=sys.stderr)
         return 1 if errors else 0
+
+    if a.cmd == "duplicates":
+        from .duplicates import suppress_duplicates
+
+        if a.team and a.team not in inv.teams:
+            print(f"  error unknown team {a.team!r}; choose from {sorted(inv.teams)}", file=sys.stderr)
+            return 2
+        maint = _maintenance_dt()
+        if maint is None:
+            print(
+                "  error DT_MAINTENANCE_API_KEY not set; ./poc.sh dt-bootstrap creates team "
+                "vulnflow-maintenance and its key",
+                file=sys.stderr,
+            )
+            return 2
+        dup = suppress_duplicates(
+            inv, maint, apply=a.apply, record_path=data_dir / "duplicates.json", team=a.team
+        )
+        for line in dup.restored:
+            print(f"  restore   {line}")
+        for line in dup.suppressed:
+            print(f"  suppress  {line}")
+        if a.verbose_groups:
+            for line in dup.left_alone:
+                print(f"  leave     {line}")
+        print(
+            f"  {dup.groups} alias group(s): {len(dup.suppressed)} finding(s) to suppress, "
+            f"{len(dup.restored)} to keep open again, {len(dup.left_alone)} group(s) triaged by "
+            "somebody and left alone" + ("" if a.apply else "; dry run, add --apply"),
+            file=sys.stderr,
+        )
+        for msg in dup.errors:
+            print(f"  error {msg}", file=sys.stderr)
+        return 1 if dup.errors else 0
 
     if a.cmd == "stats":
         from . import stats as findings_stats

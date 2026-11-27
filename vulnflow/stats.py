@@ -19,8 +19,7 @@ from typing import Any
 
 from .clients import DependencyTrack, project_label
 from .config import Inventory
-
-SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNASSIGNED")
+from .duplicates import SEVERITIES, alias_groups, vulnerability_ids
 
 
 @dataclass
@@ -93,22 +92,6 @@ def component_name(component: dict[str, Any]) -> str:
     return f"{group}/{name}" if group else name
 
 
-def vulnerability_ids(vuln: dict[str, Any]) -> set[str]:
-    """The finding's own id and every alias DT recorded for it. DT gives aliases as a list
-    of objects keyed by source (`cveId`, `ghsaId`, `osvId`, …); every string value counts."""
-    ids = {str(vuln.get("vulnId") or "")}
-    for alias in vuln.get("aliases") or []:
-        if isinstance(alias, dict):
-            ids.update(str(v) for v in alias.values() if isinstance(v, str) and v)
-    ids.discard("")
-    return ids
-
-
-def _more_severe(a: str, b: str) -> str:
-    rank = {s: i for i, s in enumerate(SEVERITIES)}
-    return a if rank.get(a, len(SEVERITIES)) <= rank.get(b, len(SEVERITIES)) else b
-
-
 def _display_id(ids: set[str]) -> str:
     """A CVE id when there is one, else the alphabetically first id."""
     cves = sorted(i for i in ids if i.startswith("CVE-"))
@@ -116,35 +99,23 @@ def _display_id(ids: set[str]) -> str:
 
 
 def merge_aliases(findings: list[dict[str, Any]]) -> list[Issue]:
-    """One Issue per component and vulnerability: findings on the same component whose ids
-    or aliases overlap are merged (also transitively, A~B and B~C)."""
-    by_component: dict[str, list[Issue]] = {}
-    for f in findings:
-        comp, vuln = f.get("component") or {}, f.get("vulnerability") or {}
-        ids = vulnerability_ids(vuln)
-        if not ids:
-            continue
-        severity = str(vuln.get("severity") or "UNASSIGNED")
-        source = str(vuln.get("source") or "unknown")
-        issues = by_component.setdefault(str(comp.get("uuid") or component_name(comp)), [])
-        overlapping = [i for i in issues if i.ids & ids]
-        merged = Issue(
-            vuln_id="",
-            ids=set(ids),
-            severity=severity,
-            sources={source},
-            component=component_name(comp),
-            ecosystem=ecosystem(comp),
+    """One Issue per alias group (`duplicates.alias_groups`), at its highest severity."""
+    out = []
+    for group in alias_groups(findings):
+        vulns = [f.get("vulnerability") or {} for f in group]
+        ids = set().union(*(vulnerability_ids(v) for v in vulns))
+        severities = [str(v.get("severity") or "UNASSIGNED") for v in vulns]
+        comp = group[0].get("component") or {}
+        out.append(
+            Issue(
+                vuln_id=_display_id(ids),
+                ids=ids,
+                severity=min(severities, key=lambda s: SEVERITIES.index(s) if s in SEVERITIES else 99),
+                sources={str(v.get("source") or "unknown") for v in vulns},
+                component=component_name(comp),
+                ecosystem=ecosystem(comp),
+            )
         )
-        for other in overlapping:
-            issues.remove(other)
-            merged.ids |= other.ids
-            merged.sources |= other.sources
-            merged.severity = _more_severe(merged.severity, other.severity)
-        issues.append(merged)
-    out = [i for issues in by_component.values() for i in issues]
-    for issue in out:
-        issue.vuln_id = _display_id(issue.ids)
     return out
 
 

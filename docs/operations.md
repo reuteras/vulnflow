@@ -99,6 +99,7 @@ new critical/high/KEV findings, hosts that stopped uploading, and versions to de
 | How serious is CVE-X right now? | `python3 -m vulnflow enrich CVE-X` ([Look up a CVE](#look-up-a-cve)) |
 | Where on disk is component X? | `python3 -m vulnflow where <name> [--version V]` |
 | Where do most findings come from? | `python3 -m vulnflow stats [--team T] [--top N] [--json]`: per project kind, project, component, ecosystem and advisory source; findings DT knows are aliases count once |
+| Why is one vulnerability listed twice (GHSA and PYSEC)? | It isn't any more: each `dt2dojo` round keeps one finding per alias group open and suppresses the rest with a "Duplicate of …" comment (`python3 -m vulnflow duplicates` shows what it would do). Unsuppress a duplicate, or triage any finding of the group, and vulnflow leaves that group to you |
 
 Dependency-Track analyses new SBOMs within minutes; DefectDojo follows at the next
 `dt2dojo` round (`python3 -m vulnflow dt2dojo` runs one now).

@@ -52,6 +52,13 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   versions and deactivates stale ones with its own team `vulnflow-maintenance`
   (`DT_MAINTENANCE_API_KEY`). The glue team `vulnflow` stays read-only: don't give it
   `VULNERABILITY_ANALYSIS` or `PORTFOLIO_MANAGEMENT`.
+- Duplicates (`vulnflow/duplicates.py`, every `dt2dojo` round after `prune`, maintenance
+  key): OSV's PyPI data has a PYSEC and a GHSA record per issue, so DT makes two findings.
+  `dt-bootstrap` turns on OSV `aliasSyncEnabled` (with one full mirror run the first time);
+  findings whose ids alias each other on one component are an alias group, one stays open
+  and the rest are suppressed with state NOT_SET and a "Duplicate of" comment. Groups
+  somebody triaged are left alone; `data/duplicates.json` records what vulnflow suppressed.
+  `stats` counts per alias group via the same `alias_groups`.
 - The operator's hosts and groups, and the detailed OpenCVE subscriptions
   (`[subscriptions.<team>]`, merged into the teams by `sync`/`opencve-bootstrap`/
   `suggest-subscriptions`), are in `machines.toml` (repo root), which is gitignored and
