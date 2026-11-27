@@ -535,7 +535,7 @@ def bootstrap_mattermost(
     admin_password: str,
     team: str = "vulnflow",
     channels: tuple[str, ...] = ("alerts",),
-    hook_base: str = "http://mattermost:8065",
+    hook_base: str = "http://mattermost:8065",  # receiver.MM_HOOK_BASE
     transport: Transport | None = None,
     wait_timeout: float = 300.0,
     interval: float = 5.0,

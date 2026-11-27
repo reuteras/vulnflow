@@ -23,6 +23,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -107,9 +108,25 @@ def _cvss(v: Any) -> float | None:
         return None
 
 
+# How the local chat's webhooks are written to .env (mm-bootstrap): Mattermost's name on its
+# Docker network, which only the receiver joins (deploy/docker-compose.glue-chat.yml)
+MM_HOOK_BASE = "http://mattermost:8065"
+
+
+def reachable_hook(url: str) -> str:
+    """The webhook URL as this process reaches it. dt2dojo (host network: finding-watch,
+    kev-watch) and commands run on the host can't resolve "mattermost"; for them
+    VULNFLOW_CHAT_HOOK_BASE (http://127.0.0.1:<MM_PORT>, set by the chat overlay and by
+    poc.sh) replaces the network name. Other webhook URLs are left alone."""
+    base = os.environ.get("VULNFLOW_CHAT_HOOK_BASE", "").rstrip("/")
+    if base and url.startswith(MM_HOOK_BASE + "/"):
+        return base + url[len(MM_HOOK_BASE) :]
+    return url
+
+
 def chat_sender(url: str) -> Callable[[str], None]:
     """POST {"text": ...} to a Mattermost/Slack/Teams-style incoming webhook."""
-    http = Http(url, timeout=15)
+    http = Http(reachable_hook(url), timeout=15)
 
     def send(text: str) -> None:
         http.post("", json_body={"text": text})

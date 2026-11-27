@@ -7366,3 +7366,26 @@ def test_vendor_flag_and_vendor_section(inv, tmp_path):
         ["`net:quiet@1`", "network", "0", "0", "-"],
     ]
     assert "No project" in rp.vendor_section([], current, now).text()
+
+
+def test_chat_hooks_reach_mattermost_from_the_host_network(monkeypatch):
+    from vulnflow.receiver import MM_HOOK_BASE, chat_sender, reachable_hook
+
+    hook = f"{MM_HOOK_BASE}/hooks/abc123"
+    monkeypatch.delenv("VULNFLOW_CHAT_HOOK_BASE", raising=False)
+    assert reachable_hook(hook) == hook  # the receiver, on the chat network
+    monkeypatch.setenv("VULNFLOW_CHAT_HOOK_BASE", "http://127.0.0.1:8065/")
+    assert reachable_hook(hook) == "http://127.0.0.1:8065/hooks/abc123"
+    other = "https://chat.example.org/hooks/x"
+    assert reachable_hook(other) == other  # an outside webhook is left alone
+    assert reachable_hook("http://mattermost:80650/hooks/x") == "http://mattermost:80650/hooks/x"
+
+    t = FakeTransport({"POST /hooks/abc123": {}})
+    monkeypatch.setattr("vulnflow.net.urllib_transport", t)
+    chat_sender(hook)("hello")
+    method, url, _, body = t.calls[0]
+    assert (method, url, json.loads(body)) == (
+        "POST",
+        "http://127.0.0.1:8065/hooks/abc123",
+        {"text": "hello"},
+    )
