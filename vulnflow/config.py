@@ -207,6 +207,24 @@ class ChatChannel:
     def webhook_env(self) -> str:
         return chat_webhook_env(self.name)
 
+    def matches(self, vendor: str, product: str) -> bool:
+        """A "vendor" pattern matches any of that vendor's products, "vendor:product" only
+        that one; product "" (a vendor-wide subscription) only matches a "vendor" pattern."""
+        for m in self.match:
+            v, _, p = m.partition(":")
+            if v == vendor and (not p or p == product):
+                return True
+        return False
+
+
+def cpe_vendor_product(cpe: str) -> tuple[str, str] | None:
+    """cpe:2.3:o:linux:linux_kernel:7.3.6:... -> ("linux", "linux_kernel"); None if not a
+    CPE 2.3 name."""
+    parts = cpe.lower().split(":")
+    if len(parts) < 5 or parts[:2] != ["cpe", "2.3"] or parts[3] in ("", "*"):
+        return None
+    return parts[3], parts[4] if parts[4] != "*" else ""
+
 
 RESERVED_CHANNELS = ("alerts", "soc")
 _CHANNEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")

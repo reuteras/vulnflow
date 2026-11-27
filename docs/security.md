@@ -81,7 +81,8 @@ connects in.
 | the feeds in `[news.feeds.*]` (`machines.toml`) | `newsletter` (daily, weekly, `alert`) | nothing about you: each feed is downloaded whole and filtered on the server, never searched per keyword or CVE | remove or `enabled = false` the feed, or point `url` at an internal mirror |
 | `api.first.org` | receiver enrichment: EPSS score | the CVE ids it alerts on | `VULNFLOW_ENRICH_EPSS=0` |
 | `vulnerability.circl.lu` (`CIRCL_URL`) | receiver enrichment: sightings | the CVE ids it alerts on | `VULNFLOW_ENRICH_CIRCL=0`, or your own instance |
-| your chat server | receiver alerts (`VULNFLOW_CHAT_WEBHOOK`, `VULNFLOW_SOC_WEBHOOK`) | the alert text: CVE, tier, team, links | leave them empty, or use the local Mattermost |
+| your chat server | receiver alerts, `kev-watch` and `finding-watch` (`VULNFLOW_CHAT_WEBHOOK`, `VULNFLOW_SOC_WEBHOOK`) | the message text: CVE, tier, team, links; findings also name the project (host, image), component and version | leave them empty, or use the local Mattermost |
+| your pager (`VULNFLOW_PAGE_WEBHOOK`) | `finding-watch`: new P1 findings on critical assets | the same text as the chat messages, so host and component names. On public ntfy.sh anyone who knows the topic reads it: self-host ntfy, or use access control | leave it empty |
 | Mattermost's own servers | the local chat, **switched off** in `stacks/mattermost/docker-compose.yml`: diagnostics, security-fix alerts, product notices, plugin marketplace, push notification proxy; link previews (the server fetching URLs in posts) off too | nothing while those stay off | — |
 | Tailscale | `tailscaled` (coordination server and DERP relays) | node metadata, as for any tailnet member | — |
 

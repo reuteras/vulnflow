@@ -57,6 +57,7 @@ EXPOSURE_COLUMNS = {
 class Verdict:
     tier: int
     reasons: list[str]
+    criticality: str = ""  # the asset's, when ranked with context (paging: P1 on critical)
 
     @property
     def name(self) -> str:

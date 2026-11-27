@@ -248,13 +248,8 @@ def _vendor_product(raw: str) -> tuple[str, str]:
 
 
 def channel_matches(channel: ChatChannel, a: Alert) -> bool:
-    """A "vendor" pattern matches any of that vendor's products, "vendor:product" only that one."""
-    seen = {_vendor_product(r) for r in a.subscribed}
-    for m in channel.match:
-        vendor, _, product = m.partition(":")
-        if any(v == vendor and (not product or p == product) for v, p in seen):
-            return True
-    return False
+    """Whether one of the subscriptions the CVE matched is in the channel (ChatChannel.matches)."""
+    return any(channel.matches(v, p) for v, p in {_vendor_product(r) for r in a.subscribed})
 
 
 def route_channels(

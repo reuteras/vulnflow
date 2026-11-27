@@ -180,7 +180,7 @@ def dt_to_dojo(
                 test_id = res.get("test_id") or res.get("test")
                 if ranker is not None and test_id:
                     try:
-                        updated, ranked = apply_tiers(dojo, int(test_id), p, fpf, ranker)
+                        updated, ranked = apply_tiers(dojo, int(test_id), p, fpf, ranker, team.key)
                         tiers = f", tiers: {updated} of {ranked} updated" if updated else ""
                     except Exception as e:  # the import itself worked
                         rep.errors.append(f"{label}: tiers in DefectDojo: {e}")

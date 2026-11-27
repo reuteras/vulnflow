@@ -182,6 +182,7 @@ def rank_finding(
     ctx, pattern = package_context(machines, p, component, ctx)
     vector = vectors.get(str(v.get("source", "")), vid) if vectors is not None and ctx else ""
     verdict = assess(cvss, sig, rules, ctx, vector, laptop, label)
+    verdict.criticality = ctx.criticality if ctx else ""
     if pattern:
         verdict.reasons.append(f"package {pattern!r} in machines.toml")
     return verdict, (None if label else cvss), epss
@@ -202,10 +203,54 @@ class Ranked:
     cvss: float | None = None
     epss: float | None = None
     kev: bool = False
+    criticality: str = ""  # the asset's ("" = unknown)
+    title: str = ""  # KEV's name, the vulnerability's title or its description's first sentence
+    cpe: str = ""  # the component's, if it has one ([chat.*] channels match on it)
 
     @property
     def where(self) -> str:
         return project_label(self.project, self.project_version)
+
+
+def finding_title(v: dict[str, Any], kev_name: str = "") -> str:
+    if kev_name:
+        return kev_name
+    if v.get("title"):
+        return str(v["title"])
+    first = " ".join(str(v.get("description") or "").split()).split(". ")[0]
+    return first if len(first) <= 100 else first[:97].rstrip() + "..."
+
+
+def to_ranked(
+    team: str,
+    p: DTProject,
+    f: dict[str, Any],
+    verdict: Verdict,
+    cvss: float | None,
+    epss: float | None,
+    kev: dict[str, Any] | set[str],
+) -> Ranked:
+    c, v = f.get("component") or {}, f.get("vulnerability") or {}
+    vid = str(v.get("vulnId", ""))
+    entry = kev.get(vid.upper()) if isinstance(kev, dict) else None
+    return Ranked(
+        team=team,
+        project=p.name,
+        project_version=p.version,
+        component=str(c.get("name", "")),
+        version=str(c.get("version", "")),
+        vuln_id=vid,
+        severity=str(v.get("severity") or "UNASSIGNED").upper(),
+        tier=verdict.tier,
+        tier_name=verdict.name,
+        reasons=verdict.reasons,
+        cvss=cvss,
+        epss=epss,
+        kev=vid.upper() in kev,
+        criticality=verdict.criticality,
+        title=finding_title(v, str((entry or {}).get("vulnerabilityName", ""))),
+        cpe=str(c.get("cpe") or ""),
+    )
 
 
 def rank_findings(
@@ -221,25 +266,7 @@ def rank_findings(
     out = []
     for t, p, f in open_findings(inv, dt, team, errors):
         verdict, cvss, epss = rank_finding(p, f, inv.rules, kev, vectors, machines)
-        c, v = f.get("component") or {}, f.get("vulnerability") or {}
-        vid = str(v.get("vulnId", ""))
-        out.append(
-            Ranked(
-                team=t,
-                project=p.name,
-                project_version=p.version,
-                component=str(c.get("name", "")),
-                version=str(c.get("version", "")),
-                vuln_id=vid,
-                severity=str(v.get("severity") or "UNASSIGNED").upper(),
-                tier=verdict.tier,
-                tier_name=verdict.name,
-                reasons=verdict.reasons,
-                cvss=cvss,
-                epss=epss,
-                kev=vid.upper() in kev,
-            )
-        )
+        out.append(to_ranked(t, p, f, verdict, cvss, epss, kev))
     if vectors is not None:
         vectors.save()
         errors += vectors.errors
@@ -253,12 +280,18 @@ def rank_findings(
 @dataclass
 class Ranker:
     """What ranking needs, bundled for dt2dojo: the rules, the KEV catalog (id -> entry),
-    the vector cache and machines.toml."""
+    the vector cache and machines.toml. With `record` set, every unsuppressed finding ranked
+    for a team is kept there too (finding-watch notifies from it after the round)."""
 
     rules: PriorityRules
     kev: dict[str, dict[str, Any]] = field(default_factory=dict)
     vectors: VectorCache | None = None
     machines: Machines | None = None
+    record: list[Ranked] | None = None
 
-    def rank(self, p: DTProject, f: dict[str, Any]) -> Verdict:
-        return rank_finding(p, f, self.rules, set(self.kev), self.vectors, self.machines)[0]
+    def rank(self, p: DTProject, f: dict[str, Any], team: str = "") -> Verdict:
+        verdict, cvss, epss = rank_finding(p, f, self.rules, set(self.kev), self.vectors, self.machines)
+        suppressed = (f.get("analysis") or {}).get("isSuppressed")
+        if self.record is not None and team and not suppressed:
+            self.record.append(to_ranked(team, p, f, verdict, cvss, epss, self.kev))
+        return verdict

@@ -13,6 +13,7 @@ import urllib.request
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -20,7 +21,7 @@ from vulnflow.clients import DefectDojo, DependencyTrack, OpenCVE
 from vulnflow.config import PriorityRules, add_subscriptions, load_inventory, load_machines
 from vulnflow.intel import Enricher, Signals
 from vulnflow.jobs import dt_to_dojo, sync_inventory
-from vulnflow.net import Response
+from vulnflow.net import Http, Response
 from vulnflow.priority import assess
 from vulnflow.receiver import Pipeline, format_chat, make_handler, process_payload
 
@@ -4092,15 +4093,247 @@ def test_dt_to_dojo_sets_tiers_after_the_reimport(inv):
             "PATCH /api/v2/findings/5/": patch,
         }
     )
+    ranker = Ranker(inv.rules, record=[])
     rep = dt_to_dojo(
         inv,
         DependencyTrack("http://dt", "k", transport=t),
         DefectDojo("http://dd", "k", transport=t),
-        ranker=Ranker(inv.rules),
+        ranker=ranker,
     )
     assert not rep.errors
     assert rep.done[0] == "host:web@13 -> Sysadmin (active findings: 1, tiers: 1 of 1 updated)"
     assert patched == [{"tags": ["tier-p3"], "planned_remediation_date": "2027-02-24"}]
+    # the round's verdicts, with the owning team, for finding-watch
+    assert ranker.record is not None
+    assert [(r.team, r.project, r.vuln_id, r.tier) for r in ranker.record] == [
+        ("sysadm", "host:web", "CVE-1", 3)
+    ]
+
+
+def _ranked(**kw: Any) -> Any:
+    from vulnflow.ranking import Ranked
+
+    base: dict[str, Any] = {
+        "team": "sysadm",
+        "project": "host:web",
+        "project_version": "13",
+        "component": "openssl",
+        "version": "3.0.1",
+        "vuln_id": "CVE-2026-1",
+        "severity": "CRITICAL",
+        "tier": 1,
+        "tier_name": "P1 Act",
+        "reasons": ["in CISA KEV", "internet-facing"],
+        "cvss": 9.8,
+        "epss": 0.5,
+        "kev": True,
+        "criticality": "critical",
+        "title": "OpenSSL overflow",
+    }
+    return Ranked(**(base | kw))
+
+
+def test_finding_watch_notifies_once_per_channel(inv, tmp_path):
+    from vulnflow.findwatch import EXPIRE_SECONDS, MAX_LINES, watch
+
+    state = tmp_path / "findings-notified.json"
+    sent: dict[str, list[str]] = {"team": [], "soc": [], "page": []}
+    fail: set[str] = set()
+
+    def sender(channel: str):
+        def send(text: str) -> None:
+            if channel in fail:
+                raise OSError("webhook down")
+            sent[channel].append(text)
+
+        return send
+
+    senders = {c: sender(c) for c in sent}
+    old = _ranked(vuln_id="CVE-2026-0", criticality="normal")
+    # first run: everything open is recorded, nothing posted
+    res = watch(inv, [old], state, senders, now=1000.0)
+    assert res.baseline == {"team": 1, "soc": 1} and not any(sent.values())
+
+    p1 = _ranked()  # P1 on a critical asset: team, SOC and paging
+    p2 = _ranked(
+        team="dev", project="app", vuln_id="CVE-2026-2", tier=2, tier_name="P2 Attend", kev=False
+    )
+    p3 = _ranked(team="dev", project="app", vuln_id="CVE-2026-3", tier=3, tier_name="P3 Track")
+    res = watch(inv, [old, p1, p2, p3], state, senders, opencve_url="http://oc/", now=2000.0)
+    assert not res.errors
+    assert {c: [n.finding.vuln_id for n in ns] for c, ns in res.sent.items()} == {
+        "team": ["CVE-2026-2", "CVE-2026-1"],  # one message per team, by team name
+        "soc": ["CVE-2026-1"],
+        "page": ["CVE-2026-1"],
+    }
+    # one team message per team, with the mention; the same line format as alerts
+    assert len(sent["team"]) == 2
+    assert sent["team"][0].startswith("@dev 1 new finding(s) to act on for team dev")
+    assert sent["team"][1] == (
+        "@sysadm 1 new finding(s) to act on for team sysadm\n"
+        "- [P1 Act] CVE-2026-1: OpenSSL overflow\n"
+        "  new finding: openssl 3.0.1 in host:web@13, critical asset, CVSS 9.8, EPSS 0.500: "
+        "in CISA KEV; internet-facing http://oc/cve/CVE-2026-1"
+    )
+    assert sent["soc"][0].startswith("SOC: 1 new finding(s)") and ", team sysadm," in sent["soc"][0]
+    assert sent["page"][0].startswith("PAGE: 1 P1 finding(s) on critical assets")
+
+    # the next round (a new project version included): nothing again
+    for c in sent:
+        sent[c].clear()
+    res = watch(inv, [old, p1, replace(p2, project_version="2.0"), p3], state, senders, now=3000.0)
+    assert not res.sent and not res.baseline and not any(sent.values())
+
+    # P2 -> P1 on a critical asset: team again (more serious), SOC and paging for the first time
+    up = replace(p2, tier=1, tier_name="P1 Act")
+    fail.add("page")  # paging down: retried next round, the others not repeated
+    res = watch(inv, [old, p1, up, p3], state, senders, now=4000.0)
+    assert res.errors == ["page delivery failed: webhook down"]
+    assert "more serious (was P2): openssl 3.0.1 in app@13" in sent["team"][0]
+    assert len(sent["team"]) == len(sent["soc"]) == 1 and not sent["page"]
+    fail.clear()
+    res = watch(inv, [old, p1, up, p3], state, senders, now=5000.0)
+    assert list(res.sent) == ["page"] and len(sent["page"]) == 1 and len(sent["team"]) == 1
+
+    # not seen at P1/P2 for 30 days: dropped, and new again when it comes back
+    watch(inv, [old, up], state, senders, now=5000.0 + EXPIRE_SECONDS + 1)
+    assert "host:web|openssl|CVE-2026-1" not in json.loads(state.read_text())
+    res = watch(inv, [old, p1, up], state, senders, now=5000.0 + EXPIRE_SECONDS + 2)
+    assert [n.finding.vuln_id for n in res.sent["page"]] == ["CVE-2026-1"]
+
+    # a channel without a webhook records instead of posting, so a later one doesn't flood
+    many = [_ranked(vuln_id=f"CVE-2027-{i}") for i in range(MAX_LINES + 5)]
+    res = watch(inv, many, state, {"team": senders["team"], "soc": None, "page": None}, now=9e9)
+    assert res.baseline == {"soc": MAX_LINES + 5, "page": MAX_LINES + 5}
+    assert sent["team"][-1].endswith("(+5 more; DefectDojo tags tier-p1/tier-p2)")
+    res = watch(inv, many, state, senders, now=9e9)
+    assert not res.sent and not res.baseline
+
+    # dry run: reported, nothing posted or recorded
+    before = state.read_text()
+    res = watch(inv, [_ranked(vuln_id="CVE-2028-1")], state, senders, now=9e9, dry_run=True)
+    assert set(res.sent) == {"team", "soc", "page"} and state.read_text() == before
+
+
+def test_finding_watch_routes_noisy_products_to_their_channel(inv, tmp_path):
+    """[chat.*] as in the receiver: kernel findings leave the team channel for #linux, one
+    line per vulnerability naming every host; SOC and paging are unaffected."""
+    from vulnflow.config import ChatChannel, cpe_vendor_product
+    from vulnflow.findwatch import watch
+
+    assert cpe_vendor_product("cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*") == (
+        "linux",
+        "linux_kernel",
+    )
+    assert cpe_vendor_product("") is None and cpe_vendor_product("cpe:/o:linux") is None
+    state = tmp_path / "findings-notified.json"
+    sent: dict[str, list[str]] = {"team": [], "soc": [], "page": [], "chat:linux": []}
+    senders: dict[str, Any] = {c: sent[c].append for c in sent}
+    linux = ChatChannel("linux", ["linux:linux_kernel"])
+    cpe = "cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*"
+
+    def kernel(host: str, vid: str, **kw: Any) -> Any:
+        base: dict[str, Any] = {
+            "project": f"host:{host}",
+            "project_version": "debian-13",
+            "component": "linux_kernel",
+            "version": "7.3.6",
+            "vuln_id": vid,
+            "tier": 2,
+            "tier_name": "P2 Attend",
+            "criticality": "normal",
+            "cpe": cpe,
+        }
+        return _ranked(**(base | kw))
+
+    old = [kernel(h, "CVE-2026-10") for h in ("a", "b")]
+    # recorded before the channel existed (team channel): not announced again in #linux
+    watch(inv, old, state, {"team": senders["team"]}, now=1000.0)
+    watch(inv, old, state, {"team": senders["team"]}, now=1500.0)
+    assert not sent["team"]
+
+    new = [kernel("a", "CVE-2026-11"), kernel("b", "CVE-2026-11", team="dev")]
+    p1 = kernel("c", "CVE-2026-12", tier=1, tier_name="P1 Act", criticality="critical")
+    other = _ranked(vuln_id="CVE-2026-13", tier=2, tier_name="P2 Attend", criticality="normal")
+    res = watch(inv, [*old, *new, p1, other], state, senders, now=2000.0, channels=[linux])
+    assert not res.errors
+    assert [n.finding.vuln_id for n in res.sent["team"]] == ["CVE-2026-13"]
+    assert sorted(n.finding.vuln_id for n in res.sent["chat:linux"]) == [
+        "CVE-2026-11",
+        "CVE-2026-11",
+        "CVE-2026-12",
+    ]
+    (msg,) = sent["chat:linux"]
+    assert msg.startswith("#linux: 2 new finding(s) in Dependency-Track")
+    assert "linux_kernel 7.3.6 in host:a@debian-13, host:b@debian-13" in msg
+    assert ", teams dev, sysadm," in msg and "@sysadm" not in msg
+    assert all("linux_kernel" not in t for t in sent["team"])
+    # SOC and paging still get the P1
+    assert [n.finding.vuln_id for n in res.sent["soc"]] == ["CVE-2026-12"]
+    assert [n.finding.vuln_id for n in res.sent["page"]] == ["CVE-2026-12"]
+    # nothing twice; and without the channel's webhook the next one goes to the team channel
+    res = watch(inv, [*old, *new, p1, other], state, senders, now=3000.0, channels=[linux])
+    assert not res.sent
+    later = kernel("a", "CVE-2026-14")
+    no_hook = {c: s for c, s in senders.items() if c != "chat:linux"}
+    res = watch(inv, [later], state, no_hook, now=4000.0, channels=[linux])
+    assert [n.finding.vuln_id for n in res.sent["team"]] == ["CVE-2026-14"]
+    # min_tier: a P2 isn't posted to a P1-only channel, nor in team chat
+    strict = ChatChannel("linux", ["linux:linux_kernel"], min_tier=1)
+    res = watch(inv, [kernel("a", "CVE-2026-15")], state, senders, now=5000.0, channels=[strict])
+    assert not res.sent
+
+
+def test_finding_watch_survives_a_broken_record(inv, tmp_path, caplog):
+    from vulnflow.findwatch import watch
+
+    state = tmp_path / "findings-notified.json"
+    sent: list[str] = []
+    for junk in ("{trunc", '["a"]', '{"k": {"team": "x"}}'):
+        state.write_text(junk)
+        res = watch(inv, [_ranked()], state, {"team": sent.append}, now=1000.0)
+        # treated as a first run: recorded, not posted, and a valid file written back
+        assert res.baseline["team"] == 1 and not sent and not res.errors
+        assert "host:web|openssl|CVE-2026-1" in json.loads(state.read_text())
+    assert "unreadable" in caplog.text
+    # a record that can't be saved is an error for the round, not a crash
+    state.unlink()
+    state.mkdir()
+    res = watch(inv, [_ranked()], state, {"team": sent.append}, now=2000.0)
+    assert res.errors and "could not save" in res.errors[0]
+
+
+def test_finding_watch_page_formats():
+    from vulnflow.findwatch import page_sender
+
+    t = FakeTransport({"POST ntfy.example/": {}, "POST hooks.example/": {}})
+    with patch("vulnflow.findwatch.Http") as http:
+        http.side_effect = lambda url, timeout: Http(url, transport=t, timeout=timeout)
+        page_sender("https://ntfy.example/vulnflow", "text")("PAGE: x")
+        page_sender("https://hooks.example/p")("PAGE: y")
+    (m1, u1, h1, b1), (m2, u2, _, b2) = t.calls
+    assert m1 == m2 == "POST"
+    assert (u1, b1, h1["Priority"]) == ("https://ntfy.example/vulnflow", b"PAGE: x", "urgent")
+    assert h1["Content-Type"].startswith("text/plain")
+    assert (u2, json.loads(b2)) == ("https://hooks.example/p", {"text": "PAGE: y"})
+
+
+def test_ranked_title_and_criticality(inv):
+    from vulnflow.clients import DTProject
+    from vulnflow.ranking import Ranker, finding_title
+
+    assert finding_title({"title": "T", "description": "D."}, "KEV name") == "KEV name"
+    assert finding_title({"description": "First one. Second."}) == "First one"
+    assert len(finding_title({"description": "x" * 300})) == 100
+    p = DTProject("p", "host:web", "13", True, ["team-sysadm", "exposure-internet", "crit-critical"])
+    f = {"component": {"name": "lib", "version": "1"}, "vulnerability": {"vulnId": "CVE-1"}}
+    ranker = Ranker(inv.rules, {"CVE-1": {"vulnerabilityName": "Lib RCE"}}, record=[])
+    ranker.rank(p, f, "sysadm")
+    ranker.rank(p, f)  # no team: not recorded
+    ranker.rank(p, f | {"analysis": {"isSuppressed": True}}, "sysadm")  # suppressed: not recorded
+    assert ranker.record is not None and len(ranker.record) == 1
+    r = ranker.record[0]
+    assert (r.tier, r.criticality, r.title, r.kev) == (1, "critical", "Lib RCE", True)
 
 
 def test_priority_sla_days_from_inventory(tmp_path):

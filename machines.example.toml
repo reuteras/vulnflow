@@ -130,7 +130,8 @@ path = "/srv/myapp"
 # list; leave it out and nothing changes. CVEs matching `match` go there *instead of* the
 # team's channel (naming the team in each line, no @mention); the SOC channel still gets
 # every P1. One channel serves all teams: a CVE that several teams subscribe to is posted
-# once, naming them all. The match is on the subscription that made OpenCVE notify, so the
+# once, naming them all. New findings on your machines whose component CPE matches (DT's
+# linux_kernel, say) go there too, one line per CVE naming every host. The match is on the subscription that made OpenCVE notify, so the
 # product must be subscribed (above or in the inventory): a team subscribed to the whole
 # vendor reports "linux", not "linux:linux_kernel" (chat-up warns). `./poc.sh chat-up`
 # (rerun after a change) creates the channel and writes its webhook to

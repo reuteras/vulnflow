@@ -33,6 +33,9 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   `cve.subscriptions.raw` (`vendor` / `vendor$PRODUCT$product`: the project's subscriptions
   in the CVE's vendors, v3.1.0 `BaseNotifier.prepare_payload`), so a team subscribed to a
   whole vendor never matches `vendor:product`; `config.chat_channel_warnings` says so.
+  `finding-watch` (`vulnflow/findwatch.py`) routes Dependency-Track findings to the same
+  channels by the component's CPE (`ChatChannel.matches`), one line per vulnerability across
+  hosts; the team and `[chat.*]` channels share one record in `data/findings-notified.json`.
 - Newsletters: `vulnflow newsletter weekly|daily|alert <id>` (`vulnflow/news.py`): feeds from
   `[news.*]` in `machines.toml`, matched per team. Feeds are always downloaded whole and
   filtered locally; never add a request that carries a team's keywords, products or CVEs
