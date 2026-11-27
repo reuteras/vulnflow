@@ -211,7 +211,14 @@ def dt_to_dojo(
             from .rules import apply_rules
 
             ledger = data_dir / "ignored.jsonl" if data_dir is not None else None
-            rr = apply_rules(inv, maintenance, machines.triage_rules, apply=not dry_run, ledger=ledger)
+            rr = apply_rules(
+                inv,
+                maintenance,
+                machines.triage_rules,
+                apply=not dry_run,
+                ledger=ledger,
+                kev=ranker.kev if ranker is not None else (),
+            )
             rep.done += [f"{tag}triage rule: {line}" for line in rr.written]
             rule_writes = rr.written
             rep.done += [f"triage rule past its review date, not applied: {r}" for r in rr.expired]

@@ -69,6 +69,7 @@ class Alert:
     notify: str = ""
     # a non-quiet change: notifies if the CVE turns out to be followed (Pipeline checks)
     followable: bool = False
+    kev_source: str = ""  # CISA or VulnCheck, when kev
 
 
 FOLLOWED_STATUSES = ("to_evaluate", "pending_review", "analysis_in_progress", "remediation_in_progress")
@@ -176,6 +177,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
         if kev_date is not None and not sig.kev:
             # OpenCVE saw the KEV addition before our cached copy of the catalog did
             sig.kev = True
+            sig.kev_source = "CISA"  # OpenCVE's KEV data is CISA's
             sig.kev_date_added = sig.kev_date_added or kev_date[:10]
         cvss = _cvss(cve.get("cvss31"))
         v = assess(cvss, sig, inv.rules)
@@ -204,6 +206,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
                 tier_name=v.name,
                 reasons=v.reasons,
                 kev=sig.kev,
+                kev_source=sig.kev_source if sig.kev else "",
                 epss=sig.epss,
                 epss_percentile=sig.epss_percentile,
                 sightings=sig.sightings,

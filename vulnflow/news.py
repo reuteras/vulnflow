@@ -2,7 +2,7 @@
 
 Each team gets the security news that concerns what it runs, from
 
-- vulnflow's own data (no new requests): its notified OpenCVE alerts, new CISA KEV entries
+- vulnflow's own data (no new requests): its notified OpenCVE alerts, new KEV entries
   that hit it (kev-watch's log), accepted risks whose review date is near (the ignore
   ledger);
 - OSINT feeds from `[news.feeds.<name>]` in machines.toml: RSS 2.0, RSS 1.0, Atom or JSON
@@ -19,7 +19,7 @@ Matching, per team:
 - a feed with `teams = [...]` goes to those teams whole (e.g. a vendor's PSIRT feed).
 
 Items sharing a CVE are merged into one entry with all their links. Order: the team's
-own systems first, then exploited (CISA KEV) or a public exploit (an `exploit` feed),
+own systems first, then exploited (CISA or VulnCheck KEV) or a public exploit (an `exploit` feed),
 then the rest, newest first. No summaries are generated: titles, links, sources and why
 each item matched.
 
@@ -39,7 +39,7 @@ import html
 import json
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Inventory, Machines, NewsFeed
+from .intel import kev_label
 from .net import Http, Transport
 from .receiver import NOTIFY_LABELS
 from .report import Para, Section, Table, code
@@ -285,7 +286,7 @@ class Match:
     item: Item
     why: list[str]
     own: bool  # touches the team's own systems
-    exploited: bool  # CISA KEV, or a public exploit (exploit feed)
+    exploited: bool  # in KEV (CISA or VulnCheck), or a public exploit (exploit feed)
     links: list[tuple[str, str]] = field(default_factory=list)  # (source, link), merged items
 
     @property
@@ -293,7 +294,9 @@ class Match:
         return self.own or self.exploited
 
 
-def match_item(item: Item, prof: TeamProfile, feed_teams: list[str], kev: set[str]) -> Match | None:
+def match_item(
+    item: Item, prof: TeamProfile, feed_teams: list[str], kev: Collection[str]
+) -> Match | None:
     why: list[str] = []
     own = False
     for i in sorted(item.ids):
@@ -313,10 +316,13 @@ def match_item(item: Item, prof: TeamProfile, feed_teams: list[str], kev: set[st
         own = own or kw in prof.own_keywords
     if not why:
         return None
-    kev_ids = sorted(item.ids & kev)
+    kev_ids = sorted(i for i in item.ids if i in kev)
     exploited = bool(kev_ids) or item.kind == "exploit"
-    if kev_ids:
-        why.append(f"in CISA KEV: {', '.join(kev_ids)}")
+    by_label: dict[str, list[str]] = {}
+    for i in kev_ids:
+        by_label.setdefault(kev_label(kev, i), []).append(i)
+    for label, ids in sorted(by_label.items()):
+        why.append(f"in {label}: {', '.join(ids)}")
     if item.kind == "exploit":
         why.append("public exploit or PoC")
     return Match(item, why, own, exploited, [(item.source, item.link)])
@@ -352,7 +358,7 @@ def merge(matches: list[Match]) -> list[Match]:
 
 
 def team_matches(
-    items: list[Item], prof: TeamProfile, feeds: dict[str, NewsFeed], kev: set[str]
+    items: list[Item], prof: TeamProfile, feeds: dict[str, NewsFeed], kev: Collection[str]
 ) -> list[Match]:
     found = []
     for it in items:
@@ -459,10 +465,10 @@ def vulnflow_section(
         and (team in (e.get("findings") or {}) or team in (e.get("follows") or []))
     ]
     if kev:
-        s.blocks.append(Para("New in CISA KEV that hit your team:"))
+        s.blocks.append(Para("New in KEV that hit your team:"))
         rows = [
             [
-                code(str(e.get("cve", ""))),
+                code(str(e.get("cve", ""))) + f" ({e.get('source') or 'CISA'} KEV)",
                 f"{e.get('vendor', '')} {e.get('product', '')}: {e.get('name', '')}",
                 "open findings" if team in (e.get("findings") or {}) else "vendor you follow",
             ]
@@ -512,7 +518,7 @@ def newsletter(
     machines: Machines,
     profiles: dict[str, TeamProfile],
     items: list[Item],
-    kev: set[str],
+    kev: Collection[str],
     seen: dict[str, dict[str, str]],
     *,
     alerts: list[dict[str, Any]] | None = None,
@@ -607,7 +613,8 @@ def alert(
         if kev_entry:
             s.blocks.append(
                 Para(
-                    f"**In CISA KEV** since {kev_entry.get('dateAdded', '')}: "
+                    f"**In {kev_entry.get('kevSource') or 'CISA'} KEV** since "
+                    f"{kev_entry.get('dateAdded', '')}: "
                     f"{kev_entry.get('vendorProject', '')} {kev_entry.get('product', '')}: "
                     f"{kev_entry.get('vulnerabilityName', '')}"
                     + (

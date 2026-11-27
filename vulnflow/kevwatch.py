@@ -1,4 +1,7 @@
-"""New CISA KEV entries -> chat, with what they hit in our estate (`vulnflow kev-watch`).
+"""New KEV entries -> chat, with what they hit in our estate (`vulnflow kev-watch`).
+
+The catalog is CISA KEV, plus VulnCheck KEV when VULNCHECK_API_TOKEN is set (intel.py);
+each entry is labelled with the catalog that lists it ("CISA KEV" when both do).
 
 The receiver only hears about a KEV addition when OpenCVE reports a change for a product a
 team follows. This watches the catalog itself: every run compares it with the CVE IDs seen
@@ -12,8 +15,11 @@ before (`kev-seen.json` in the data directory) and, for each new entry, looks fo
 
 The team channel gets the entries that hit something, mentioning the teams; the SOC
 channel (VULNFLOW_SOC_WEBHOOK) gets every new entry. The first run only records what is
-in the catalog, so it doesn't post the whole list. An entry counts as seen once its
-messages were delivered, so a failed delivery is retried on the next run.
+in the catalog, so it doesn't post the whole list; the same goes for the first run with a
+new source (adding a VulnCheck token would otherwise post its 4000+ extra entries). An
+entry counts as seen once its messages were delivered, so a failed delivery is retried on
+the next run. A CVE is seen once, whichever catalog listed it first: VulnCheck often lists
+one before CISA, and CISA adding it later is not posted again.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Inventory
+from .intel import CISA
 
 log = logging.getLogger(__name__)
 STATE_FILE = "kev-seen.json"
@@ -49,6 +56,7 @@ class KevHit:
     name: str
     date_added: str
     ransomware: bool
+    source: str = CISA  # the catalog that lists it: CISA or VulnCheck
     findings: dict[str, list[str]] = field(default_factory=dict)  # team -> "project: component"
     follows: list[str] = field(default_factory=list)  # teams following the vendor
 
@@ -66,24 +74,33 @@ class KevHit:
 
 @dataclass
 class WatchResult:
-    baseline: int = 0  # first run: entries recorded, nothing posted
+    baseline: int = 0  # first run (of a source): entries recorded, nothing posted
+    baseline_sources: list[str] = field(default_factory=list)
     new: list[KevHit] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
-def load_seen(path: Path) -> set[str] | None:
-    """The CVE IDs seen before, or None on the first run."""
+def load_seen(path: Path) -> tuple[set[str], set[str]] | None:
+    """(the CVE IDs seen before, the sources they came from), or None on the first run. A
+    file written before VulnCheck support has no `sources`: it was CISA's."""
     if not path.is_file():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {str(c).upper() for c in data.get("seen", [])}
+    sources = {str(x) for x in data.get("sources", [CISA])}
+    return {str(c).upper() for c in data.get("seen", [])}, sources
 
 
-def save_seen(path: Path, seen: set[str]) -> None:
+def save_seen(path: Path, seen: set[str], sources: set[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"seen": sorted(seen)}) + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps({"seen": sorted(seen), "sources": sorted(sources)}) + "\n", encoding="utf-8"
+    )
     tmp.replace(path)
+
+
+def _source(e: dict[str, Any]) -> str:
+    return str(e.get("kevSource") or CISA)
 
 
 def followers(inv: Inventory, vendor: str) -> list[str]:
@@ -110,6 +127,7 @@ def match(inv: Inventory, entries: list[dict[str, Any]], findings: Iterable[Find
                 name=str(e.get("vulnerabilityName", "")),
                 date_added=str(e.get("dateAdded", "")),
                 ransomware=str(e.get("knownRansomwareCampaignUse", "")).lower() == "known",
+                source=_source(e),
                 findings={t: sorted(set(v)) for t, v in by_cve.get(cve, {}).items()},
                 follows=followers(inv, vendor),
             )
@@ -119,7 +137,7 @@ def match(inv: Inventory, entries: list[dict[str, Any]], findings: Iterable[Find
 
 def _head(h: KevHit) -> str:
     extra = ", ransomware use" if h.ransomware else ""
-    return f"{h.cve} {h.vendor} {h.product}: {h.name} (added {h.date_added}{extra})"
+    return f"{h.cve} {h.vendor} {h.product}: {h.name} ({h.source} KEV, added {h.date_added}{extra})"
 
 
 def format_team(hits: list[KevHit], inv: Inventory, opencve_url: str = "") -> str | None:
@@ -130,7 +148,7 @@ def format_team(hits: list[KevHit], inv: Inventory, opencve_url: str = "") -> st
     mentions = sorted(
         {inv.teams[t].chat_mention for h in hot for t in h.teams() if t in inv.teams} - {""}
     )
-    lines = [f"{' '.join(mentions) + ' ' if mentions else ''}New in CISA KEV ({len(hot)}):"]
+    lines = [f"{' '.join(mentions) + ' ' if mentions else ''}New in KEV ({len(hot)}):"]
     for h in hot:
         link = f" {opencve_url.rstrip('/')}/cve/{h.cve}" if opencve_url else ""
         lines.append(f"- {_head(h)}{link}")
@@ -146,7 +164,7 @@ def format_soc(hits: list[KevHit]) -> str | None:
     """The SOC channel: every new entry, with what it hits."""
     if not hits:
         return None
-    lines = [f"SOC: new in CISA KEV ({len(hits)}):"]
+    lines = [f"SOC: new in KEV ({len(hits)}):"]
     for h in hits:
         lines.append(f"- {_head(h)} -> {h.where()}")
     return "\n".join(lines)
@@ -167,13 +185,24 @@ def watch(
     called when there is something new (it asks Dependency-Track)."""
     res = WatchResult()
     current = {c.upper() for c in index}
-    seen = load_seen(state)
-    if seen is None:
-        res.baseline = len(current)
+    sources = {_source(e) for e in index.values()}
+    loaded = load_seen(state)
+    if loaded is None:
+        res.baseline, res.baseline_sources = len(current), sorted(sources)
         if not dry_run:
-            save_seen(state, current)
+            save_seen(state, current, sources)
         return res
-    fresh = sorted(current - seen, key=lambda c: (str(index[c].get("dateAdded", "")), c))
+    seen, known = loaded
+    unseen = current - seen
+    # a source seen for the first time: record its entries, don't post them
+    quiet = {c for c in unseen if _source(index[c]) not in known}
+    if quiet:
+        res.baseline, res.baseline_sources = len(quiet), sorted(sources - known)
+        seen = seen | quiet
+        if not dry_run:
+            save_seen(state, seen, known | sources)
+    known = known | sources
+    fresh = sorted(unseen - quiet, key=lambda c: (str(index[c].get("dateAdded", "")), c))
     if not fresh:
         return res
     try:
@@ -198,7 +227,7 @@ def watch(
             res.errors.append(f"{what} delivery failed: {e}")
     if delivered:
         append_log(state.parent / LOG_FILE, res.new)
-        save_seen(state, seen | set(fresh))
+        save_seen(state, seen | set(fresh), known)
     return res
 
 
@@ -216,6 +245,7 @@ def append_log(path: Path, hits: list[KevHit], now: datetime | None = None) -> N
                 "name": h.name,
                 "date_added": h.date_added,
                 "ransomware": h.ransomware,
+                "source": h.source,
                 "findings": h.findings,
                 "follows": h.follows,
             }

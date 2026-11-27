@@ -46,7 +46,7 @@ import os
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from email.message import EmailMessage
@@ -206,9 +206,9 @@ def _alert_what(a: dict[str, Any]) -> str:
 
 
 def kev_section(lines: Iterable[str], since: str) -> tuple[Section, str]:
-    """New CISA KEV entries kev-watch posted after `since` (its kev-new.jsonl), the same
+    """New KEV entries (CISA, VulnCheck) kev-watch posted after `since` (its kev-new.jsonl), the same
     entries and matches as the chat messages. Notable when one hits something of ours."""
-    s = Section("New in CISA KEV")
+    s = Section("New in KEV")
     newest = since
     rows = []
     matched = False
@@ -233,15 +233,16 @@ def kev_section(lines: Iterable[str], since: str) -> tuple[Section, str]:
             [
                 str(e.get("date_added", ""))[:10],
                 code(str(e.get("cve", ""))),
+                f"{e.get('source') or 'CISA'} KEV",
                 name + (" **(ransomware use)**" if e.get("ransomware") else ""),
                 ", ".join(where) or "nothing of ours",
             ]
         )
     rows.sort(key=lambda r: r[0], reverse=True)  # newest first,
-    rows.sort(key=lambda r: r[3] == "nothing of ours")  # those that hit something on top
+    rows.sort(key=lambda r: r[4] == "nothing of ours")  # those that hit something on top
     s.notable = matched
     if rows:
-        _table(s, ["Added", "CVE", "Vulnerability", "Hits"], rows)
+        _table(s, ["Added", "CVE", "Catalog", "Vulnerability", "Hits"], rows)
     else:
         s.blocks.append(Para("None."))
     return s, newest
@@ -338,7 +339,7 @@ def collect_findings(
     inv: Inventory,
     dt: DependencyTrack,
     errors: list[str],
-    kev: set[str] | None = None,
+    kev: Collection[str] | None = None,
     vectors: VectorCache | None = None,
     machines: Machines | None = None,
 ) -> dict[str, OpenFinding]:
@@ -409,7 +410,7 @@ def _sev_rank(sev: str) -> int:
     return SEVERITY_ORDER.index(sev) if sev in SEVERITY_ORDER else len(SEVERITY_ORDER)
 
 
-def report_group(f: OpenFinding, kev: set[str]) -> int:
+def report_group(f: OpenFinding, kev: Collection[str]) -> int:
     """0: internet-facing or exploited (KEV), 1: on a `critical` asset, 2: the rest."""
     if f.exposure == "internet" or f.vuln_id in kev:
         return 0
@@ -434,7 +435,7 @@ def blast_radius(current: dict[str, OpenFinding]) -> Callable[[OpenFinding], str
 def findings_section(
     previous: dict[str, Any] | None,
     current: dict[str, OpenFinding],
-    kev: set[str],
+    kev: Collection[str],
     *,
     weekly: bool,
     links: Links | None = None,

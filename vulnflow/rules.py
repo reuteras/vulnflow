@@ -17,7 +17,8 @@ the provider is not installed.
 A finding matches when its id or one of its DT aliases is in `vulnerabilities`, the
 component name is `component` (case-insensitive) and, when given, its version is in
 `versions`, the project name matches one of `projects` (fnmatch) and its team is in `teams`.
-KEV-listed vulnerabilities are skipped unless `allow_kev = true`: known exploitation is a
+KEV-listed vulnerabilities (DT's `isKev`, or in vulnflow's catalog: CISA, plus VulnCheck
+with a token) are skipped unless `allow_kev = true`: known exploitation is a
 reason to look again, not to stay quiet.
 
 Writing goes through `triage.apply_ignores`, the same as `vulnflow ignore`: a finding
@@ -35,6 +36,7 @@ Runs in every `dt2dojo` round after `prune`, with DT_MAINTENANCE_API_KEY, and by
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -104,9 +106,11 @@ def apply_rules(
     apply: bool = False,
     ledger: Path | None = None,
     today: date | None = None,
+    kev: Collection[str] = (),
 ) -> RulesReport:
     """Match the rules against the open findings of the teams' active projects and, with
-    `apply`, write their decisions (see module doc)."""
+    `apply`, write their decisions (see module doc). `kev` is vulnflow's KEV catalog (CISA,
+    plus VulnCheck with a token); DT's own `isKev` counts too."""
     rep = RulesReport()
     today = today or date.today()
     live = {}
@@ -146,7 +150,9 @@ def apply_rules(
                     if state not in UNSET:  # somebody is on it (IN_TRIAGE, ...)
                         rep.kept.append(f"{label}: {what} is {state} ({name})")
                         break
-                    if vuln.get("isKev") and not rule.allow_kev:
+                    # an alias counts: a GHSA finding whose CVE is in KEV
+                    in_kev = vuln.get("isKev") or any(i.upper() in kev for i in vulnerability_ids(vuln))
+                    if in_kev and not rule.allow_kev:
                         rep.kev_skipped.append(
                             f"{label}: {rule.component} {vuln.get('vulnId')} ({name})"
                         )

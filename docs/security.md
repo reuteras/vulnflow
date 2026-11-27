@@ -14,8 +14,9 @@
   Agent bundles in `data/agents/` hold one upload-only DT key per host (files 600); revoke a
   host with `python3 -m vulnflow agent-revoke <host>`. CI pipelines get the same kind of key
   per repository in `data/ci/` (`ci-key`; `ci-revoke <name>`).
-- **Enrichment leaks interest, not exposure.** The receiver sends only CVE IDs to CISA (KEV
-  file download), FIRST (EPSS) and CIRCL (sightings). You can turn each one off with
+- **Enrichment leaks interest, not exposure.** The receiver sends only CVE IDs to FIRST
+  (EPSS) and CIRCL (sightings); the KEV catalogs (CISA, and VulnCheck with a token) are
+  downloaded whole. You can turn each one off with
   `VULNFLOW_ENRICH_*=0`. For an isolated network, mirror the KEV and EPSS files internally and
   run your own Vulnerability-Lookup instance (`CIRCL_URL`).
 - Compose files bind to `127.0.0.1`: for OpenCVE, `opencve-prepare` rewrites upstream's
@@ -78,6 +79,7 @@ connects in.
 | GitHub Advisories | Dependency-Track, only if you enable it with a GitHub token ([OSV in Dependency-Track](install.md#2-osv-in-dependency-track)) | the token | off by default |
 | `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h); `kev-watch` in each `dt2dojo` round (cached 1 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |
+| `api.vulncheck.com` | the same users, only with `VULNCHECK_API_TOKEN`: the whole VulnCheck KEV index (cached 6 h, also for `kev-watch`; about 5 requests) | the token, which identifies your VulnCheck account; never CVE ids or anything about your stack | leave `VULNCHECK_API_TOKEN` empty, or `VULNFLOW_ENRICH_KEV=0` |
 | `api.github.com`, `github.com` (release downloads) | `github-sboms` in each `dt2dojo` round, only with `[github.*]` in `machines.toml` | the repository names; `VULNFLOW_GITHUB_TOKEN` to the API if set | remove the `[github.*]` entries, or `dt2dojo --no-github-sboms` |
 | `tuf-repo-cdn.sigstore.dev` | `cosign verify-blob` in `github-sboms` fetches the Sigstore trust root (cached in `data/.sigstore`), only for entries with `verify` | nothing about your stack: a plain download of public metadata | drop `verify` (then the SBOM's origin is not checked) |
 

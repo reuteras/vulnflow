@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import curses
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -36,6 +36,7 @@ from typing import Any, Protocol
 
 from .clients import DependencyTrack
 from .config import Inventory, Machines
+from .intel import kev_source
 from .machines import host_scans, project_name
 from .net import Http
 from .patches import open_findings
@@ -102,6 +103,7 @@ class FindingRow:
     description: str = ""
     purl: str = ""
     kev: bool = False
+    kev_source: str = ""  # CISA or VulnCheck, when kev
     tier: int = 0  # 1-4 from ranking.py (threat and asset context); 0 = not ranked
     reasons: list[str] = field(default_factory=list)
 
@@ -117,7 +119,7 @@ class FindingRow:
 def load_findings(
     inv: Inventory,
     dt: DependencyTrack,
-    kev: set[str],
+    kev: Collection[str],
     errors: list[str],
     vectors: VectorCache | None = None,
     machines: Machines | None = None,
@@ -143,6 +145,7 @@ def load_findings(
                 description=" ".join(str(v.get("description") or "").split()),
                 purl=str(c.get("purl", "")),
                 kev=vid in kev,
+                kev_source=kev_source(kev, vid) if vid in kev else "",
                 tier=verdict.tier,
                 reasons=verdict.reasons,
             )
@@ -245,6 +248,7 @@ class AlertRow:
     tier: int
     tier_name: str
     kev: bool = False
+    kev_source: str = ""  # receiver.Alert.kev_source; empty in older lines (CISA then)
     epss: float | None = None
     epss_percentile: float | None = None
     cvss31: float | None = None
@@ -293,6 +297,7 @@ def parse_alerts(raw: Iterable[str]) -> tuple[list[str], list[AlertRow]]:
                 tier=tier if isinstance(tier, int) and not isinstance(tier, bool) else 4,
                 tier_name=str(a.get("tier_name", "")),
                 kev=bool(a.get("kev")),
+                kev_source=str(a.get("kev_source") or ""),
                 epss=_num(a.get("epss")),
                 epss_percentile=_num(a.get("epss_percentile")),
                 cvss31=_num(a.get("cvss31")),
@@ -366,7 +371,7 @@ def alert_details(r: AlertRow, opencve_url: str = "") -> list[str]:
         f"Events:     {', '.join(r.event_types) or 'change'}",
         f"CVSS 3.1:   {r.cvss31 if r.cvss31 is not None else 'n/a'}",
         f"EPSS:       {epss}",
-        f"KEV:        {'yes, in CISA KEV' if r.kev else 'no'}",
+        "KEV:        " + (f"yes, in {r.kev_source or 'CISA'} KEV" if r.kev else "no"),
         f"Sightings:  {sightings}",
     ]
     if opencve_url:
@@ -794,7 +799,7 @@ def finding_details(r: FindingRow, dt: DependencyTrack | None) -> list[str]:
         f"Component:  {r.component} {r.version}",
         f"purl:       {r.purl or '-'}",
         f"CVE:        {r.vuln_id} ({r.source or '?'}), severity {r.severity.lower()}"
-        + (", in CISA KEV" if r.kev else ""),
+        + (f", in {r.kev_source or 'CISA'} KEV" if r.kev else ""),
         *([f"Tier:       P{r.tier}", *(f"  - {x}" for x in r.reasons)] if r.tier else []),
         "",
         r.description or "(no description in Dependency-Track)",
