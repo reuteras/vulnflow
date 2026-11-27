@@ -324,7 +324,9 @@ def test_noisy_product_channel_takes_alerts_from_team_chat(inv, tmp_path, monkey
     quiet = {**payload, "changes": only}
     monkeypatch.setattr(
         "vulnflow.receiver.process_payload",
-        lambda *a, **k: [replace(x, tier=2, subscribed=["linux"]) for x in real(*a, **k)],
+        lambda *a, **k: [
+            replace(x, tier=2, subscribed=["linux$PRODUCT$linux_kernel"]) for x in real(*a, **k)
+        ],
     )
     team.clear()
     pipe("d.jsonl", channels=[strict], channel_senders=senders).handle(quiet)
