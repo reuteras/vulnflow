@@ -198,6 +198,11 @@
             "type": "boolean",
             "description": "Changes follow a certification cycle."
           },
+          "review": {
+            "type": "string",
+            "format": "date",
+            "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
+          },
           "group": {
             "type": "string",
             "description": "Join a group without being in its hosts list."
@@ -253,6 +258,11 @@
                 "certified": {
                   "type": "boolean",
                   "description": "Changes follow a certification cycle."
+                },
+                "review": {
+                  "type": "string",
+                  "format": "date",
+                  "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
                 }
               }
             }
@@ -304,6 +314,11 @@
                 "certified": {
                   "type": "boolean",
                   "description": "Changes follow a certification cycle."
+                },
+                "review": {
+                  "type": "string",
+                  "format": "date",
+                  "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
                 }
               }
             }
@@ -391,6 +406,11 @@
           "certified": {
             "type": "boolean",
             "description": "Changes follow a certification cycle."
+          },
+          "review": {
+            "type": "string",
+            "format": "date",
+            "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
           }
         }
       }
@@ -473,6 +493,11 @@
           "certified": {
             "type": "boolean",
             "description": "Changes follow a certification cycle."
+          },
+          "review": {
+            "type": "string",
+            "format": "date",
+            "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
           }
         }
       }
@@ -524,6 +549,11 @@
           "certified": {
             "type": "boolean",
             "description": "Changes follow a certification cycle."
+          },
+          "review": {
+            "type": "string",
+            "format": "date",
+            "description": "eol/certified only: when the accepted risk is looked at again (YYYY-MM-DD); the weekly report flags it once passed."
           }
         }
       }

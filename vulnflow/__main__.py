@@ -835,6 +835,23 @@ def _tui(a: argparse.Namespace, inv: Inventory) -> int:
     return 0
 
 
+def _context_sections(inv: Inventory, a: argparse.Namespace, dt: DependencyTrack, current: dict) -> list:
+    """The weekly report's accepted risks and projects without context. Lists the projects
+    only (apply=False), so the glue's read-only key is enough."""
+    from datetime import date
+
+    from . import report as rp
+    from .context import apply_context
+
+    cx = apply_context(inv, load_machines(a.machines, inv.teams), dt, apply=False)
+    if cx.errors:
+        return [rp.error_section("Asset context", "; ".join(cx.errors)[:500])]
+    return [
+        rp.accepted_risks_section(cx.flagged, current, date.today()),
+        rp.unknown_context_section(cx.unknown),
+    ]
+
+
 def _report(a: argparse.Namespace, inv: Inventory) -> int:
     """`report daily|weekly`: the digest poc.sh mails (see vulnflow/report.py)."""
     from . import report as rp
@@ -922,6 +939,8 @@ def _report(a: argparse.Namespace, inv: Inventory) -> int:
                 )
             )
             mine["findings"] = {k: f.to_json() for k, f in current.items()}
+            if weekly:
+                sections += _context_sections(inv, a, dt, current)
 
     machines = load_machines(a.machines, inv.teams)
     if machines.hosts and dt is not None:
