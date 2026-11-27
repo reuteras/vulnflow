@@ -474,6 +474,15 @@ def _kev_entry(cve: str, vendor: str, product: str, added: str, ransomware: str 
     }
 
 
+def _kev_state(state: Path) -> tuple[set[str], set[str]]:
+    """kev-watch's (seen CVE ids, sources), which must exist by then."""
+    from vulnflow import kevwatch
+
+    loaded = kevwatch.load_seen(state)
+    assert loaded is not None
+    return loaded
+
+
 def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     from vulnflow import kevwatch
 
@@ -493,7 +502,7 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     # first run: record, post nothing, don't ask DT
     res = kevwatch.watch(inv, index, state, findings, team.append, soc.append)
     assert res.baseline == 1 and not res.new and not team and not soc and not asked
-    assert kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
+    assert _kev_state(state)[0] == {"CVE-2020-0001"}
 
     index |= {
         "CVE-2026-0010": _kev_entry("CVE-2026-0010", "OpenSSL", "OpenSSL", "2026-11-25"),
@@ -507,7 +516,7 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
     # dry run: shows, posts and records nothing
     res = kevwatch.watch(inv, index, state, findings, team.append, soc.append, dry_run=True)
     assert [h.cve for h in res.new] == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]
-    assert not team and kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
+    assert not team and _kev_state(state)[0] == {"CVE-2020-0001"}
 
     # a failed delivery keeps them unseen, so the next run retries
     def broken(text):
@@ -515,12 +524,12 @@ def test_kev_watch_baseline_match_post_and_retry(inv, tmp_path):
 
     res = kevwatch.watch(inv, index, state, findings, broken, soc.append)
     assert res.errors == ["chat delivery failed: chat down"] and len(soc) == 1
-    assert kevwatch.load_seen(state)[0] == {"CVE-2020-0001"}
+    assert _kev_state(state)[0] == {"CVE-2020-0001"}
     soc.clear()
     res = kevwatch.watch(
         inv, index, state, findings, team.append, soc.append, opencve_url="https://o.example"
     )
-    assert not res.errors and kevwatch.load_seen(state)[0] == set(index)
+    assert not res.errors and _kev_state(state)[0] == set(index)
     logged = [json.loads(x)["cve"] for x in (tmp_path / kevwatch.LOG_FILE).read_text().splitlines()]
     assert logged == ["CVE-2026-0012", "CVE-2026-0010", "CVE-2026-0011"]  # once, after delivery
     (msg,) = team
@@ -806,7 +815,7 @@ def test_kev_watch_new_source_is_recorded_quietly(inv, tmp_path):
         soc.append,
     )
     assert not res.new and not res.baseline and not soc
-    assert kevwatch.load_seen(state)[1] == {"CISA", "VulnCheck"}
+    assert _kev_state(state)[1] == {"CISA", "VulnCheck"}
 
 
 def test_only_new_kev_worse_or_followed_changes_notify(inv, tmp_path):
