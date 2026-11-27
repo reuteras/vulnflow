@@ -148,3 +148,29 @@ path = "/srv/myapp"
 # [chat.microsoft]
 # match = ["microsoft"]
 # min_tier = 1
+
+# ---- Decisions vulnflow applies by itself -------------------------------------------------
+# A [triage.<name>] rule is a reviewed "does not affect us" that every dt2dojo round applies
+# to the matching open findings, in every project and version, as a Dependency-Track
+# analysis (suppressed) with the reason as comment. `vulnflow triage-rules` shows what it
+# would do. A finding somebody already triaged is left alone; KEV-listed vulnerabilities
+# are skipped unless allow_kev = true; `vulnflow unignore` takes the writes back. After
+# review_by (at most a year ahead) the rule stops and its findings show up again.
+#   vulnerabilities  ids; a finding's DT aliases count too (a CVE id covers its GHSA/PYSEC)
+#   component        component name, case-insensitive
+#   reason           why; becomes the analysis comment
+#   review_by        a TOML date
+#   state            NOT_AFFECTED (default), FALSE_POSITIVE, or EXPLOITABLE + response
+#                    (WILL_NOT_FIX | CAN_NOT_FIX) for an accepted risk
+#   justification    with NOT_AFFECTED: CODE_NOT_PRESENT, CODE_NOT_REACHABLE,
+#                    REQUIRES_CONFIGURATION, REQUIRES_DEPENDENCY, REQUIRES_ENVIRONMENT,
+#                    PROTECTED_BY_COMPILER, PROTECTED_AT_RUNTIME, PROTECTED_AT_PERIMETER,
+#                    PROTECTED_BY_MITIGATING_CONTROL
+#   versions, projects (fnmatch on the project name), teams: optional, narrow it down
+# [triage.airflow-sqoop]
+# vulnerabilities = ["PYSEC-2023-314"]
+# component = "apache-airflow"
+# projects = ["container:opencve-airflow-*"]
+# justification = "CODE_NOT_PRESENT"
+# reason = "apache-airflow-providers-sqoop is not installed"
+# review_by = 2027-05-27

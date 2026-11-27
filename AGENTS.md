@@ -59,6 +59,12 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   and the rest are suppressed with state NOT_SET and a "Duplicate of" comment. Groups
   somebody triaged are left alone; `data/duplicates.json` records what vulnflow suppressed.
   `stats` counts per alias group via the same `alias_groups`.
+- Triage rules (`[triage.<name>]` in `machines.toml`, `config.TriageRule`, `vulnflow/rules.py`,
+  every `dt2dojo` round between `prune` and duplicates): reviewed decisions applied
+  unattended through `triage.apply_ignores` (same ledger as `ignore`). Parsing is strict on
+  purpose (reason and `review_by` required, at most a year ahead); KEV is skipped unless
+  `allow_kev`. The comment carries `rule triage.<name>` (the report's "Closed by triage
+  rules" reads it from the ledger) and "review by", which `prune` uses to reopen.
 - The operator's hosts and groups, and the detailed OpenCVE subscriptions
   (`[subscriptions.<team>]`, merged into the teams by `sync`/`opencve-bootstrap`/
   `suggest-subscriptions`), are in `machines.toml` (repo root), which is gitignored and

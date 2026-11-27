@@ -13,8 +13,12 @@ positives, just tracked elsewhere) and a comment naming the one kept. The one ke
 KEV-listed one, else the most severe, else GHSA before CVE before the rest, else the lowest
 id. If that choice changes later (a new alias, a new severity), the round swaps them.
 
-A group somebody has triaged is left alone: any member with an analysis state, or suppressed
-without vulnflow's comment. Unsuppressing a duplicate vulnflow suppressed is an override too:
+A decision somebody made on one id of a group (suppressed NOT_AFFECTED, FALSE_POSITIVE or an
+accepted risk, also one written by a [triage.*] rule) is copied to the ids still open, with
+"Same vulnerability as <id> (alias): <reason>" (and its "review by" date, so `prune`
+reopens them together). Any other group somebody has triaged is left alone: a member in
+another state (IN_TRIAGE, ...), different decisions, or one suppressed without vulnflow's
+comment. Unsuppressing a duplicate vulnflow suppressed is an override too:
 `data/duplicates.json` remembers what vulnflow suppressed, so such a group is never touched
 again. Without that file (a fresh data dir) a suppressed member is recognised by its comment
 and taken back into the record, but an override made before the file was lost is not known
@@ -41,6 +45,7 @@ from typing import Any
 
 from .clients import DependencyTrack, project_label
 from .config import Inventory
+from .prune import CARRY_STATES, _is_decision, _reason
 from .triage import MARKER, UNSET, current_analysis
 
 log = logging.getLogger(__name__)
@@ -48,6 +53,7 @@ log = logging.getLogger(__name__)
 TAG = "Duplicate of "  # starts every comment this module writes
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNASSIGNED")
 ID_PREFERENCE = ("GHSA", "CVE")  # which id to keep when nothing else decides
+DECISION_STATES = (*CARRY_STATES, "EXPLOITABLE")  # EXPLOITABLE only as an accepted risk
 
 
 # ----------------------------------------------------------------------------- grouping
@@ -133,6 +139,7 @@ class DuplicatesReport:
     suppressed: list[str] = field(default_factory=list)
     restored: list[str] = field(default_factory=list)  # a former duplicate now kept open
     left_alone: list[str] = field(default_factory=list)  # somebody triaged the group
+    copied: list[str] = field(default_factory=list)  # a decision copied to its aliases
     errors: list[str] = field(default_factory=list)
 
 
@@ -174,6 +181,58 @@ def _put(
     )
 
 
+def _copy_decision(
+    dt: DependencyTrack,
+    project_uuid: str,
+    label: str,
+    component: str,
+    ids: str,
+    group: list[dict[str, Any]],
+    decided: list[dict[str, Any]],
+    rep: DuplicatesReport,
+    *,
+    apply: bool,
+) -> None:
+    """Somebody decided on one id of the group: the same decision for the ids still open.
+    Left alone when the decisions differ or one is not a decision (EXPLOITABLE without an
+    accepted-risk response)."""
+    analyses = [
+        current_analysis(
+            dt.http, project_uuid, str(f["component"]["uuid"]), str(f["vulnerability"]["uuid"])
+        )
+        for f in decided
+    ]
+    shapes = {
+        (a.get("analysisState"), a.get("analysisJustification"), a.get("analysisResponse"))
+        for a in analyses
+    }
+    if len(shapes) != 1 or not all(_is_decision(a) for a in analyses):
+        rep.left_alone.append(f"{label}: {component} {ids} (different decisions)")
+        return
+    source, a = decided[0], analyses[0]
+    open_ones = [f for f in group if _analysis(f) == ("", False) or _analysis(f) == ("NOT_SET", False)]
+    why = _reason(a).removesuffix(MARKER).rstrip("; ")
+    for f in open_ones:
+        state = str(a.get("analysisState"))
+        rep.copied.append(f"{label}: {component} {_vuln_id(f)} <- {state} from {_vuln_id(source)}")
+        if not apply:
+            continue
+        body: dict[str, Any] = {
+            "project": project_uuid,
+            "component": str(f["component"]["uuid"]),
+            "vulnerability": str(f["vulnerability"]["uuid"]),
+            "analysisState": state,
+            "isSuppressed": True,
+            "comment": f"Same vulnerability as {_vuln_id(source)} (alias)"
+            + (f": {why}" if why else "")
+            + f"; {MARKER}",
+        }
+        for k in ("analysisJustification", "analysisResponse"):
+            if a.get(k):
+                body[k] = a[k]
+        dt.http.put("api/v1/analysis", json_body=body)
+
+
 def reconcile_group(
     dt: DependencyTrack,
     project_uuid: str,
@@ -189,6 +248,7 @@ def reconcile_group(
     component = str(group[0]["component"].get("name") or "")
     ids = ", ".join(sorted(_vuln_id(f) for f in group))
     ours: dict[str, str] = {}  # finding key -> the id it was suppressed as a duplicate of
+    decided: list[dict[str, Any]] = []  # suppressed with a decision by somebody (or a rule)
     for f in group:
         key = finding_key(project_uuid, f)
         state, suppressed = _analysis(f)
@@ -199,6 +259,9 @@ def reconcile_group(
             rep.left_alone.append(f"{label}: {component} {ids} (a duplicate was unsuppressed)")
             return
         if state not in UNSET:
+            if suppressed and state in DECISION_STATES:
+                decided.append(f)
+                continue
             rep.left_alone.append(f"{label}: {component} {ids} ({_vuln_id(f)} is {state})")
             return
         if suppressed:
@@ -209,6 +272,10 @@ def reconcile_group(
             ours[key] = str(points_to)
             if entry is None and apply:  # record lost: take it back from the comment
                 record.entries[key] = {"keeper": ours[key], "since": today.isoformat()}
+
+    if decided:
+        _copy_decision(dt, project_uuid, label, component, ids, group, decided, rep, apply=apply)
+        return
 
     keeper, *others = sorted(group, key=keeper_order)
     if finding_key(project_uuid, keeper) in ours:

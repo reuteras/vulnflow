@@ -141,8 +141,9 @@ def dt_to_dojo(
     closed in DefectDojo on the next run; triage notes/status live in DefectDojo.
     With a `maintenance` client (DT_MAINTENANCE_API_KEY) each round starts with `prune`:
     decisions carried to new versions, stale versions deactivated and closed in DefectDojo,
-    then `suppress_duplicates`: one finding per alias group stays open (record in
-    `data_dir`/duplicates.json).
+    then machines.toml's [triage.*] rules (`apply_rules`, ledger in `data_dir`), then
+    `suppress_duplicates`: one finding per alias group stays open, decisions are copied to
+    aliases (record in `data_dir`/duplicates.json).
     """
     rep = Report()
     if maintenance is not None:
@@ -155,12 +156,21 @@ def dt_to_dojo(
         rep.done += [f"{tag}prune: reactivated {line}" for line in pr.reactivated]
         rep.done += [f"{tag}prune: review date passed, shown again: {line}" for line in pr.reopened]
         rep.errors += [f"prune: {e}" for e in pr.errors]
+        if machines is not None and machines.triage_rules:
+            from .rules import apply_rules
+
+            ledger = data_dir / "ignored.jsonl" if data_dir is not None else None
+            rr = apply_rules(inv, maintenance, machines.triage_rules, apply=not dry_run, ledger=ledger)
+            rep.done += [f"{tag}triage rule: {line}" for line in rr.written]
+            rep.done += [f"triage rule past its review date, not applied: {r}" for r in rr.expired]
+            rep.errors += [f"triage rules: {e}" for e in rr.errors]
         from .duplicates import suppress_duplicates
 
         record = data_dir / "duplicates.json" if data_dir is not None else None
         dup = suppress_duplicates(inv, maintenance, apply=not dry_run, record_path=record)
         rep.done += [f"{tag}duplicates: suppressed {line}" for line in dup.suppressed]
         rep.done += [f"{tag}duplicates: kept open again {line}" for line in dup.restored]
+        rep.done += [f"{tag}duplicates: decision copied to alias {line}" for line in dup.copied]
         if dup.left_alone:
             rep.done.append(f"duplicates: {len(dup.left_alone)} triaged group(s) left alone")
         rep.errors += [f"duplicates: {e}" for e in dup.errors]

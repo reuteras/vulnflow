@@ -280,6 +280,42 @@ def chat_webhook_env(channel: str) -> str:
     return "VULNFLOW_CHAT_WEBHOOK_" + channel.upper().replace("-", "_")
 
 
+TRIAGE_STATES = ("NOT_AFFECTED", "FALSE_POSITIVE", "EXPLOITABLE")
+# DT 5.2.2 AnalysisJustification (NOT_SET left out: then don't give one)
+TRIAGE_JUSTIFICATIONS = (
+    "CODE_NOT_PRESENT",
+    "CODE_NOT_REACHABLE",
+    "REQUIRES_CONFIGURATION",
+    "REQUIRES_DEPENDENCY",
+    "REQUIRES_ENVIRONMENT",
+    "PROTECTED_BY_COMPILER",
+    "PROTECTED_AT_RUNTIME",
+    "PROTECTED_AT_PERIMETER",
+    "PROTECTED_BY_MITIGATING_CONTROL",
+)
+TRIAGE_RESPONSES = ("WILL_NOT_FIX", "CAN_NOT_FIX")  # an accepted risk (EXPLOITABLE)
+TRIAGE_MAX_DAYS = 366  # a rule must be looked at again within a year
+
+
+@dataclass
+class TriageRule:
+    """[triage.<name>]: a reviewed decision that vulnflow applies by itself, every round, to
+    matching untriaged findings (vulnflow/rules.py)."""
+
+    name: str
+    vulnerabilities: list[str]  # ids, matched against each finding's id and its aliases
+    component: str  # component name, case-insensitive
+    reason: str
+    review_by: dt.date  # the rule stops applying after this day and `prune` reopens
+    state: str = "NOT_AFFECTED"
+    justification: str | None = None
+    response: str | None = None
+    versions: list[str] = field(default_factory=list)  # empty = any version
+    projects: list[str] = field(default_factory=list)  # fnmatch patterns on the name; empty = all
+    teams: list[str] = field(default_factory=list)  # empty = all
+    allow_kev: bool = False  # KEV-listed vulnerabilities are skipped unless set
+
+
 @dataclass
 class Machines:
     """machines.toml: the operator's own hosts. Not in git (like .env)."""
@@ -302,6 +338,7 @@ class Machines:
     # network and appliance devices from the device list (VULNFLOW_DEVICES, devices.csv):
     # uploaded as one-component SBOMs `net:<name>` (vulnflow/devices.py)
     devices: dict[str, Device] = field(default_factory=dict)
+    triage_rules: dict[str, TriageRule] = field(default_factory=dict)
 
 
 # ---- devices (docs/sboms.md "From a device list") -----------------------------------------
@@ -520,6 +557,7 @@ def _load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         "projects",
         "news",
         "chat",
+        "triage",
     }
     unknown = sorted(set(data) - sections)
     if unknown:
@@ -640,6 +678,7 @@ def _load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         projects[str(name)] = _context(pc, where)
     news_feeds, news_teams = _news(data.get("news") or {}, teams, path)
     chat_channels = _chat_channels(data.get("chat") or {}, path)
+    triage_rules = _triage_rules(data.get("triage") or {}, teams, path)
     return Machines(
         hosts=hosts,
         groups=groups,
@@ -651,7 +690,92 @@ def _load_machines(path: str | Path, teams: dict[str, Team]) -> Machines:
         news_feeds=news_feeds,
         news_teams=news_teams,
         chat_channels=chat_channels,
+        triage_rules=triage_rules,
     )
+
+
+TRIAGE_KEYS = {
+    "vulnerabilities",
+    "component",
+    "reason",
+    "review_by",
+    "state",
+    "justification",
+    "response",
+    "versions",
+    "projects",
+    "teams",
+    "allow_kev",
+}
+
+
+def _strings(value: Any, where: str, key: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise SystemExit(f"{where}: {key} must be a list of non-empty strings")
+    return [v.strip() for v in value]
+
+
+def _triage_rules(
+    data: dict[str, Any], teams: dict[str, Team], path: str | Path, today: dt.date | None = None
+) -> dict[str, TriageRule]:
+    """Parse [triage.<name>]. Strict: a rule closes findings unattended, so a typo must stop
+    the load instead of matching more (or less) than meant."""
+    today = today or dt.date.today()
+    out: dict[str, TriageRule] = {}
+    for name, r in data.items():
+        _check_name("triage", name, path)
+        where = f"[triage.{name}] in {path}"
+        if not isinstance(r, dict) or set(r) - TRIAGE_KEYS:
+            raise SystemExit(f"{where}: takes only {sorted(TRIAGE_KEYS)}")
+        missing = [k for k in ("vulnerabilities", "component", "reason", "review_by") if not r.get(k)]
+        if missing:
+            raise SystemExit(f"{where}: {', '.join(missing)} required")
+        review_by = r["review_by"]
+        if not isinstance(review_by, dt.date) or isinstance(review_by, dt.datetime):
+            raise SystemExit(f"{where}: review_by must be a TOML date (review_by = 2027-03-01)")
+        if (review_by - today).days > TRIAGE_MAX_DAYS:
+            raise SystemExit(f"{where}: review_by is more than {TRIAGE_MAX_DAYS} days ahead")
+        state = str(r.get("state") or "NOT_AFFECTED")
+        if state not in TRIAGE_STATES:
+            raise SystemExit(f"{where}: state must be one of {list(TRIAGE_STATES)}")
+        justification = r.get("justification")
+        if justification is not None and (
+            state != "NOT_AFFECTED" or justification not in TRIAGE_JUSTIFICATIONS
+        ):
+            raise SystemExit(
+                f"{where}: justification goes with state NOT_AFFECTED and is one of "
+                f"{list(TRIAGE_JUSTIFICATIONS)}"
+            )
+        response = r.get("response")
+        if (state == "EXPLOITABLE") != (response is not None) or (
+            response is not None and response not in TRIAGE_RESPONSES
+        ):
+            raise SystemExit(
+                f"{where}: state EXPLOITABLE (an accepted risk) needs response = one of "
+                f"{list(TRIAGE_RESPONSES)}, and only it takes one"
+            )
+        rule_teams = _strings(r.get("teams", []), where, "teams")
+        unknown = sorted(set(rule_teams) - set(teams))
+        if unknown:
+            raise SystemExit(f"{where}: unknown teams {unknown}")
+        allow_kev = r.get("allow_kev", False)
+        if not isinstance(allow_kev, bool):
+            raise SystemExit(f"{where}: allow_kev must be true or false")
+        out[name] = TriageRule(
+            name=name,
+            vulnerabilities=_strings(r["vulnerabilities"], where, "vulnerabilities"),
+            component=str(r["component"]).strip(),
+            reason=" ".join(str(r["reason"]).split()),
+            review_by=review_by,
+            state=state,
+            justification=justification,
+            response=response,
+            versions=_strings(r.get("versions", []), where, "versions"),
+            projects=_strings(r.get("projects", []), where, "projects"),
+            teams=rule_teams,
+            allow_kev=allow_kev,
+        )
+    return out
 
 
 def _chat_channels(data: dict[str, Any], path: str | Path) -> dict[str, ChatChannel]:
