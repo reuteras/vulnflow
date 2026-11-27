@@ -2214,6 +2214,105 @@ def test_where_lists_the_file_paths_syft_recorded(tmp_path, monkeypatch, capsys)
     assert json.loads(capsys.readouterr().out) == []
 
 
+def test_stats_counts_findings_and_merges_aliases(tmp_path, monkeypatch, capsys):
+    import secrets
+
+    from vulnflow.__main__ import main
+
+    monkeypatch.setenv("DT_URL", "http://dt.test")
+    monkeypatch.setenv("DT_API_KEY", secrets.token_hex(8))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    airflow = {
+        "uuid": "c1",
+        "name": "apache-airflow",
+        "version": "2.10.4",
+        "purl": "pkg:pypi/apache-airflow@2.10.4",
+    }
+    openssl = {"uuid": "c2", "name": "openssl", "version": "3.0", "purl": "pkg:deb/debian/openssl@3.0"}
+    openssl_host = {**openssl, "uuid": "c3"}
+
+    def finding(comp, vuln_id, source, severity, aliases=()):
+        vuln = {"vulnId": vuln_id, "source": source, "severity": severity, "aliases": list(aliases)}
+        return {"component": comp, "vulnerability": vuln}
+
+    projects = {
+        "team-dev": [
+            {"uuid": "p1", "name": "container:airflow", "version": "2.10.4", "active": True},
+            {"uuid": "p0", "name": "container:old", "version": "1", "active": False},
+        ],
+        "team-sysadm": [{"uuid": "p2", "name": "host:second", "version": "debian-13", "active": True}],
+    }
+    findings = {
+        "p1": [
+            # one issue reported by two sources: DT knows they are aliases
+            finding(
+                airflow,
+                "GHSA-aaaa",
+                "GITHUB",
+                "CRITICAL",
+                [{"ghsaId": "GHSA-aaaa", "cveId": "CVE-2026-1"}],
+            ),
+            finding(
+                airflow,
+                "PYSEC-2026-1",
+                "OSV",
+                "HIGH",
+                [{"osvId": "PYSEC-2026-1", "cveId": "CVE-2026-1"}],
+            ),
+            finding(openssl, "CVE-2026-9", "NVD", "HIGH"),
+        ],
+        "p2": [finding(openssl_host, "CVE-2026-9", "NVD", "HIGH")],
+    }
+
+    def route(m, url, h, b):
+        path = url.split("http://dt.test/")[1].split("?")[0]
+        if path.startswith("api/v1/project/tag/"):
+            return Response(200, json.dumps(projects.get(path.rsplit("/", 1)[1], [])).encode(), {})
+        if path.startswith("api/v1/finding/project/"):
+            return Response(200, json.dumps(findings[path.rsplit("/", 1)[1]]).encode(), {})
+        raise AssertionError(f"unexpected {m} {url}")
+
+    t = FakeTransport({"GET ": route})
+    monkeypatch.setattr("vulnflow.net.urllib_transport", t)
+    args = ["--env-file", str(env_file), "--inventory", str(INV), "--data-dir", str(tmp_path)]
+    assert main([*args, "stats", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert not any("/finding/project/p0" in c[1] for c in t.calls)  # inactive: not read
+    assert (out["projects"], out["findings"], out["issues"], out["vulnerabilities"]) == (2, 4, 3, 2)
+
+    def row(table, name):
+        return next(r for r in out[table] if r["name"] == name)
+
+    # the alias pair counts once, at the higher severity, under its CVE id
+    assert row("by_project", "container:airflow@2.10.4") == {
+        "name": "container:airflow@2.10.4",
+        "issues": 2,
+        "projects": 1,
+        "severities": {"CRITICAL": 1, "HIGH": 1},
+    }
+    assert row("by_vulnerability", "CVE-2026-1")["severities"] == {"CRITICAL": 1}
+    # spread: openssl's CVE is on both projects and ranks first
+    assert out["by_vulnerability"][0] == {
+        "name": "CVE-2026-9",
+        "issues": 2,
+        "projects": 2,
+        "severities": {"HIGH": 2},
+    }
+    assert row("by_kind", "container")["issues"] == 2 and row("by_kind", "host")["issues"] == 1
+    assert row("by_ecosystem", "deb")["projects"] == 2
+    # sources are raw findings: the merged pair still shows under both
+    assert {r["name"]: r["issues"] for r in out["by_source"]} == {"NVD": 2, "GITHUB": 1, "OSV": 1}
+
+    assert main([*args, "stats", "--team", "sysadm", "--top", "1"]) == 0
+    text = capsys.readouterr().out
+    assert text.splitlines()[0] == (
+        "1 active projects, 1 open findings, 1 issues after merging aliases, 1 distinct vulnerabilities"
+    )
+    assert "host:second@debian-13" in text and "container:airflow" not in text
+    assert main([*args, "stats", "--team", "nope"]) == 2
+
+
 class FakePortfolio:
     """Stateful fake of the DT endpoints `prune` uses: projects by tag, findings (with and
     without suppressed), analysis GET/PUT, project PATCH and the FPF export."""
