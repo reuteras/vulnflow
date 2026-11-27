@@ -870,22 +870,37 @@ def test_dt_to_dojo_routes_by_tag(inv):
         ]
         return Response(200, json.dumps(rows).encode(), {"X-Total-Count": "2"})
 
+    def dojo_findings(m, url, h, b):
+        # sysadm's retired version 1 was deactivated without its findings being closed
+        # (test 7); test 8 is the active version 2 of the same product
+        rows = [{"test": 7}, {"test": 7}, {"test": 8}] if "product_name=team-sysadm-app&" in url else []
+        assert "&active=true" in url
+        return Response(200, json.dumps({"results": rows, "next": None}).encode(), {})
+
     t = FakeTransport(
         {
             "GET /api/v1/project/tag/": tag_route,
             "GET /export": {"version": "1.2", "findings": []},
             "POST /reimport-scan/": {},
+            "GET /api/v2/findings/": dojo_findings,
+            "GET /api/v2/tests/7/": {"title": "Dependency-Track 1"},
+            "GET /api/v2/tests/8/": {"title": "Dependency-Track 2"},
         }
     )
     rep = dt_to_dojo(
         inv, DependencyTrack("http://dt", "k", transport=t), DefectDojo("http://dd", "k", transport=t)
     )
     n = len(inv.teams)  # one active and one retired project per team tag
-    assert not rep.errors and not rep.warnings and len(rep.done) == n + 1
+    assert not rep.errors and not rep.warnings and len(rep.done) == n + 2
     assert rep.done[-1] == f"{n} inactive project(s) skipped (retired versions)"
+    assert (
+        "team-sysadm-app@1 -> Sysadmin: retired, closed 2 finding(s) left open in DefectDojo" in rep.done
+    )
     posts = [c for c in t.calls if c[0] == "POST"]
-    assert len(posts) == n
-    sysadm = next(p for p in posts if b"team-sysadm-app" in p[3])
+    assert len(posts) == n + 1  # every active project, and the leftover close
+    (closing,) = [p for p in posts if _multipart_fields(p[3])["test_title"] == ["Dependency-Track 1"]]
+    assert b'"findings": []' in closing[3] and b"team-sysadm-app" in closing[3]
+    sysadm = next(p for p in posts if b"team-sysadm-app" in p[3] and p is not closing)
     assert b"Sysadmin" in sysadm[3]
     fields = _multipart_fields(sysadm[3])
     assert fields["tags"] == ["team-sysadm", "source-dtrack", "host-h1", "kind-container"]  # not x-y

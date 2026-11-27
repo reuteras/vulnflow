@@ -31,6 +31,9 @@ DefectDojo
   GET/POST /api/v2/product_types/                                       documented
   POST /api/v2/reimport-scan/  scan_type "Dependency Track Finding
        Packaging Format (FPF) Export", auto_create_context=true          documented
+  GET  /api/v2/findings/?product_name=&active=true  product_name is an exact, case-insensitive
+       filter (ApiFindingFilter in the 3.5.300 tag); `test` is the test id (seen live)
+  GET  /api/v2/tests/{id}/  -> title (seen live)
 """
 
 from __future__ import annotations
@@ -368,6 +371,22 @@ class DefectDojo:
             out.extend(data.get("results") or [])
             path = data.get("next") or None
         return out
+
+    def active_findings_by_test(self, product_name: str) -> dict[int, int]:
+        """{test id: number of active findings} in one product. GET findings/?product_name=
+        (exact, case-insensitive: ApiFindingFilter in 3.5.300) &active=true, following `next`."""
+        out: dict[int, int] = {}
+        path: str | None = f"findings/?product_name={quote(product_name)}&active=true&limit=500"
+        while path:
+            data = self.http.get(path).json() or {}
+            for f in data.get("results") or []:
+                out[int(f["test"])] = out.get(int(f["test"]), 0) + 1
+            path = data.get("next") or None
+        return out
+
+    def test_title(self, test_id: int) -> str:
+        """GET tests/{id}/ -> its title (vulnflow names them "Dependency-Track <version>")."""
+        return str((self.http.get(f"tests/{int(test_id)}/").json() or {}).get("title") or "")
 
     def patch_finding(self, finding_id: int, body: dict[str, Any]) -> None:
         """PATCH findings/{id}/ (FindingSerializer: tags, known_exploited, ransomware_used,
