@@ -8,7 +8,7 @@ this page is what it does, and the first steps after it.
 The individual steps, if you want to run or rerun one:
 
 ```bash
-./poc.sh init               # .env with all secrets generated (chmod 600); rerun fills gaps
+./poc.sh init               # .env with all secrets generated (chmod 600); rerun adds new keys, fills gaps
 ./poc.sh check              # tools, free ports, RAM
 
 ./poc.sh dtrack-up          # Dependency-Track: http://localhost:8181  (admin pw + API key -> .env)

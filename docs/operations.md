@@ -487,3 +487,10 @@ DefectDojo: running 3.5.200, pinned 3.5.201
   that stack's databases to `data/backups/` (newest 5 kept), sets the version in `.env` and
   reruns the stack's setup steps (clone/checkout, build, migrations on start, bootstrap).
   `./poc.sh upgrade dojo 3.5.202 --now` takes a version that is not the reviewed pin.
+
+**New settings after a `git pull`.** `./poc.sh env-sync` adds the keys that are new in
+`.env.example` to `.env`, each with its comment lines and default value, after the key
+that comes before it in the example. Values already in `.env` are never changed, and keys
+the example doesn't know are only listed (the `VULNFLOW_CHAT_WEBHOOK_<NAME>` keys
+`mm-bootstrap` writes are expected). `--dry-run` shows what it would add. `./poc.sh init`,
+and so `setup`, runs it too, before it fills in empty secrets.

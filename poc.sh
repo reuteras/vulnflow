@@ -7,7 +7,8 @@
 #
 # Usage: ./poc.sh <command>
 #   setup             everything below in order, unattended (rerunnable; resumes after a failure)
-#   init              create .env / fill in any missing random secrets (rerunnable)
+#   init              create .env / add keys new in .env.example / fill in empty secrets (rerunnable)
+#   env-sync [--dry-run]  add keys that are new in .env.example to .env (values kept)
 #   check             verify docker/compose/git and free ports
 #   opencve-prepare   clone OpenCVE, generate its config, replace upstream default passwords
 #   opencve-start     build + start OpenCVE, no prompts (upstream: ~30-60 min first time)
@@ -69,7 +70,10 @@ SECRETS=(DT_DB_PASSWORD:24 DT_ADMIN_PASSWORD:24 DD_ADMIN_PASSWORD:24 DD_SECRET_K
 
 cmd_init() {
   if [[ -f .env ]]; then
-    log ".env exists; only filling in empty secrets"
+    log ".env exists; adding keys new in .env.example, filling in empty secrets"
+    chmod 600 .env
+    # new settings arrive with their comments and defaults; existing values stay
+    vulnflow env-sync
   else
     cp .env.example .env
   fi
@@ -1071,6 +1075,10 @@ cmd_setup() {
 case "${1:-}" in
   setup) cmd_setup ;;
   init) cmd_init ;;
+  env-sync)
+    shift
+    vulnflow env-sync "$@"
+    ;;
   check) cmd_check ;;
   opencve-prepare) cmd_opencve_prepare ;;
   opencve-start) cmd_opencve_start ;;
@@ -1104,7 +1112,7 @@ case "${1:-}" in
   down) cmd_down ;;
   destroy) cmd_destroy "${2:-}" ;;
   *)
-    sed -n '2,34p' "$0"
+    sed -n '2,35p' "$0"
     exit 1
     ;;
 esac

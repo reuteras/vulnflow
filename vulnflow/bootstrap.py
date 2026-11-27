@@ -694,3 +694,57 @@ def set_env_values(path: str | Path, values: dict[str, str]) -> None:
     p.touch(mode=0o600, exist_ok=True)
     p.chmod(0o600)
     p.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+# keys vulnflow writes itself, one per [chat.<name>] channel (mm-bootstrap): not "unknown"
+GENERATED_ENV_PREFIXES = ("VULNFLOW_CHAT_WEBHOOK_",)
+
+
+def _env_key(line: str) -> str:
+    """The KEY of an uncommented KEY=... line, else ""."""
+    key, sep, _ = line.partition("=")
+    key = key.strip()
+    return key if sep and not line.lstrip().startswith("#") and _KEY_RE.match(key) else ""
+
+
+def sync_env(
+    example: str | Path, path: str | Path, *, dry_run: bool = False
+) -> tuple[list[str], list[str]]:
+    """Add the keys of .env.example that `path` lacks, with the comment lines right above
+    them and the example's value, each after the key that precedes it in the example
+    (at the end when there is none). Values already in `path` are never changed, and
+    keys the example doesn't know are only reported. Returns (added, unknown); the file
+    is (re)written with mode 600, and not at all on a dry run or when nothing is missing."""
+    ex = Path(example).read_text(encoding="utf-8").splitlines()
+    p = Path(path)
+    lines = p.read_text(encoding="utf-8").splitlines()
+    have = {k for k in map(_env_key, lines) if k}
+    ex_keys = [k for k in map(_env_key, ex) if k]
+    added: list[str] = []
+    prev = ""  # the example key before the current one that `lines` has (or got)
+    for i, line in enumerate(ex):
+        key = _env_key(line)
+        if not key:
+            continue
+        if key in have:
+            prev = key
+            continue
+        start = i
+        while start > 0 and ex[start - 1].lstrip().startswith("#") and not _env_key(ex[start - 1]):
+            start -= 1
+        block = ex[start : i + 1]
+        at = next((n + 1 for n, x in enumerate(lines) if prev and _env_key(x) == prev), len(lines))
+        # a section's first key brings the blank line before it; so does the end of the file
+        new_section = start > 0 and not ex[start - 1].strip()
+        if (new_section or at == len(lines)) and at > 0 and lines[at - 1].strip():
+            block = ["", *block]
+        lines[at:at] = block
+        have.add(key)
+        added.append(key)
+        prev = key
+    unknown = sorted(k for k in have - set(ex_keys) if not k.startswith(GENERATED_ENV_PREFIXES))
+    if added and not dry_run:
+        p.touch(mode=0o600, exist_ok=True)
+        p.chmod(0o600)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return added, unknown
