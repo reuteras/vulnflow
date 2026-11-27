@@ -6,10 +6,10 @@ on:
     branches: [main]
     paths-ignore:
       - "**/*.md"
+  # No paths-ignore here: "Tests passed" is a required check, and a PR where
+  # it never runs can't be merged.
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
 
 permissions:
   contents: read
@@ -73,3 +73,22 @@ jobs:
           printf '%s' '{"vulnflow_agent_config": 1, "host": "ci", "dt_url": "https://dt.invalid",
             "host_project": null, "containers": null, "code": []}' > "$RUNNER_TEMP/agent.json"
           "$py" -I scripts/vulnflow-agent.py --config "$RUNNER_TEMP/agent.json" --dry-run
+
+  # The required check (ruleset required-checks); see dev-docs docs/github.md.
+  tests-passed:
+    name: Tests passed
+    if: always()
+    needs: [test, agent-py39]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "A job ended with: $result"
+              exit 1
+            fi
+          done
