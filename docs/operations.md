@@ -362,7 +362,7 @@ show the one they can.
 | Report | When | Sent | Contents |
 | --- | --- | --- | --- |
 | daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new CISA KEV entries that hit a finding or a followed vendor, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
-| weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, every upstream version |
+| weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, accepted risks (`eol`/`certified` projects and their review dates), projects without asset context, every upstream version |
 
 Set the recipient and install the timers once, as the user that runs `./poc.sh`:
 
@@ -372,6 +372,11 @@ python3 -m vulnflow env-set <<<'VULNFLOW_REPORT_TO=you@example.org'
 ./poc.sh report weekly       # send one now
 ./poc.sh report daily --always   # a daily even when there is nothing to act on
 ```
+
+New findings are listed internet-facing or exploited first, then those on a `critical`
+asset, then the rest, and each has a **Projects** column: how many projects have that
+component version open with the same vulnerability, and how many are `critical`
+([Step 6 in use](exposure.md#step-6-in-use)).
 
 Each finding listed in a report has a **Where** column: up to three paths on disk (syft's
 locations, as `vulnflow where` shows them) and links to the CVE in DefectDojo (its search,

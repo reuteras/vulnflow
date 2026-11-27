@@ -183,6 +183,7 @@ def rank_finding(
     vector = vectors.get(str(v.get("source", "")), vid) if vectors is not None and ctx else ""
     verdict = assess(cvss, sig, rules, ctx, vector, laptop, label)
     verdict.criticality = ctx.criticality if ctx else ""
+    verdict.exposure = ctx.exposure if ctx else ""
     if pattern:
         verdict.reasons.append(f"package {pattern!r} in machines.toml")
     return verdict, (None if label else cvss), epss

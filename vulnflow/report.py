@@ -19,7 +19,14 @@ Sections:
                this kind (match path). The daily lists new critical/high/KEV ones; the
                weekly lists those, counts the rest and the resolved ones, and adds the
                open totals per team
+    context    weekly: accepted risks (eol/certified projects, their open P1/P2 and review
+               dates; one past its date is flagged) and projects without context
     machines   own hosts that stopped pushing SBOMs
+
+Order of the new findings (docs/exposure.md, step 6): internet-facing or exploited (KEV)
+first, then those on a `critical` asset, then the rest; by tier inside each. Each listed
+finding has its blast radius: how many projects have the same component version open
+with that vulnerability, and how many of them are `critical`.
 
 A finding is keyed on team, project name, component name and vulnerability id, not on
 the versions: a new image tag or package version that still has the CVE is not "new".
@@ -40,15 +47,15 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .clients import DependencyTrack
-from .config import Inventory, Machines
+from .clients import DependencyTrack, DTProject, project_label
+from .config import AssetContext, Inventory, Machines
 from .machines import host_scans, project_name
 from .patches import open_findings
 from .ranking import VectorCache, rank_finding
@@ -127,6 +134,8 @@ class OpenFinding:
     tier: int = 0  # 1-4 from ranking.py; 0 = not ranked
     reasons: list[str] = field(default_factory=list)
     component_uuid: str = ""  # for the paths on disk and the Dependency-Track link
+    exposure: str = ""  # the asset's context when ranked ("" = unknown)
+    criticality: str = ""
 
     @property
     def key(self) -> str:
@@ -294,10 +303,11 @@ def collect_findings(
     out: dict[str, OpenFinding] = {}
     for team, p, f in open_findings(inv, dt, None, errors):
         comp, vuln = f.get("component") or {}, f.get("vulnerability") or {}
-        tier, reasons = 0, []
+        tier, reasons, exposure, criticality = 0, [], "", ""
         if kev is not None:
             verdict, _, _ = rank_finding(p, f, inv.rules, kev, vectors, machines)
             tier, reasons = verdict.tier, verdict.reasons
+            exposure, criticality = verdict.exposure, verdict.criticality
         of = OpenFinding(
             team=team,
             project=p.name,
@@ -309,6 +319,8 @@ def collect_findings(
             tier=tier,
             reasons=reasons,
             component_uuid=str(comp.get("uuid", "")),
+            exposure=exposure,
+            criticality=criticality,
         )
         if of.key not in out or 0 < of.tier < (out[of.key].tier or 9):
             out[of.key] = of  # the same finding on two versions: keep the higher tier
@@ -342,6 +354,28 @@ def _sev_rank(sev: str) -> int:
     return SEVERITY_ORDER.index(sev) if sev in SEVERITY_ORDER else len(SEVERITY_ORDER)
 
 
+def report_group(f: OpenFinding, kev: set[str]) -> int:
+    """0: internet-facing or exploited (KEV), 1: on a `critical` asset, 2: the rest."""
+    if f.exposure == "internet" or f.vuln_id in kev:
+        return 0
+    return 1 if f.criticality == "critical" else 2
+
+
+def blast_radius(current: dict[str, OpenFinding]) -> Callable[[OpenFinding], str]:
+    """For a finding: how many projects have the same component version open with the same
+    vulnerability, and how many of those are `critical` ("3 (1 critical)")."""
+    projects: dict[tuple[str, str, str], dict[str, str]] = {}
+    for f in current.values():
+        projects.setdefault((f.component, f.version, f.vuln_id), {})[f.project] = f.criticality
+
+    def of(f: OpenFinding) -> str:
+        crit = projects.get((f.component, f.version, f.vuln_id)) or {f.project: f.criticality}
+        n = sum(1 for c in crit.values() if c == "critical")
+        return f"{len(crit)}" + (f" ({n} critical)" if n else "")
+
+    return of
+
+
 def findings_section(
     previous: dict[str, Any] | None,
     current: dict[str, OpenFinding],
@@ -365,7 +399,15 @@ def findings_section(
     # new P1/P2 (threat and asset context, ranking.py), and as before critical/high/KEV
     important = [f for f in new if f.severity in IMPORTANT or f.vuln_id in kev or 0 < f.tier <= 2]
     important.sort(
-        key=lambda f: (f.tier or 9, f.vuln_id not in kev, _sev_rank(f.severity), f.team, f.vuln_id)
+        key=lambda f: (
+            report_group(f, kev),
+            f.tier or 9,
+            f.vuln_id not in kev,
+            _sev_rank(f.severity),
+            f.team,
+            f.vuln_id,
+            f.project,
+        )
     )
     s.notable = bool(important)
     s.blocks.append(
@@ -376,8 +418,9 @@ def findings_section(
         )
     )
     if important:
-        header = ["Tier", "Severity", "CVE", "KEV", "Component", "Project", "Why"]
-        rows = [f.row(f.vuln_id in kev) for f in important]
+        header = ["Tier", "Severity", "CVE", "KEV", "Component", "Project", "Why", "Projects"]
+        blast = blast_radius(current)
+        rows = [[*f.row(f.vuln_id in kev), blast(f)] for f in important]
         if links is not None or paths is not None:
             header.append("Where")
             shown = important[:LIST_MAX]  # paths only for the rows that are listed
@@ -410,6 +453,75 @@ def findings_section(
                 ],
             )
         )
+    return s
+
+
+# ---- context ---------------------------------------------------------------------------
+
+
+def accepted_risks_section(
+    flagged: list[tuple[str, DTProject, AssetContext]],
+    current: dict[str, OpenFinding],
+    today: date,
+) -> Section:
+    """eol/certified projects: accepted risks, their open findings and review dates. One
+    whose `review` date has passed is flagged (and makes the report notable)."""
+    s = Section("Accepted risks (eol, certified)")
+    if not flagged:
+        s.blocks.append(Para("No project is marked `eol` or `certified` in machines.toml."))
+        return s
+    hot: Counter[str] = Counter()
+    total: Counter[str] = Counter()
+    for f in current.values():
+        total[f.project] += 1
+        if 0 < f.tier <= 2:
+            hot[f.project] += 1
+    rows: list[tuple[tuple[int, int, str], list[str]]] = []
+    overdue = 0
+    for team, p, ctx in flagged:
+        flag = ", ".join(x for x, on in (("eol", ctx.eol), ("certified", ctx.certified)) if on)
+        if not ctx.review:
+            review, rank = "none set", 1
+        elif ctx.review < today.isoformat():
+            review, rank = f"**overdue** ({ctx.review})", 0
+            overdue += 1
+        else:
+            review, rank = ctx.review, 2
+        label = project_label(p.name, p.version)
+        row = [code(label), team, flag, review, str(hot[p.name]), str(total[p.name])]
+        rows.append(((rank, -hot[p.name], label), row))
+    s.notable = bool(overdue)
+    s.blocks.append(
+        Para(
+            f"**{len(flagged)}** project(s) can't simply be patched; **{overdue}** past their "
+            "review date. Set `review = YYYY-MM-DD` next to `eol`/`certified` in machines.toml."
+        )
+    )
+    _table(
+        s,
+        ["Project", "Team", "Flag", "Review", "Open P1/P2", "Open"],
+        [r for _, r in sorted(rows, key=lambda x: x[0])],
+    )
+    return s
+
+
+def unknown_context_section(unknown: list[str]) -> Section:
+    """Active projects machines.toml gives no context: ranked without exposure/criticality."""
+    s = Section("Projects without context")
+    if not unknown:
+        s.blocks.append(Para("Every active project has exposure or criticality set."))
+        return s
+    s.blocks.append(
+        Para(
+            f"**{len(unknown)}** active project(s) have no exposure or criticality in "
+            "machines.toml, so their findings are ranked without asset context. "
+            "`python3 -m vulnflow context --toml` prints entries to fill in."
+        )
+    )
+    shown = sorted(unknown)[:LIST_MAX]
+    s.blocks.append(Items([code(x) for x in shown]))
+    if len(unknown) > LIST_MAX:
+        s.blocks.append(Para(f"... and {len(unknown) - LIST_MAX} more."))
     return s
 
 

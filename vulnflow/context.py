@@ -93,6 +93,8 @@ class ContextResult:
     unknown: list[str] = field(default_factory=list)
     unknown_projects: list[DTProject] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # eol/certified projects (accepted risks), with the team whose tag listed them first
+    flagged: list[tuple[str, DTProject, AssetContext]] = field(default_factory=list)
 
 
 def apply_context(
@@ -112,7 +114,10 @@ def apply_context(
                 continue
             seen.add(p.uuid)
             label = project_label(p.name, p.version)
-            if context_for(machines, p) is None:
+            ctx = context_for(machines, p)
+            if ctx is not None and (ctx.eol or ctx.certified):
+                res.flagged.append((team.key, p, ctx))
+            if ctx is None:
                 host = host_of(p)
                 res.unknown.append(f"{label} (host {host})" if host else label)
                 res.unknown_projects.append(p)

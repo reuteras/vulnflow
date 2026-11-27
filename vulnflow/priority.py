@@ -58,6 +58,7 @@ class Verdict:
     tier: int
     reasons: list[str]
     criticality: str = ""  # the asset's, when ranked with context (paging: P1 on critical)
+    exposure: str = ""  # the asset's, when ranked with context (the report's order)
 
     @property
     def name(self) -> str:

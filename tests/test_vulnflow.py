@@ -5783,8 +5783,9 @@ def test_report_findings_baseline_then_new_resolved_and_kev(inv):
             "`grafana` 13.3.1",
             "`container:grafana@13.3.1`",
             "",
+            "1",
         ],
-        ["", "critical", "`CVE-2026-0006`", "", "`sudo` 1.9", "`host:web01@debian-13`", ""],
+        ["", "critical", "`CVE-2026-0006`", "", "`sudo` 1.9", "`host:web01@debian-13`", "", "1"],
     ]
 
     weekly = rp.findings_section(saved, now, set(), weekly=True)
@@ -5804,6 +5805,110 @@ def test_report_findings_baseline_then_new_resolved_and_kev(inv):
         ["dev", "2", "0", "0", "2", "0", "1", "0"],
         ["sysadm", "3", "1", "1", "0", "1", "1", "1"],
     ]
+
+
+def test_report_orders_exposed_and_critical_first_with_blast_radius():
+    """Step 6: internet-facing or KEV first, then critical assets, then the rest (by tier
+    inside each), and per row how many projects have that component version open."""
+    from vulnflow import report as rp
+
+    def of(project: str, vid: str, tier: int, **kw: Any) -> Any:
+        base: dict[str, Any] = {"component": "openssl", "version": "3.0.1"} | kw
+        return rp.OpenFinding(
+            "sysadm",
+            project,
+            "1",
+            base["component"],
+            base["version"],
+            vid,
+            "HIGH",
+            tier=tier,
+            exposure=kw.get("exposure", ""),
+            criticality=kw.get("criticality", ""),
+        )
+
+    current = {
+        f.key: f
+        for f in (
+            of("host:a", "CVE-1", 1, criticality="critical"),
+            of("host:b", "CVE-2", 2, exposure="internet"),
+            of("host:c", "CVE-3", 1),
+            of("host:d", "CVE-4", 3),  # KEV: exploited
+            of("host:e", "CVE-1", 2, criticality="critical"),
+            of("host:f", "CVE-1", 2),
+            of("host:g", "CVE-1", 2, version="3.0.2"),  # another version: not counted
+        )
+    }
+    sec = rp.findings_section({}, current, {"CVE-4"}, weekly=False)
+    table = sec.blocks[1]
+    assert isinstance(table, rp.Table) and table.header[-1] == "Projects"
+    got = [(r[2], r[5], r[-1]) for r in table.rows]
+    assert got == [
+        ("`CVE-2`", "`host:b@1`", "1"),  # internet-facing, P2
+        ("`CVE-4`", "`host:d@1`", "1"),  # KEV, P3: still in the first group
+        ("`CVE-1`", "`host:a@1`", "3 (2 critical)"),  # critical asset
+        ("`CVE-1`", "`host:e@1`", "3 (2 critical)"),
+        ("`CVE-3`", "`host:c@1`", "1"),  # the rest, P1 before P2
+        ("`CVE-1`", "`host:f@1`", "3 (2 critical)"),
+        ("`CVE-1`", "`host:g@1`", "1"),
+    ]
+
+
+def test_report_accepted_risks_and_unknown_context(inv, tmp_path):
+    from datetime import date
+
+    from vulnflow import report as rp
+    from vulnflow.clients import DTProject
+    from vulnflow.config import AssetContext
+
+    def p(name: str) -> DTProject:
+        return DTProject(f"u-{name}", name, "1", True, [])
+
+    flagged = [
+        ("sysadm", p("host:old"), AssetContext(eol=True, review="2026-10-01")),
+        ("dev", p("code:pos"), AssetContext(certified=True, review="2027-06-01")),
+        ("virt", p("host:esx"), AssetContext(eol=True, certified=True)),
+    ]
+    finding = rp.OpenFinding("sysadm", "host:old", "1", "openssl", "1.0", "CVE-9", "HIGH", tier=2)
+    current = {finding.key: finding}
+    sec = rp.accepted_risks_section(flagged, current, date(2026, 11, 27))
+    assert sec.notable  # one is past its review date
+    para, table = sec.blocks
+    assert isinstance(para, rp.Para) and "**3** project(s)" in para.text and "**1** past" in para.text
+    assert isinstance(table, rp.Table)
+    assert table.header == ["Project", "Team", "Flag", "Review", "Open P1/P2", "Open"]
+    assert table.rows == [
+        ["`host:old@1`", "sysadm", "eol", "**overdue** (2026-10-01)", "1", "1"],
+        ["`host:esx@1`", "virt", "eol, certified", "none set", "0", "0"],
+        ["`code:pos@1`", "dev", "certified", "2027-06-01", "0", "0"],
+    ]
+    calm = rp.accepted_risks_section(flagged[1:], current, date(2026, 11, 27))
+    assert not calm.notable
+    assert "No project" in rp.accepted_risks_section([], current, date(2026, 11, 27)).text()
+
+    unknown = rp.unknown_context_section(["host:z", "container:a"])
+    assert "**2** active project(s)" in unknown.text() and not unknown.notable
+    items = unknown.blocks[1]
+    assert isinstance(items, rp.Items) and items.items == ["`container:a`", "`host:z`"]
+    assert "Every active project" in rp.unknown_context_section([]).text()
+
+    # review in machines.toml: a TOML date or a string, only next to eol/certified
+    from vulnflow.config import load_machines
+
+    f = tmp_path / "m.toml"
+    f.write_text('[projects."host:old"]\neol = true\nreview = 2027-03-01\n')
+    assert load_machines(f, inv.teams).projects["host:old"].review == "2027-03-01"
+    f.write_text('[projects."host:old"]\ncertified = true\nreview = "2027-03-01"\n')
+    assert load_machines(f, inv.teams).projects["host:old"].review == "2027-03-01"
+    for bad in (
+        'exposure = "internal"\nreview = 2027-03-01',  # not eol/certified
+        'eol = true\nreview = "next year"',
+        'eol = true\nreview = "2027-02-30"',
+        "eol = true\nreview = 2027-03-01T10:00:00",
+    ):
+        f.write_text(f'[projects."host:old"]\n{bad}\n')
+        with pytest.raises(SystemExit):
+            load_machines(f, inv.teams)
 
 
 def test_report_alerts_since_last_run_best_tier_per_team_and_cve():
@@ -5942,7 +6047,7 @@ def test_report_findings_link_to_defectdojo_and_dt_with_paths(monkeypatch):
         "c-uuid"
     ]
     plain = rp.findings_section({}, {f.key: f}, set(), weekly=False)
-    assert isinstance(plain.blocks[1], rp.Table) and plain.blocks[1].header[-1] == "Why"
+    assert isinstance(plain.blocks[1], rp.Table) and plain.blocks[1].header[-1] == "Projects"
     # the DT UI: the API's host with the UI port, unless set
     monkeypatch.setenv("DT_PUBLIC_API_URL", "https://vf.example.ts.net:8180")
     monkeypatch.setenv("DT_UI_PORT", "8181")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
 import tomllib
@@ -83,7 +84,7 @@ _MACHINE_KEYS = {"team", "kind", "scans", "language_paths", "containers_team"}
 EXPOSURES = ("internet", "external-auth", "internal", "restricted", "hostile-device")
 INPUTS = ("public", "partner", "staff")
 CRITICALITIES = ("critical", "high", "normal", "low")
-CONTEXT_KEYS = {"exposure", "input", "criticality", "eol", "certified"}
+CONTEXT_KEYS = {"exposure", "input", "criticality", "eol", "certified", "review"}
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,9 @@ class AssetContext:
     criticality: str = ""
     eol: bool = False
     certified: bool = False
+    # an eol/certified system's accepted risk is looked at again by this date (YYYY-MM-DD;
+    # the weekly report flags it once passed). Not a tag: only the report reads it.
+    review: str = ""
 
     def __bool__(self) -> bool:
         """False when nothing is set: the asset's context is unknown."""
@@ -119,13 +123,31 @@ def _context(settings: dict[str, Any], where: str) -> AssetContext:
     for key in ("eol", "certified"):
         if not isinstance(settings.get(key, False), bool):
             raise SystemExit(f"{where}: {key} must be true or false")
+    review = _review_date(settings.get("review"), where)
+    if review and not (settings.get("eol") or settings.get("certified")):
+        raise SystemExit(f"{where}: review is the review date of an eol or certified system")
     return AssetContext(
         exposure=str(settings.get("exposure", "")),
         input=str(settings.get("input", "")),
         criticality=str(settings.get("criticality", "")),
         eol=bool(settings.get("eol", False)),
         certified=bool(settings.get("certified", False)),
+        review=review,
     )
+
+
+def _review_date(value: Any, where: str) -> str:
+    """`review = 2027-03-01` (a TOML date) or `"2027-03-01"` -> "2027-03-01"; unset -> ""."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+        return value.isoformat()
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return dt.date.fromisoformat(value).isoformat()
+        except ValueError:  # 2027-02-30
+            pass
+    raise SystemExit(f"{where}: review must be a date (YYYY-MM-DD), got {value!r}")
 
 
 @dataclass

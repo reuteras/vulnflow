@@ -66,6 +66,12 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
         "criticality": _enum(CRITICALITIES, CRITICALITY_HELP, "How much it matters"),
         "eol": {"type": "boolean", "description": "No more patches from upstream."},
         "certified": {"type": "boolean", "description": "Changes follow a certification cycle."},
+        "review": {
+            "type": "string",
+            "format": "date",
+            "description": "eol/certified only: when the accepted risk is looked at again "
+            "(YYYY-MM-DD); the weekly report flags it once passed.",
+        },
     }
     context_entry = {"type": "object", "additionalProperties": False, "properties": context}
     machine = {
