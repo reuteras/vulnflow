@@ -59,6 +59,10 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   and the rest are suppressed with state NOT_SET and a "Duplicate of" comment. Groups
   somebody triaged are left alone; `data/duplicates.json` records what vulnflow suppressed.
   `stats` counts per alias group via the same `alias_groups`.
+- DT metrics: DT 5.2.2 recalculates a project's metrics about once a day (the hourly task
+  skips projects with a row for today), so a `dt2dojo` round that wrote analyses (prune,
+  triage rules, duplicates) ends with `jobs.refresh_metrics` (maintenance key,
+  PORTFOLIO_MANAGEMENT); otherwise the dashboard lags a day behind DefectDojo.
 - Triage rules (`[triage.<name>]` in `machines.toml`, `config.TriageRule`, `vulnflow/rules.py`,
   every `dt2dojo` round between `prune` and duplicates): reviewed decisions applied
   unattended through `triage.apply_ignores` (same ledger as `ignore`). Parsing is strict on

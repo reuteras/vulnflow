@@ -7404,3 +7404,47 @@ def test_chat_hooks_reach_mattermost_from_the_host_network(monkeypatch):
         "http://127.0.0.1:8065/hooks/abc123",
         {"text": "hello"},
     )
+
+
+def test_dt2dojo_recalculates_dt_metrics_only_after_writing_analyses(inv, tmp_path):
+    def finding(vuln_id):
+        vuln = {
+            "uuid": f"V-{vuln_id}",
+            "vulnId": vuln_id,
+            "severity": "HIGH",
+            "aliases": [{"cveId": "CVE-1"}],
+        }
+        return {"component": {"uuid": "c1", "name": "aiohttp"}, "vulnerability": vuln, "analysis": {}}
+
+    project = {
+        "uuid": "p1",
+        "name": "container:app",
+        "version": "1",
+        "active": True,
+        "tags": [{"name": "team-dev"}],
+    }
+    portfolio = FakePortfolio([project], {"p1": [finding("GHSA-a"), finding("PYSEC-a")]})
+
+    def dt_transport(method, url, headers, body, timeout):
+        if "/api/v1/metrics/" in url:  # FakePortfolio doesn't know the metrics endpoints
+            portfolio.calls.append((method, url.split("://", 1)[1].split("/", 1)[1]))
+            return Response(200, b"", {})
+        return portfolio(method, url, headers, body, timeout)
+
+    dojo_t = FakeTransport({"POST /reimport-scan/": {}, "GET /findings/": {"results": [], "next": None}})
+    dt = DependencyTrack("http://dt", "k", transport=dt_transport)
+    dojo = DefectDojo("http://dd", "k", transport=dojo_t)
+
+    def metric_calls() -> list[str]:
+        return [path for _, path in portfolio.calls if path.startswith("api/v1/metrics/")]
+
+    dt_to_dojo(inv, dt, dojo, maintenance=dt, data_dir=tmp_path, dry_run=True)
+    assert metric_calls() == []  # a dry run writes nothing, so nothing to recalculate
+
+    rep = dt_to_dojo(inv, dt, dojo, maintenance=dt, data_dir=tmp_path)
+    assert rep.errors == []
+    assert "metrics: recalculated for 1 project(s) and the portfolio" in rep.done
+    assert metric_calls() == ["api/v1/metrics/project/p1/refresh", "api/v1/metrics/portfolio/refresh"]
+
+    again = dt_to_dojo(inv, dt, dojo, maintenance=dt, data_dir=tmp_path)
+    assert again.errors == [] and len(metric_calls()) == 2  # nothing written: no recalculation
