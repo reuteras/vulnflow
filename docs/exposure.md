@@ -312,6 +312,7 @@ The same round also tells people about new findings, once per finding and channe
 | team | new findings at or above `chat_min_tier` (P1/P2), one message per team, mentioning it | `VULNFLOW_CHAT_WEBHOOK` |
 | SOC | new findings at or above `VULNFLOW_SOC_MIN_TIER` (P1), every team | `VULNFLOW_SOC_WEBHOOK` |
 | paging | new P1 findings on a `critical` asset (`criticality = "critical"`, tag `crit-critical`) | `VULNFLOW_PAGE_WEBHOOK` |
+| `[chat.<name>]` | instead of the team channel: new findings whose component CPE matches the channel's `match` (`linux:linux_kernel`), one line per vulnerability naming every host and team | `VULNFLOW_CHAT_WEBHOOK_<NAME>` |
 
 ```text
 @sysadm 1 new finding(s) to act on for team sysadm
@@ -330,6 +331,13 @@ The same round also tells people about new findings, once per finding and channe
   new again if it comes back.
 - A channel is marked only once its message was delivered, so a webhook that is down is
   retried next round without repeating the other channels.
+- Noisy products: the `[chat.*]` channels from `machines.toml` (the same ones the receiver
+  uses for OpenCVE alerts) take matching findings, by the component's CPE, from the team
+  channel. Without the channel's webhook they stay in the team channel. The team and
+  `[chat.*]` channels share their record, so adding or removing a channel doesn't
+  announce open findings again.
+- A record that can't be read (a truncated file) counts as a first run and is logged: it
+  never stops `dt2dojo`'s imports.
 - The first run records what is open and posts nothing, and so does a channel without a
   webhook: setting up paging later doesn't page every open P1 at once.
 - OpenCVE alerts aren't paged: an alert is about a product a team follows, not an asset.

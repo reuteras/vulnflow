@@ -78,7 +78,9 @@ it yet, so the alert is P1.
 
 **New P1/P2 findings: chat and paging.** The same round tells the team channel about new
 P1/P2 findings, the SOC channel about new P1 findings, and pages (`VULNFLOW_PAGE_WEBHOOK`)
-for new P1 findings on a `critical` asset, once per finding and channel. See
+for new P1 findings on a `critical` asset, once per finding and channel. Findings on a
+noisy product (`[chat.<name>]` in `machines.toml`, matched on the component's CPE) go to
+that channel instead of the team's, like the OpenCVE alerts. See
 [Step 4 in use](exposure.md#step-4-in-use).
 
 **Email reports** (daily when something needs action, weekly always): new P1/P2 alerts,

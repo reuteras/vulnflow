@@ -205,6 +205,7 @@ class Ranked:
     kev: bool = False
     criticality: str = ""  # the asset's ("" = unknown)
     title: str = ""  # KEV's name, the vulnerability's title or its description's first sentence
+    cpe: str = ""  # the component's, if it has one ([chat.*] channels match on it)
 
     @property
     def where(self) -> str:
@@ -248,6 +249,7 @@ def to_ranked(
         kev=vid.upper() in kev,
         criticality=verdict.criticality,
         title=finding_title(v, str((entry or {}).get("vulnerabilityName", ""))),
+        cpe=str(c.get("cpe") or ""),
     )
 
 

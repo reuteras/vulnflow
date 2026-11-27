@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .clients import OSV, DefectDojo, DependencyTrack, OpenCVE, project_label
 from .config import (
+    ChatChannel,
     Inventory,
     Machines,
     add_subscriptions,
@@ -175,11 +176,23 @@ def _kev_watch(inv: Inventory, dt: DependencyTrack | None, data_dir: Path, dry_r
     return 1 if res.errors else 0
 
 
-def _finding_watch(inv: Inventory, ranked: list[Ranked], data_dir: Path, dry_run: bool) -> int:
+def _finding_watch(
+    inv: Inventory,
+    ranked: list[Ranked],
+    data_dir: Path,
+    dry_run: bool,
+    channels: list[ChatChannel] | None = None,
+) -> int:
     """`finding-watch` (and every dt2dojo round): new P1/P2 findings to chat, P1 on critical
-    assets to paging, see findwatch.py."""
-    from .findwatch import STATE_FILE, page_sender, watch
+    assets to paging, see findwatch.py. channels: [chat.*] from machines.toml."""
+    from .findwatch import CHAT_PREFIX, STATE_FILE, Sender, page_sender, watch
     from .receiver import chat_sender
+
+    chat: dict[str, Sender | None] = {
+        CHAT_PREFIX + c.name: chat_sender(env(c.webhook_env))
+        for c in channels or []
+        if env(c.webhook_env)
+    }
 
     team_hook, soc_hook = env("VULNFLOW_CHAT_WEBHOOK"), env("VULNFLOW_SOC_WEBHOOK")
     page_hook = env("VULNFLOW_PAGE_WEBHOOK")
@@ -198,10 +211,12 @@ def _finding_watch(inv: Inventory, ranked: list[Ranked], data_dir: Path, dry_run
             "team": chat_sender(team_hook) if team_hook else None,
             "soc": chat_sender(soc_hook) if soc_hook else None,
             "page": page_sender(page_hook, page_fmt) if page_hook else None,
+            **chat,
         },
         soc_min_tier=int(env("VULNFLOW_SOC_MIN_TIER", "1") or 1),
         opencve_url=env("OPENCVE_URL"),
         dry_run=dry_run,
+        channels=channels,
     )
     for channel, n in sorted(res.baseline.items()):
         print(f"  ok    finding-watch {channel}: {n} finding(s) recorded, not posted")
@@ -1426,7 +1441,13 @@ def main(argv: list[str] | None = None) -> int:
             fw_rc = 0
             if ranker.record is not None and not a.dry_run:
                 # dry runs import nothing, so nothing was ranked
-                fw_rc = _finding_watch(inv, ranker.record, data_dir, dry_run=False)
+                fw_rc = _finding_watch(
+                    inv,
+                    ranker.record,
+                    data_dir,
+                    dry_run=False,
+                    channels=list(machines.chat_channels.values()),
+                )
             gh_rc = 0
             if not a.no_github_sboms:
                 gh_rc = _github_sboms(a, inv, dt, dry_run=a.dry_run, force=False)
@@ -1490,17 +1511,19 @@ def main(argv: list[str] | None = None) -> int:
         if dt is None:  # unreachable: required=True exits first
             return 2
         errors: list[str] = []
+        fw_machines = load_machines(a.machines, inv.teams)
         ranked = rank_findings(
             inv,
             dt,
             _kev_ids(data_dir),
             VectorCache(dt, data_dir / VECTOR_FILE),
             errors,
-            machines=load_machines(a.machines, inv.teams),
+            machines=fw_machines,
         )
         for msg in errors:
             print(f"  error finding-watch: {msg}", file=sys.stderr)
-        return _finding_watch(inv, ranked, data_dir, a.dry_run) or (1 if errors else 0)
+        chans = list(fw_machines.chat_channels.values())
+        return _finding_watch(inv, ranked, data_dir, a.dry_run, chans) or (1 if errors else 0)
 
     if a.cmd == "patches":
         from .patches import patched_findings

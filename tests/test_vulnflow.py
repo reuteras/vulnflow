@@ -4215,6 +4215,94 @@ def test_finding_watch_notifies_once_per_channel(inv, tmp_path):
     assert set(res.sent) == {"team", "soc", "page"} and state.read_text() == before
 
 
+def test_finding_watch_routes_noisy_products_to_their_channel(inv, tmp_path):
+    """[chat.*] as in the receiver: kernel findings leave the team channel for #linux, one
+    line per vulnerability naming every host; SOC and paging are unaffected."""
+    from vulnflow.config import ChatChannel, cpe_vendor_product
+    from vulnflow.findwatch import watch
+
+    assert cpe_vendor_product("cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*") == (
+        "linux",
+        "linux_kernel",
+    )
+    assert cpe_vendor_product("") is None and cpe_vendor_product("cpe:/o:linux") is None
+    state = tmp_path / "findings-notified.json"
+    sent: dict[str, list[str]] = {"team": [], "soc": [], "page": [], "chat:linux": []}
+    senders: dict[str, Any] = {c: sent[c].append for c in sent}
+    linux = ChatChannel("linux", ["linux:linux_kernel"])
+    cpe = "cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*"
+
+    def kernel(host: str, vid: str, **kw: Any) -> Any:
+        base: dict[str, Any] = {
+            "project": f"host:{host}",
+            "project_version": "debian-13",
+            "component": "linux_kernel",
+            "version": "7.3.6",
+            "vuln_id": vid,
+            "tier": 2,
+            "tier_name": "P2 Attend",
+            "criticality": "normal",
+            "cpe": cpe,
+        }
+        return _ranked(**(base | kw))
+
+    old = [kernel(h, "CVE-2026-10") for h in ("a", "b")]
+    # recorded before the channel existed (team channel): not announced again in #linux
+    watch(inv, old, state, {"team": senders["team"]}, now=1000.0)
+    watch(inv, old, state, {"team": senders["team"]}, now=1500.0)
+    assert not sent["team"]
+
+    new = [kernel("a", "CVE-2026-11"), kernel("b", "CVE-2026-11", team="dev")]
+    p1 = kernel("c", "CVE-2026-12", tier=1, tier_name="P1 Act", criticality="critical")
+    other = _ranked(vuln_id="CVE-2026-13", tier=2, tier_name="P2 Attend", criticality="normal")
+    res = watch(inv, [*old, *new, p1, other], state, senders, now=2000.0, channels=[linux])
+    assert not res.errors
+    assert [n.finding.vuln_id for n in res.sent["team"]] == ["CVE-2026-13"]
+    assert sorted(n.finding.vuln_id for n in res.sent["chat:linux"]) == [
+        "CVE-2026-11",
+        "CVE-2026-11",
+        "CVE-2026-12",
+    ]
+    (msg,) = sent["chat:linux"]
+    assert msg.startswith("#linux: 2 new finding(s) in Dependency-Track")
+    assert "linux_kernel 7.3.6 in host:a@debian-13, host:b@debian-13" in msg
+    assert ", teams dev, sysadm," in msg and "@sysadm" not in msg
+    assert all("linux_kernel" not in t for t in sent["team"])
+    # SOC and paging still get the P1
+    assert [n.finding.vuln_id for n in res.sent["soc"]] == ["CVE-2026-12"]
+    assert [n.finding.vuln_id for n in res.sent["page"]] == ["CVE-2026-12"]
+    # nothing twice; and without the channel's webhook the next one goes to the team channel
+    res = watch(inv, [*old, *new, p1, other], state, senders, now=3000.0, channels=[linux])
+    assert not res.sent
+    later = kernel("a", "CVE-2026-14")
+    no_hook = {c: s for c, s in senders.items() if c != "chat:linux"}
+    res = watch(inv, [later], state, no_hook, now=4000.0, channels=[linux])
+    assert [n.finding.vuln_id for n in res.sent["team"]] == ["CVE-2026-14"]
+    # min_tier: a P2 isn't posted to a P1-only channel, nor in team chat
+    strict = ChatChannel("linux", ["linux:linux_kernel"], min_tier=1)
+    res = watch(inv, [kernel("a", "CVE-2026-15")], state, senders, now=5000.0, channels=[strict])
+    assert not res.sent
+
+
+def test_finding_watch_survives_a_broken_record(inv, tmp_path, caplog):
+    from vulnflow.findwatch import watch
+
+    state = tmp_path / "findings-notified.json"
+    sent: list[str] = []
+    for junk in ("{trunc", '["a"]', '{"k": {"team": "x"}}'):
+        state.write_text(junk)
+        res = watch(inv, [_ranked()], state, {"team": sent.append}, now=1000.0)
+        # treated as a first run: recorded, not posted, and a valid file written back
+        assert res.baseline["team"] == 1 and not sent and not res.errors
+        assert "host:web|openssl|CVE-2026-1" in json.loads(state.read_text())
+    assert "unreadable" in caplog.text
+    # a record that can't be saved is an error for the round, not a crash
+    state.unlink()
+    state.mkdir()
+    res = watch(inv, [_ranked()], state, {"team": sent.append}, now=2000.0)
+    assert res.errors and "could not save" in res.errors[0]
+
+
 def test_finding_watch_page_formats():
     from vulnflow.findwatch import page_sender
 
