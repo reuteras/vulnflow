@@ -5,6 +5,8 @@ COPY vulnflow/ /app/vulnflow/
 # cosign: `github-sboms` verifies release signatures with it (`verify` in [github.*]). Pinned
 # release binary, checked against the sha256 of the cosign_checksums.txt of that release;
 # bump COSIGN_VERSION and both sums together (`vulnflow check-updates` is not aware of it).
+# Its known vulnerabilities that no release fixes yet are ignored, with a reason and an end
+# date, in .github/osv-scanner/osv-scanner.toml; drop them when a bump brings the fix.
 ARG TARGETARCH
 ARG COSIGN_VERSION=3.1.6
 ARG COSIGN_SHA256_AMD64=318a99ade4156a0c4113aa983b46c0a0830fa7896a096c63121ee47b610a94c6

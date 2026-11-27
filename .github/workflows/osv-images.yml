@@ -9,7 +9,9 @@
 # package installed in the Dockerfile is old. Unfixed ones are only logged.
 #
 # The osv-scanner image is pinned in .github/osv-scanner/Dockerfile so that
-# Dependabot keeps its tag and digest up to date.
+# Dependabot keeps its tag and digest up to date. .github/osv-scanner/osv-scanner.toml
+# ignores the few that no release fixes yet and that don't apply, each with a reason
+# and an ignoreUntil date after which the check fails again.
 
 name: osv-images
 
@@ -24,6 +26,7 @@ name: osv-images
       - "**/Dockerfile"
       - ".github/workflows/osv-images.yml"
       - ".github/osv-scanner/Dockerfile"
+      - ".github/osv-scanner/osv-scanner.toml"
   workflow_dispatch:
 
 permissions: {}
@@ -62,7 +65,9 @@ jobs:
           set -euo pipefail
           scanner=$(sed -n 's/^FROM //p' .github/osv-scanner/Dockerfile)
           rc=0
-          docker run --rm -v "$RUNNER_TEMP:/work" "$scanner" scan image \
+          docker run --rm -v "$RUNNER_TEMP:/work" \
+            -v "$PWD/.github/osv-scanner/osv-scanner.toml:/config/osv-scanner.toml:ro" \
+            "$scanner" scan image --config /config/osv-scanner.toml \
             --archive /work/image.tar --format json --output-file /work/result.json || rc=$?
           # 0 = no vulns, 1 = vulns found; anything else is a scanner error.
           if [ "$rc" -gt 1 ]; then
