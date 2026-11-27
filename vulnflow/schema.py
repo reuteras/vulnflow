@@ -193,6 +193,37 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
                     },
                 },
             },
+            "chat": {
+                **name,
+                "description": "Mattermost channels for noisy products (the Linux kernel, a "
+                "chatty vendor). Alerts for them go there instead of the team's channel; "
+                "`./poc.sh chat-up` creates the channel and its webhook.",
+                "propertyNames": {
+                    "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                    "not": {"enum": ["alerts", "soc"]},
+                },
+                "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["match"],
+                    "properties": {
+                        "match": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9._~+-]*(:[a-z0-9][a-z0-9._~+-]*)?$",
+                            },
+                            "description": 'NVD "vendor" (all its products) or "vendor:product".',
+                        },
+                        "min_tier": {
+                            "type": "integer",
+                            "enum": [1, 2, 3, 4],
+                            "description": "Lowest tier posted (default: the team channel's, P2).",
+                        },
+                    },
+                },
+            },
             "news": {
                 "type": "object",
                 "description": "Per-team OSINT newsletter (`vulnflow newsletter`): feeds and "
