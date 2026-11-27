@@ -74,6 +74,7 @@ connects in.
 | --- | --- | --- | --- |
 | NVD (`nist.gov`) | Dependency-Track's NVD mirror (on by default) | nothing about you: it downloads the whole feed | DT UI, Administration |
 | `storage.googleapis.com/osv-vulnerabilities` | Dependency-Track's OSV mirror, for `DT_OSV_ECOSYSTEMS` | nothing about you: it downloads per-ecosystem archives | `DT_OSV_ECOSYSTEMS=` empty before bootstrap, or DT UI |
+| `metrics.dependencytrack.org` | Dependency-Track telemetry, **off** unless `DT_TELEMETRY=true` (`dt-bootstrap` sets it; the compose file keeps a new database from sending at first start) | once a day: a cluster id, the DT version, the database type and version | `DT_TELEMETRY=false` (the default), then `./poc.sh dt-bootstrap` |
 | GitHub Advisories | Dependency-Track, only if you enable it with a GitHub token ([OSV in Dependency-Track](install.md#2-osv-in-dependency-track)) | the token | off by default |
 | `github.com` | OpenCVE's Airflow DAG pulls `opencve/opencve-kb`, `opencve-nvd`, `opencve-redhat`, `CVEProject/cvelistV5`, `cisagov/vulnrichment` | nothing about you: full git repositories | stop the DAG |
 | `www.cisa.gov` | receiver enrichment and the email reports: CISA KEV list (cached 6 h); `kev-watch` in each `dt2dojo` round (cached 1 h) | nothing about you: one file download | `VULNFLOW_ENRICH_KEV=0` |

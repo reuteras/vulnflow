@@ -15,6 +15,14 @@ Per-host agent teams (agent_key/revoke_agent) use the same calls, checked agains
 BOM_UPLOAD plus PROJECT_CREATION_UPLOAD and applies projectTags to the project it creates;
 changing tags later needs PORTFOLIO_MANAGEMENT(_UPDATE), else DT only logs a warning
 (BomResource.maybeBindTags).
+Telemetry (5.2.2 tag: TelemetrySubmissionTask, ConfigPropertyConstants, ConfigPropertyResource):
+DT POSTs a cluster id, its version and the database type and version to
+metrics.dependencytrack.org once a day, first right at startup. The switch is the stored
+property telemetry/submission.enabled, seeded from dt.telemetry.submission.default-enabled
+(default true) only when the database is first set up, so the compose file sets that and the
+bootstrap corrects existing installs (admin JWT, SYSTEM_CONFIGURATION):
+  GET  /api/v1/configProperty   -> [{"groupName","propertyName","propertyValue",...}]
+  POST /api/v1/configProperty   {"groupName","propertyName","propertyValue"} -> 200, 404
 OSV source config, admin JWT. Not in the hyades-apiserver v5.2.2 tag (no ExtensionsResource
 there), so checked against a running 5.2.2 instead (2026-11-24):
   GET  /api/v2/extension-points/vuln-data-source/extensions/osv/config  -> {"config": {...}}
@@ -114,6 +122,44 @@ class DTBootstrapResult:
     created_team: bool
     changed_admin_password: bool
     osv: str = "skipped"  # "updated: ...", "unchanged", "skipped", or "failed: ..."
+    telemetry: str = "skipped"  # "turned off"/"turned on", "off"/"on", or "failed: ..."
+
+
+DT_TELEMETRY_PROPERTY = ("telemetry", "submission.enabled")
+
+
+def dt_set_telemetry(http: Http, enabled: bool) -> str:
+    """Make DT's telemetry submission match `enabled`; only writes when it differs. Never
+    raises: the caller reports a failure instead of aborting the bootstrap."""
+    group, name = DT_TELEMETRY_PROPERTY
+    want = "true" if enabled else "false"
+    state = "on" if enabled else "off"
+    try:
+        r = http.get("api/v1/configProperty", expect_ok=False)
+        if not r.ok:
+            return f"failed: GET config properties HTTP {r.status}"
+        current = next(
+            (
+                str(p.get("propertyValue") or "").strip().lower()
+                for p in r.json() or []
+                if p.get("groupName") == group and p.get("propertyName") == name
+            ),
+            None,
+        )
+        if current is None:
+            return f"failed: no {group}/{name} property in Dependency-Track"
+        if current == want:
+            return state
+        r = http.post(
+            "api/v1/configProperty",
+            json_body={"groupName": group, "propertyName": name, "propertyValue": want},
+            expect_ok=False,
+        )
+        if not r.ok:
+            return f"failed: POST config property HTTP {r.status}"
+        return f"turned {state}"
+    except OSError as e:
+        return f"failed: {e}"
 
 
 DT_OSV_PATH = "api/v2/extension-points/vuln-data-source/extensions/osv/config"
@@ -261,12 +307,13 @@ def bootstrap_dtrack(
     team_name: str = "vulnflow",
     existing_key: str = "",
     osv_ecosystems: tuple[str, ...] = ("Debian", "PyPI"),
+    telemetry: bool = False,
     transport: Transport | None = None,
     wait_timeout: float = 600.0,
 ) -> DTBootstrapResult:
     """Idempotently get Dependency-Track to: admin password set, team with the vulnflow
-    permissions, a working API key for it, and the OSV source enabled for osv_ecosystems
-    (empty = leave OSV alone)."""
+    permissions, a working API key for it, the OSV source enabled for osv_ecosystems
+    (empty = leave OSV alone), and telemetry submission on or off as `telemetry` says."""
     if not admin_password:
         raise BootstrapError("admin password must not be empty")
     anon = Http(base_url, headers={"Accept": "application/json"}, transport=transport)
@@ -320,14 +367,15 @@ def bootstrap_dtrack(
             raise BootstrapError(f"granting {perm} to team {team_name}: HTTP {r.status}")
 
     osv = dt_enable_osv(http, list(osv_ecosystems))
+    tele = dt_set_telemetry(http, telemetry)
 
     if dt_key_works(base_url, existing_key, transport):
-        return DTBootstrapResult("", uuid, created, changed, osv)
+        return DTBootstrapResult("", uuid, created, changed, osv, tele)
 
     key = (http.put(f"api/v1/team/{uuid}/key").json() or {}).get("key", "")
     if not key or not dt_key_works(base_url, key, transport):
         raise BootstrapError("generated API key did not validate against /api/v1/team/self")
-    return DTBootstrapResult(key, uuid, created, changed, osv)
+    return DTBootstrapResult(key, uuid, created, changed, osv, tele)
 
 
 def dt_admin_http(base_url: str, admin_password: str, transport: Transport | None = None) -> Http:

@@ -3,6 +3,7 @@
 #   - ports moved to 8180 (API) / 8181 (UI) so they don't clash with OpenCVE's Airflow (8080)
 #   - credentials taken from ../../.env instead of hard-coded
 #   - everything bound to 127.0.0.1 (put a TLS reverse proxy in front for team access)
+#   - telemetry off unless DT_TELEMETRY=true in ../../.env
 #   - image tags written out (no ${VAR} defaults) so Dependabot can update them
 name: vulnflow-dtrack
 
@@ -20,6 +21,9 @@ services:
       DT_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/dtrack"
       DT_DATASOURCE_USERNAME: "dtrack"
       DT_DATASOURCE_PASSWORD: "${DT_DB_PASSWORD:?set DT_DB_PASSWORD in .env}"
+      # Telemetry starts off on a new database (DT reads this only when it first fills the
+      # database; dt-bootstrap sets the stored value on existing installs)
+      DT_TELEMETRY_SUBMISSION_DEFAULT_ENABLED: "${DT_TELEMETRY:-false}"
     ports:
       - "127.0.0.1:${DT_API_PORT:-8180}:8080"
     volumes:

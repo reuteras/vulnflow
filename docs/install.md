@@ -130,6 +130,12 @@ instead, enable OSV by hand in the DT UI under Administration. The first OSV mir
 while; findings show up after it finishes. Optional: an NVD API key (faster NVD mirroring)
 and the GitHub Advisories source (needs a GitHub token).
 
+Dependency-Track's telemetry (a daily report of a cluster id, its version and the database
+type and version to `metrics.dependencytrack.org`) is on by default upstream. vulnflow keeps
+it off: the compose file starts a new database with it off, and `dt-bootstrap` sets the
+stored value from `DT_TELEMETRY` (default `false`) on every run, so an existing install is
+switched off by the next `./poc.sh dt-bootstrap`. Set `DT_TELEMETRY=true` to send it.
+
 OSV files Debian's records as `DEBIAN-CVE-YYYY-N`. `debian` and `disputed` look those up by
 the CVE id inside; `patches` leaves Debian packages to `debian`, because osv.dev's fix list
 for a Debian package mixes the releases (it offered unstable's curl to a trixie host for
