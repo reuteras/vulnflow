@@ -55,7 +55,12 @@ load_env() {
   set +a
 }
 
-vulnflow() { python3 -m vulnflow --env-file .env "$@"; }
+# On the host the local chat is 127.0.0.1:<MM_PORT>, not "mattermost" (its network name, as
+# the webhook URLs in .env have it): receiver.reachable_hook rewrites them
+vulnflow() {
+  VULNFLOW_CHAT_HOOK_BASE="${VULNFLOW_CHAT_HOOK_BASE:-http://127.0.0.1:${MM_PORT:-8065}}" \
+    python3 -m vulnflow --env-file .env "$@"
+}
 
 # Secrets poc.sh generates when empty: NAME:random-bytes
 SECRETS=(DT_DB_PASSWORD:24 DT_ADMIN_PASSWORD:24 DD_ADMIN_PASSWORD:24 DD_SECRET_KEY:32

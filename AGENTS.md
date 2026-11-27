@@ -206,7 +206,10 @@ Things that keep CI and the hooks in agreement. Don't undo them without a reason
 - Optional local chat: `stacks/mattermost` (compose project `vulnflow-chat`, Mattermost
   Team Edition + postgres), started by `./poc.sh chat-up`, not by `setup`. The receiver
   joins its network through `deploy/docker-compose.glue-chat.yml`, and `mm-bootstrap`
-  writes `VULNFLOW_CHAT_WEBHOOK`. Keep its phone-home settings off when bumping it.
+  writes `VULNFLOW_CHAT_WEBHOOK` as `http://mattermost:8065/hooks/<id>`. Senders off that
+  network (dt2dojo on the host network, `poc.sh`'s `vulnflow` on the host) get
+  `VULNFLOW_CHAT_HOOK_BASE=http://127.0.0.1:<MM_PORT>` (overlay, wrapper) and
+  `receiver.reachable_hook` rewrites the base; never put it in `.env` (the receiver reads it). Keep its phone-home settings off when bumping it.
 - Exposure: every published port binds to 127.0.0.1, and the target server is reachable
   only over Tailscale. Browser access is `tailscale serve` (HTTPS, tailnet only), driven by
   `VULNFLOW_TS_HOST` (`ts_*` functions in `poc.sh`), never `0.0.0.0` ports or `funnel`.

@@ -1,11 +1,16 @@
 # Overlay for docker-compose.glue.yml, added by poc.sh when the local chat's network exists
 # (./poc.sh chat-up, stacks/mattermost). The receiver posts P1/P2 alerts to
-# http://mattermost:8065/hooks/<id> (VULNFLOW_CHAT_WEBHOOK) on that network.
+# http://mattermost:8065/hooks/<id> (VULNFLOW_CHAT_WEBHOOK) on that network. dt2dojo
+# (finding-watch, kev-watch) is on the host network, where "mattermost" doesn't resolve: it
+# posts to the same hooks through Mattermost's port on 127.0.0.1 (receiver.reachable_hook).
 services:
   receiver:
     networks:
       default: {}
       chat: {}
+  dt2dojo:
+    environment:
+      VULNFLOW_CHAT_HOOK_BASE: "http://127.0.0.1:${MM_PORT:-8065}"
 
 networks:
   chat:
