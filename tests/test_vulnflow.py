@@ -5133,6 +5133,18 @@ def test_agent_tracks_only_the_running_kernel():
     assert kernel["cpe"] == "cpe:2.3:o:linux:linux_kernel:7.3.5:*:*:*:*:*:*:*"
     # a container has no kernel: linux-libc-dev and friends are dropped
     assert names(a.no_kernel_packages([a.bom(list(pkgs))])) == ["libc6", "linux-base"]
+    # self-built with `make bindeb-pkg` (source linux-upstream): every such package goes,
+    # the running one and the older ones alike; the running kernel is added by CPE
+    built = [
+        deb("linux-image-7.3.6", "7.3.6-1", "linux-upstream"),
+        deb("linux-headers-7.3.6", "7.3.6-1", "linux-upstream"),
+        deb("linux-image-7.3.5", "7.3.5-1", "linux-upstream"),
+        deb("linux-libc-dev", "7.3.6-1", "linux-upstream"),
+    ]
+    got = a.running_kernel_only([a.bom(list(pkgs) + built)], "7.3.6")
+    assert names(got) == ["libc6", "linux-base", "linux_kernel"]
+    assert got[-1]["components"][0]["cpe"] == "cpe:2.3:o:linux:linux_kernel:7.3.6:*:*:*:*:*:*:*"
+    assert names(a.no_kernel_packages([a.bom(built)])) == []
 
 
 def test_agent_host_project_is_all_or_nothing(tmp_path, monkeypatch, capsys):
