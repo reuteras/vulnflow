@@ -13,6 +13,15 @@
 # in; JSON.SET/OBJKEYS/GET checked on redis:8.10.3-trixie. Upstream gives redis no volume
 # (Celery queue and report scratch data only), so switching keeps nothing persistent.
 # Exact tag so Dependabot (docker-compose, /stacks/opencve) can propose updates.
+#
+# Airflow (webserver, scheduler, worker, init): PYTHONDONTWRITEBYTECODE=1. Upstream's
+# scheduler image runs as uid 50000, which can't write __pycache__ next to the stdlib, so
+# each import without a cached .pyc tried and was denied (auditd logged every denied open).
+# The image's own .pyc files are still used. `environment` merges by key with upstream's
+# (the worker keeps its DUMB_INIT_SETSID).
+x-no-bytecode: &no-bytecode
+  PYTHONDONTWRITEBYTECODE: "1"
+
 services:
   webserver:
     restart: unless-stopped
@@ -25,7 +34,12 @@ services:
     restart: unless-stopped
   airflow-webserver:
     restart: unless-stopped
+    environment: *no-bytecode
   airflow-scheduler:
     restart: unless-stopped
+    environment: *no-bytecode
   airflow-worker:
     restart: unless-stopped
+    environment: *no-bytecode
+  airflow-init:
+    environment: *no-bytecode
