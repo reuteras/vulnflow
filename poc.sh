@@ -496,7 +496,8 @@ glue_compose() {
   if docker network inspect "$CHAT_NET" >/dev/null 2>&1; then
     files+=(-f deploy/docker-compose.glue-chat.yml)
   fi
-  # machines.toml ([github.*], [subscriptions.*]) into dt2dojo, read-only, only if it exists
+  # machines.toml ([github.*], [subscriptions.*], [chat.*]) into dt2dojo and the receiver,
+  # read-only, only if it exists
   local machines="${VULNFLOW_MACHINES:-machines.toml}"
   if [[ -f "$machines" ]]; then
     VULNFLOW_MACHINES_HOST="$(cd "$(dirname "$machines")" && pwd)/$(basename "$machines")"
@@ -520,7 +521,8 @@ cmd_glue_up() {
 # Mattermost Team Edition, so the P1/P2 alerts can be seen without an outside chat
 # service. chat-up starts it, has `vulnflow mm-bootstrap` create the admin, team
 # `vulnflow`, channels `alerts` and `soc` with incoming webhooks (VULNFLOW_CHAT_WEBHOOK and
-# VULNFLOW_SOC_WEBHOOK in .env),
+# VULNFLOW_SOC_WEBHOOK in .env), plus a channel per [chat.*] of machines.toml
+# (VULNFLOW_CHAT_WEBHOOK_<NAME>),
 # and recreates the receiver on the chat network. Not part of setup; rerunnable.
 chat_compose() { docker compose --env-file .env -f stacks/mattermost/docker-compose.yml "$@"; }
 chat_installed() { docker volume inspect vulnflow-chat_mattermost-data >/dev/null 2>&1; }

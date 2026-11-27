@@ -25,6 +25,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .clients import OpenCVE
-from .config import Inventory
+from .config import ChatChannel, Inventory
 from .intel import Enricher
 from .net import Http
 from .priority import assess
@@ -62,6 +63,7 @@ class Alert:
     enrichment_errors: list[str]
     title: str = ""  # KEV's name, OpenCVE's title, or the description's first sentence
     products: list[str] = field(default_factory=list)  # the subscriptions it matched
+    subscribed: list[str] = field(default_factory=list)  # the same, raw (vendor, vendor$PRODUCT$p)
     # why this change notifies: new, kev, worse, followed; "" = log only
     notify: str = ""
     # a non-quiet change: notifies if the CVE turns out to be followed (Pipeline checks)
@@ -171,6 +173,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
             notify = "worse" if v.tier < old.tier else ""
         quiet = set(inv.rules.quiet_event_types)
         subs = (cve.get("subscriptions") or {}).get("human") or []
+        raw_subs = (cve.get("subscriptions") or {}).get("raw") or []
         alerts.append(
             Alert(
                 received_at=now,
@@ -191,6 +194,7 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
                 enrichment_errors=sig.errors,
                 title=_title(sig.kev_name, events, str(cve.get("description") or "")),
                 products=[str(x) for x in subs],
+                subscribed=[str(x) for x in raw_subs],
                 notify=notify,
                 followable=any(t not in quiet for t in types),
             )
@@ -199,17 +203,22 @@ def process_payload(payload: dict[str, Any], inv: Inventory, enricher: Enricher)
     return alerts
 
 
-def alert_line(a: Alert, opencve_url: str = "", team: bool = False) -> str:
-    """One chat line: what it is (title, products), why now, the scores and the reasons."""
+def alert_line(
+    a: Alert, opencve_url: str = "", team: bool = False, teams: list[str] | None = None
+) -> str:
+    """One chat line: what it is (title, products), why now, the scores and the reasons.
+    team: name the alert's team; teams: name these instead (a noisy-product channel)."""
     epss = f"{a.epss:.3f}" if a.epss is not None else "n/a"
     cvss = a.cvss31 if a.cvss31 is not None else "n/a"
     link = f" {opencve_url.rstrip('/')}/cve/{a.cve}" if opencve_url else ""
     what = a.title + (f" ({', '.join(a.products)})" if a.products else "")
     why = NOTIFY_LABELS.get(a.notify, a.notify)
     changed = ", ".join(a.event_types) or "change"
+    who = teams or ([a.team] if team else [])
+    named = f", team{'s' if len(who) > 1 else ''} {', '.join(who)}" if who else ""
     return (
         f"- [{a.tier_name}] {a.cve}: {what}\n"
-        f"  {why} ({changed}){f', team {a.team}' if team else ''}, CVSS {cvss}, EPSS {epss}: "
+        f"  {why} ({changed}){named}, CVSS {cvss}, EPSS {epss}: "
         f"{'; '.join(a.reasons)}{link}"
     )
 
@@ -228,6 +237,98 @@ def format_chat(alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> s
     if rest:
         lines.append(f"(+{rest} other change(s) in the log)")
     return "\n".join(lines)
+
+
+def _vendor_product(raw: str) -> tuple[str, str]:
+    """OpenCVE's raw subscription of a CVE: "vendor" or "vendor$PRODUCT$product" (v3.1.0
+    `BaseNotifier.prepare_payload`: the project's subscriptions that are in the CVE's vendors;
+    ":" is accepted too) -> (vendor, product or "")."""
+    vendor, sep, product = raw.lower().replace("$product$", ":").partition(":")
+    return vendor, product if sep else ""
+
+
+def channel_matches(channel: ChatChannel, a: Alert) -> bool:
+    """A "vendor" pattern matches any of that vendor's products, "vendor:product" only that one."""
+    seen = {_vendor_product(r) for r in a.subscribed}
+    for m in channel.match:
+        vendor, _, product = m.partition(":")
+        if any(v == vendor and (not product or p == product) for v, p in seen):
+            return True
+    return False
+
+
+def route_channels(
+    alerts: list[Alert], channels: list[ChatChannel]
+) -> tuple[list[Alert], dict[str, list[Alert]]]:
+    """Split off the alerts a noisy-product channel takes: (the rest, {channel: alerts}). An
+    alert goes to the first channel (in machines.toml order) that matches it, and then not to
+    the team's channel."""
+    rest: list[Alert] = []
+    routed: dict[str, list[Alert]] = {}
+    for a in alerts:
+        ch = next((c for c in channels if channel_matches(c, a)), None)
+        if ch is None:
+            rest.append(a)
+        else:
+            routed.setdefault(ch.name, []).append(a)
+    return rest, routed
+
+
+def teams_affected(a: Alert, inv: Inventory) -> list[str]:
+    """The alert's team first, then every other team whose subscriptions cover one of the
+    products the CVE matched: OpenCVE sends each team's project its own webhook, and a shared
+    channel posts the CVE once for all of them."""
+    seen = {_vendor_product(r) for r in a.subscribed}
+    others = sorted(
+        k
+        for k, t in inv.teams.items()
+        if k != a.team and any(v in t.vendors or (p and p in t.products.get(v, [])) for v, p in seen)
+    )
+    return ([a.team] if a.team != "unrouted" else []) + others
+
+
+def format_channel(name: str, alerts: list[Alert], inv: Inventory, opencve_url: str = "") -> str | None:
+    """A noisy-product channel's message: the alerts already filtered, every team affected
+    named in each line, nobody mentioned."""
+    if not alerts:
+        return None
+    lines = [f"#{name}: {len(alerts)} CVE(s) to look at"]
+    lines += [alert_line(a, opencve_url, teams=teams_affected(a, inv)) for a in alerts]
+    return "\n".join(lines)
+
+
+class ChannelSeen:
+    """What the noisy-product channels posted in the last `ttl` seconds, in a JSON file next to
+    the alert log, so a CVE change that reaches several teams' projects (one webhook each) is
+    posted once, also across a receiver restart. Used from the single worker thread only."""
+
+    def __init__(self, path: Path, ttl: float = 24 * 3600):
+        self.path, self.ttl = path, ttl
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self._at = {str(k): float(v) for k, v in data.items()}
+        except FileNotFoundError:
+            self._at = {}
+        except (OSError, ValueError, AttributeError) as e:
+            log.warning("%s unreadable (%s), starting empty", path, e)
+            self._at = {}
+
+    @staticmethod
+    def key(channel: str, a: Alert) -> str:
+        return f"{channel}|{a.cve}|{a.notify}|{','.join(sorted(a.event_types))}"
+
+    def has(self, key: str, now: float) -> bool:
+        return now - self._at.get(key, -self.ttl - 1) <= self.ttl
+
+    def add(self, keys: list[str], now: float) -> None:
+        self._at = {k: t for k, t in self._at.items() if now - t <= self.ttl}
+        self._at.update(dict.fromkeys(keys, now))
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(self._at, sort_keys=True), encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as e:
+            log.warning("could not save %s: %s", self.path, e)
 
 
 def format_soc(alerts: list[Alert], min_tier: int, opencve_url: str = "") -> str | None:
@@ -257,8 +358,24 @@ class Pipeline:
         soc_webhook: str = "",
         soc_sender: Callable[[str], None] | None = None,
         soc_min_tier: int = 1,
+        channels: list[ChatChannel] | None = None,
+        channel_senders: dict[str, Callable[[str], None]] | None = None,
     ):
         self.inv, self.enricher, self.log_path = inv, enricher, log_path
+        # Noisy-product channels ([chat.*] in machines.toml): a channel takes its products'
+        # alerts away from the team's channel, but only when its webhook is set; without one
+        # the alerts stay where they were rather than going nowhere.
+        # A channel is shared by all teams: a CVE change posted for one team's project isn't
+        # posted again when the next team's webhook brings it (ChannelSeen, 24 h).
+        senders = channel_senders or {}
+        self.channels = [c for c in channels or [] if c.name in senders]
+        self._channel_send = senders
+        self._channel_seen = ChannelSeen(log_path.with_suffix(".channels-seen.json"))
+        for c in channels or []:
+            if c.name not in senders:
+                log.warning(
+                    "chat channel %s: %s is not set, its alerts stay in team chat", c.name, c.webhook_env
+                )
         self.opencve_url = opencve_url
         # Write-back: mark P1..P(triage_max_tier) CVEs "to_evaluate" in OpenCVE so they
         # show up in the team's triage view. Never overwrites a status a human set.
@@ -284,7 +401,10 @@ class Pipeline:
                 f.write(json.dumps(asdict(a), ensure_ascii=False) + "\n")
         if self.opencve and self.triage_max_tier:
             self._triage(alerts)
-        msg = format_chat(alerts, self.inv, self.opencve_url)
+        rest, routed = route_channels(alerts, self.channels)
+        for name, chunk in routed.items():
+            self._post_channel(name, chunk)
+        msg = format_chat(rest, self.inv, self.opencve_url)
         if msg and self._send:
             try:
                 self._send(msg)
@@ -304,12 +424,38 @@ class Pipeline:
         )
         return alerts
 
+    def _post_channel(self, name: str, chunk: list[Alert]) -> None:
+        """Post a noisy-product channel's share of this payload, skipping CVE changes the
+        channel already posted for another team. Recorded only once delivered, so after a
+        failure the next team's webhook tries again."""
+        ch = next(c for c in self.channels if c.name == name)
+        tier = ch.min_tier or self.inv.rules.chat_min_tier
+        now = time.time()
+        hot = [a for a in chunk if a.tier <= tier and a.notify]
+        keys = {a.cve: ChannelSeen.key(name, a) for a in hot}
+        new = [a for a in hot if not self._channel_seen.has(keys[a.cve], now)]
+        if len(new) < len(hot):
+            log.info("chat channel %s: %d already posted for another team", name, len(hot) - len(new))
+        text = format_channel(name, new, self.inv, self.opencve_url)
+        if not text:
+            return
+        try:
+            self._channel_send[name](text)
+        except Exception as e:
+            log.error("chat channel %s delivery failed: %s", name, e)
+            return
+        self._channel_seen.add([keys[a.cve] for a in new], now)
+
     def _followed(self, alerts: list[Alert]) -> None:
         """A non-quiet update to a CVE someone follows in OpenCVE (an open status) notifies.
         Asked only for changes that could reach chat and don't notify anyway."""
         if self.opencve is None:
             return
-        limit = max(self.inv.rules.chat_min_tier, self.soc_min_tier if self._soc_send else 0)
+        limit = max(
+            self.inv.rules.chat_min_tier,
+            self.soc_min_tier if self._soc_send else 0,
+            *(c.min_tier or 0 for c in self.channels),
+        )
         for a in alerts:
             if a.notify or not a.followable or a.tier > limit or a.team == "unrouted":
                 continue

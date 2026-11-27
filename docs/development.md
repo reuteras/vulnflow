@@ -21,6 +21,7 @@ images; `DD_REF`/`OPENCVE_REF` in `.env` are bumped by hand.
 | --- | --- |
 | OpenCVE API paths (subscriptions, project create, CVE tracker GET/PATCH, status enum) | Checked against the OpenCVE v3.1.0 tag's source; project create + subscriptions also run live |
 | OpenCVE webhook payload (`organization`, `project`, `changes[].cve.cve_id/cvss31/description`, `events`) | Checked against v3.1.0 `WebhookNotifier.prepare_payload` |
+| `changes[].cve.subscriptions.raw` (the noisy-product channels' match): the project's subscriptions that are in the CVE's vendors, `vendor` or `vendor$PRODUCT$product` | Checked against v3.1.0 `BaseNotifier.prepare_payload` (`scheduler/dags/includes/notifiers.py`). Not yet seen through the live webhook |
 | Dependency-Track `PUT /api/v1/bom` (JSON + `projectTags`), `/project/tag/{tag}`, FPF export | From DT docs. Paging header handling covers both v4 and v5 |
 | DefectDojo `reimport-scan` with FPF scan type + `auto_create_context` | From DefectDojo docs |
 | DT bootstrap (`forceChangePassword`, `login`, team, permissions, team key, `team/self`) | Checked against the DT 5.x apiserver source; run live against 5.2.2 |

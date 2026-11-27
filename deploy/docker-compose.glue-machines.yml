@@ -1,10 +1,16 @@
 # Added by poc.sh (glue_compose) when machines.toml exists: dt2dojo reads it, read-only, for
 # the [github.*] release SBOMs (github-sboms) and the [subscriptions.*] that kev-watch
-# matches new KEV entries against. Only dt2dojo: the receiver doesn't need the host list.
+# matches new KEV entries against, and the receiver for the [chat.*] channels of noisy
+# products.
 # Not in the base file because a bind mount of a missing file makes Docker create a
 # directory in its place.
 services:
   dt2dojo:
+    volumes:
+      - ${VULNFLOW_MACHINES_HOST:?set by poc.sh}:/app/machines.toml:ro
+    environment:
+      VULNFLOW_MACHINES: /app/machines.toml
+  receiver:
     volumes:
       - ${VULNFLOW_MACHINES_HOST:?set by poc.sh}:/app/machines.toml:ro
     environment:

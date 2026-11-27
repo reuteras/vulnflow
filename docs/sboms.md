@@ -332,8 +332,10 @@ last path element is the image's name (`github.com/grafana/grafana` in
 Kernels: a host project lists only the kernel that runs (`uname -r`). Kernel packages that
 are installed but not booted (old ones Debian keeps, a new one waiting for a reboot),
 `linux-libc-dev` and syft's `/boot/vmlinuz-*` entries are left out, because every kernel CVE
-matches them. A packaged running kernel is tracked by its package; a self-built one is added
-as `linux_kernel` with the NVD CPE `linux:linux_kernel:<version>`. Container projects carry no
+matches them. A distro's running kernel is tracked by its package; a self-built one is added
+as `linux_kernel` with the NVD CPE `linux:linux_kernel:<version>`. That includes kernels
+packaged with `make bindeb-pkg` (source package `linux-upstream`): all of those packages,
+running or not, are left out, since no distro tracks them. Container projects carry no
 kernel packages. Findings for the dropped ones close in DefectDojo with the next `dt2dojo`
 re-import (`close_old_findings`).
 

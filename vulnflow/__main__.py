@@ -18,6 +18,7 @@ from .config import (
     Inventory,
     Machines,
     add_subscriptions,
+    chat_channel_warnings,
     env,
     env_flag,
     load_dotenv,
@@ -454,21 +455,25 @@ def _maintenance_dt() -> DependencyTrack | None:
     return DependencyTrack(env("DT_URL", "http://localhost:8180"), key) if key else None
 
 
-def _mm_bootstrap(env_file: str, wait: float) -> int:
+def _mm_bootstrap(env_file: str, wait: float, machines: Machines) -> int:
     from .bootstrap import BootstrapError, bootstrap_mattermost, set_env_values
+
+    extra = tuple(machines.chat_channels)  # [chat.*]: a channel per noisy product
 
     try:
         urls = bootstrap_mattermost(
             env("MM_URL", f"http://localhost:{env('MM_PORT', '8065')}"),
             admin_user=env("MM_ADMIN_USER", "admin"),
             admin_password=env("MM_ADMIN_PASSWORD", required=True),
-            channels=("alerts", "soc"),
+            channels=("alerts", "soc", *extra),
             wait_timeout=wait,
         )
     except BootstrapError as e:
         print(f"  error {e}", file=sys.stderr)
         return 1
-    for key, channel in (("VULNFLOW_CHAT_WEBHOOK", "alerts"), ("VULNFLOW_SOC_WEBHOOK", "soc")):
+    keys = [("VULNFLOW_CHAT_WEBHOOK", "alerts"), ("VULNFLOW_SOC_WEBHOOK", "soc")]
+    keys += [(machines.chat_channels[c].webhook_env, c) for c in extra]
+    for key, channel in keys:
         if env(key) == urls[channel]:
             print(f"  ok    {key} already points at Mattermost's {channel} channel")
         else:
@@ -1340,7 +1345,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "dd-bootstrap":
         return _dd_bootstrap(a.env_file, a.wait)
     if a.cmd == "mm-bootstrap":
-        return _mm_bootstrap(a.env_file, a.wait)
+        mm_inv = load_inventory(a.inventory)
+        mm_machines = load_machines(a.machines, mm_inv.teams)
+        add_subscriptions(mm_inv, mm_machines)
+        for w in chat_channel_warnings(mm_machines.chat_channels, mm_inv.teams):
+            print(f"  warn  {w}")
+        return _mm_bootstrap(a.env_file, a.wait, mm_machines)
     if a.cmd == "check-updates":
         from .upstreams import check, report
 
@@ -1753,9 +1763,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if errors else 0
 
     if a.cmd == "serve":
-        from .receiver import Pipeline, serve
+        from .receiver import Pipeline, chat_sender, serve
 
         triage = int(env("VULNFLOW_OPENCVE_TRIAGE_MAX_TIER", "0") or 0)
+        machines = load_machines(a.machines, inv.teams)
+        add_subscriptions(inv, machines)  # a channel names every team a CVE reaches
+        for w in chat_channel_warnings(machines.chat_channels, inv.teams):
+            logging.getLogger(__name__).warning("%s", w)
+        channels = list(machines.chat_channels.values())
         pipe = Pipeline(
             inv,
             _enricher(data_dir),
@@ -1766,6 +1781,10 @@ def main(argv: list[str] | None = None) -> int:
             opencve_url=env("OPENCVE_URL"),
             opencve=_opencve(),  # write-back (triage) and the "followed" check
             triage_max_tier=triage,
+            channels=channels,
+            channel_senders={
+                c.name: chat_sender(env(c.webhook_env)) for c in channels if env(c.webhook_env)
+            },
         )
         serve(
             pipe,
