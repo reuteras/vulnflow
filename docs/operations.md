@@ -362,7 +362,7 @@ show the one they can.
 | Report | When | Sent | Contents |
 | --- | --- | --- | --- |
 | daily | 06:30 | only when something needs action | upstream updates to deploy, new P1/P2 alerts from OpenCVE, new CISA KEV entries that hit a finding or a followed vendor, new critical/high/KEV findings in Dependency-Track, hosts that stopped pushing |
-| weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, accepted risks (`eol`/`certified` projects and their review dates), projects without asset context, every upstream version |
+| weekly | Monday 06:45 | always | the same, plus all of the week's new and resolved findings, open findings per team and severity, accepted risks (`eol`/`certified` projects and their review dates), vendor systems (open findings and how long the oldest has waited), projects without asset context, every upstream version |
 
 Set the recipient and install the timers once, as the user that runs `./poc.sh`:
 

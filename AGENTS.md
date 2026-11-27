@@ -45,7 +45,8 @@ Guidance for AI coding agents working in this repository. Human-facing docs are 
   appliance devices from `devices.csv` (gitignored and dockerignored like `machines.toml`;
   `devices.example.csv` is the committed template) become one-component SBOMs `net:<name>`
   with the device's NVD CPE. `config.load_machines` loads the list too, so the asset
-  context of `net:` projects reaches ranking, reports and finding-watch. Uploads use
+  context of `net:` projects reaches ranking, reports and finding-watch; every device is
+  flagged `vendor` (the list's `vendor` column is the NVD vendor name). Uploads use
   `DT_API_KEY`, like `github-sboms`; re-upload at least daily or `prune` retires them.
 - `prune` (`vulnflow/prune.py`, run by every `dt2dojo` round) carries analyses to new project
   versions and deactivates stale ones with its own team `vulnflow-maintenance`

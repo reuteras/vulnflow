@@ -2,7 +2,8 @@
 
 machines.toml says what each thing that runs is exposed to and how much it matters
 (docs/exposure.md, step 1). This module turns that into project tags in Dependency-Track
-(`exposure-internet`, `input-public`, `crit-high`, `flag-eol`, `flag-certified`), which
+(`exposure-internet`, `input-public`, `crit-high`, `flag-eol`, `flag-certified`,
+`flag-vendor`), which
 dt2dojo then carries to DefectDojo. Scoring doesn't use them yet (step 2).
 
 Where a project's context comes from, first match wins:
@@ -98,6 +99,7 @@ class ContextResult:
     errors: list[str] = field(default_factory=list)
     # eol/certified projects (accepted risks), with the team whose tag listed them first
     flagged: list[tuple[str, DTProject, AssetContext]] = field(default_factory=list)
+    vendors: list[tuple[str, DTProject, AssetContext]] = field(default_factory=list)
 
 
 def apply_context(
@@ -120,6 +122,8 @@ def apply_context(
             ctx = context_for(machines, p)
             if ctx is not None and (ctx.eol or ctx.certified):
                 res.flagged.append((team.key, p, ctx))
+            if ctx is not None and ctx.vendor:
+                res.vendors.append((team.key, p, ctx))
             if ctx is None:
                 host = host_of(p)
                 res.unknown.append(f"{label} (host {host})" if host else label)

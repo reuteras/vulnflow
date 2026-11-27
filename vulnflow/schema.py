@@ -66,6 +66,11 @@ def machines_schema(inv: Inventory) -> dict[str, Any]:
         "criticality": _enum(CRITICALITIES, CRITICALITY_HELP, "How much it matters"),
         "eol": {"type": "boolean", "description": "No more patches from upstream."},
         "certified": {"type": "boolean", "description": "Changes follow a certification cycle."},
+        "vendor": {
+            "type": "boolean",
+            "description": "An appliance or vendor system: fixes come from the vendor (the weekly "
+            "report's vendor section).",
+        },
         "review": {
             "type": "string",
             "format": "date",

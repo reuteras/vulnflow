@@ -6,8 +6,8 @@
 place**: the asset model and its tags ([Step 1 in use](#step-1-in-use)), the scoring of
 Dependency-Track findings with them ([Step 2 in use](#step-2-in-use)), the tiers in
 DefectDojo ([Step 3 in use](#step-3-in-use)), routing to chat and paging
-([Step 4 in use](#step-4-in-use)) and the report sections ([Step 6 in use](#step-6-in-use)),
-except the vendor section; of the importers (step 5), the device list is
+([Step 4 in use](#step-4-in-use)) and the report sections ([Step 6 in use](#step-6-in-use));
+of the importers (step 5), the device list is
 ([Step 5 in use](#step-5-in-use)); CMDB, MDM and attack-surface sources are not. Before this, vulnflow ranked a CVE by threat alone
 (KEV, CIRCL sightings, EPSS, CVSS; see [Priority tiers](concepts.md#priority-tiers)), so the
 same CVE got the same tier on a public web service and on a locked-down admin workstation;
@@ -181,9 +181,7 @@ Every alert carries its reasons, as tiers do today, extended with the context, f
    not scale), the MDM for OS versions per device, and an external attack-surface source
    for drift. First: a device list (CSV/JSON) for network and appliance firmware
    ([Step 5 in use](#step-5-in-use)).
-6. **Report.** The sections listed above ([Step 6 in use](#step-6-in-use)). The vendor
-   section (open CVEs, days waiting for a fix) waits for step 5: appliances are only
-   OpenCVE subscriptions today, with no versions to count from.
+6. **Report.** The sections listed above ([Step 6 in use](#step-6-in-use)).
 
 Steps 1–4 and 6 fit the current design and are built and tested offline. The rest of
 step 5 depends on the CMDB, MDM and attack-surface tools in use; it starts with the
@@ -364,8 +362,9 @@ NVD vendor, product and running version, its team, and the same context keys as
 `machines.toml`. `dt2dojo` uploads each one as a one-component SBOM `net:<name>` with the
 device's CPE (`cpe:2.3:o:fortinet:fortios:7.4.3:…`), so Dependency-Track matches it against
 NVD's version ranges and the ranking, tiers, chat and reports treat it like any project.
-The list's context columns are the project's asset context; `[projects."net:<name>"]` in
-`machines.toml` still overrides them. Details: [SBOMs: From a device
+The list's context columns are the project's asset context, and every device is flagged
+`vendor` (its fixes come from the vendor); `[projects."net:<name>"]` in `machines.toml`
+still overrides them. Details: [SBOMs: From a device
 list](sboms.md#from-a-device-list).
 
 This answers the network, virt and itmgmt teams' problem from issue #108: OpenCVE product
@@ -391,6 +390,12 @@ asset context too:
   row says **overdue** and the report counts as having something to act on. These are
   whole systems; accepted risks on single findings (`ignore` with `review by <date>`) are
   in the team newsletter.
+- **Vendor systems**, weekly: every project flagged `vendor` (`vendor = true` in
+  `machines.toml`, and every device from the device list), its team, its open P1/P2 and
+  total findings, and the age of the oldest open finding: how long the vendor's fix has
+  been awaited. The age is from Dependency-Track's first match (`attributedOn`), the
+  earliest over the project's versions, so a firmware upgrade that is still affected
+  doesn't reset it.
 - **Projects without context**, weekly: active projects that `machines.toml` gives no
   exposure or criticality, so their findings are ranked without it. `python3 -m vulnflow
   context --toml` prints entries for them to fill in.
@@ -402,5 +407,3 @@ criticality = "critical"
 eol = true
 review = 2027-03-01   # a TOML date or "2027-03-01"; only with eol or certified
 ```
-
-Not yet: the vendor section, which needs versioned appliances (step 5).
