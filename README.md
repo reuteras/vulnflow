@@ -1,4 +1,4 @@
-# vulnflow PoC — CVE tracking per team, from servers and code to network and Windows
+# <img src="docs/img/vulnflow-logo.svg" alt="vulnflow logo" width="96" align="right"> vulnflow PoC — CVE tracking per team, from servers and code to network and Windows
 
 A proof of concept for three-layer vulnerability tracking, all self-hosted:
 
