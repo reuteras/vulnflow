@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="t">
+  <title id="t">vulnflow</title>
+  <style>
+    svg { --ink: #12303f; --flow: #1f7a8c; --alert: #d9822b; }
+    @media (prefers-color-scheme: dark) { svg { --ink: #e3eef2; --flow: #5cc3d4; --alert: #f0a24a; } }
+    .ink { stroke: var(--ink); }
+    .flow { stroke: var(--flow); }
+    .alert { fill: var(--alert); }
+  </style>
+  <g fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path class="ink" d="M32 5 54 13V30C54 45 44 54 32 59 20 54 10 45 10 30V13Z"/>
+    <path class="flow" d="M15 34H23L27.5 22 33.5 44 38 30H49"/>
+  </g>
+  <circle class="alert" cx="27.5" cy="21" r="4.5"/>
+</svg>
